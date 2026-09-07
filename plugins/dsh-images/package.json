@@ -1,0 +1,5 @@
+{
+  "name": "dsh-images", "version": "0.1.0", "private": true, "type": "module",
+  "main": "index.js", "exports": {".": "./index.js", "./client": "./client.js", "./package.json": "./package.json"},
+  "dsh": {"bundle": {"patch": "./cordis.patch.yml"}, "client": {"platform": "web", "inject": ["@deepseek-ai/dsh-client-ui-conversation", "@deepseek-ai/dsh-client-ui-tool"], "external": ["react"]}}
+}

@@ -1,0 +1,17 @@
+.build/
+DerivedData/
+output/
+research/
+screenshots/
+terminal/
+Config/Local.xcconfig
+*.xcuserstate
+xcuserdata/
+.DS_Store
+._*
+*.ipa
+*.mobileprovision
+*.p12
+.env
+.env.*
+!.env.example
