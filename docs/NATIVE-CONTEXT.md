@@ -1,6 +1,6 @@
-# Native model request accounting
+# Native context and request accounting
 
-C1 prepares and measures model requests in HarnessCore. C2 exposes those observations in the shared Shell/Chat indicator and request inspector, and preserves them in diagnostic and presentation journals. General history compaction remains C3–C5; the conversation is still retained and sent in full, with the existing bounded terminal excerpt transformation.
+C1 prepares and measures model requests in HarnessCore. C2 exposes those observations in the shared Shell/Chat indicator and request inspector, and preserves them in diagnostic and presentation journals. C3 adds a durable model-only context projection. Automatic summary generation and user controls remain C4–C5; ordinary sessions still send their full history until a projection is explicitly installed through the core API, with the existing bounded terminal excerpt transformation.
 
 ## Configuration
 
@@ -52,6 +52,30 @@ Each stage carries an optional, self-contained request snapshot, written through
 NativeWire preserves unknown envelope fields and the complete extensible request object during decode/encode/journal replay, including nested values and large integer values. Unknown significant operations/stages produce up to eight bounded protocol notes. Known PTY, session, approval and workspace control events are not reported as unsupported. Malformed/future request objects do not disconnect the client. Known numeric fields are validated before display or arithmetic.
 
 **Share request diagnostics** exports an allowlist of scalar metadata. It excludes the raw extensible object, endpoint, headers, credentials, prompts, reasoning and tool output. The underlying conversation journal still contains private conversation and terminal data; it is not a diagnostic export.
+
+## Durable context projection (C3)
+
+The execution journal remains the source of truth for history, tool dispatch and recovery. `load(session:)` still returns original events. `loadSequenced(session:after:)` additionally exposes SQLite's global sequence numbers, filtered to one session; these are not array indexes or turn IDs.
+
+Opening an unversioned event database migrates it to schema version 1 in one transaction. It adds `context_state`, initializes each session's version from its existing model messages, and retains event bodies/sequences, workspace bindings and pending commands. It does not rewrite or delete source rows. Migration scans one event at a time. Reopening is idempotent; unsupported future database/projection versions fail explicitly. A failed migration rolls back its schema changes and version marker.
+
+`loadContext(session:)` returns an immutable snapshot with the session ID, current version, optional projection and sequenced uncovered tail. Without a projection its messages equal the legacy history. A projection stores summary text, its covered source prefix and provenance (model, summary request IDs, creation time, source/applied versions). The model receives a labelled summary at user priority followed by uncovered messages. Summary text is neither a new system instruction nor a user-visible assistant answer; it contains no executable tool calls. The execution and presentation journals retain the complete original history.
+
+`replaceContext(session:expectedVersion:through:summary:provenance:owner:)` atomically replaces the projection and appends a `context.compacted` audit carrying only range/version/provenance metadata. The audit has no `event.message`, so legacy transcript readers cannot add the summary on top of the full conversation. Source event rows are never changed. The SQLite transaction has no actor suspension point. It compares the current version and requires the active execution owner's token when a session is running; idle core callers may omit the token.
+
+The version advances for every admitted model message (including inbox claims and recovery tool results), and once per successful projection replacement. Audit, raw PTY and pending inbox admission/removal do not advance it. Appending a message invalidates a *prepared replacement's version*, while the existing committed summary remains valid and the new message enters its uncovered tail. A replacement must extend a prefix of that same session, end at an actual model message and retain complete tool-call/result groups. Empty summaries, invalid provenance, stale versions and incomplete groups are rejected before mutation. Source versions and audit provenance roll back together if any write fails.
+
+Recovery always reads the original execution log and closes unfinished tool pairs before the engine builds the projected history. `TOOL_OUTCOME_UNKNOWN` and `TOOL_NOT_STARTED` remain in the model's tail; historical tool calls are not dispatched again. The projection never writes to the Shell/Chat presentation journal, raw PTY output, drafts or pane state.
+
+C3 is storage and consumption infrastructure only. It does not call a model to summarize, select protected recent turns, prove token reduction, implement operation receipts or expose `/compact`. Those checks and orchestration belong to C4–C5. This is also not journal retention: the original history continues to occupy disk space.
+
+## C3 verification
+
+On 2026-09-08, `sh scripts/check.sh` passed with **102 Swift core/host tests**, client protocol/Markdown/Shell/transcript checks and **11 mocked voice tests**. Added cases cover legacy migration/reopen with byte-identical source rows, retained workspace/inbox data, future schema rejection, migration rollback, global sequences/session boundaries, durable summary plus tail, version invalidation, atomic replacement/audit rollback through an injected SQLite trigger, failed message-batch rollback and complete multi-tool boundaries.
+
+The engine test reopens a projected database with interrupted tools, repairs it, runs two new turns and verifies the exact model history and **zero historical tool dispatches**. The host recovery fixture separately checks retained Shell/Chat messages and byte-exact raw terminal output. The isolated WebSocket/host restart probe checks ordinary request metadata and replay through the migrated store; it does not exercise a compactor, which is not implemented yet.
+
+No UI code changed in C3, so Mac/iOS builds and device checks were not repeated. Production databases/services and Home Rig were not touched.
 
 ## C2 verification
 

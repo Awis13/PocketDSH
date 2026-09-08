@@ -91,10 +91,11 @@ public actor SessionEngine {
         try Task.checkCancellation()
         try await store.acquireExecution(session: id, owner: owner)
         try await store.bindWorkspace(tools.workspaceIdentity, session: id)
-        var events = try await store.load(session: id)
+        let events = try await store.load(session: id)
         let repairs = Self.recovery(events)
-        if !repairs.isEmpty { try await store.append(repairs, session: id); events += repairs }
-        var history = events.compactMap(\.message)
+        if !repairs.isEmpty { try await store.append(repairs, session: id) }
+        // Repair the original execution log before resolving the model-only view.
+        var history = try await store.loadContext(session: id).messages
         if let prompt { _ = try await store.enqueue(session: id, id: UUID().uuidString, prompt: prompt, mode: .queue) }
         var firstTurn = true
         var lastAnswer = ""
@@ -200,7 +201,7 @@ public actor SessionEngine {
         for event in events {
             if event.kind == "turn.started" { open = true; pending = []; started = [] }
             if event.kind == "turn.ended" { open = false; pending = []; started = [] }
-            if let message = event.message {
+            if let message = event.modelMessage {
                 if message.role == "assistant" { pending += message.calls }
                 if message.role == "tool", let id = message.toolCallID { pending.removeAll { $0.id == id } }
             }

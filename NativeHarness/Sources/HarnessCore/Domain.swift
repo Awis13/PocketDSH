@@ -42,6 +42,7 @@ public struct ModelReply: Sendable {
 }
 
 public struct SessionEvent: Codable, Sendable {
+    public var contextCompaction: ContextCompactionMetadata?
     public var commandID: String?
     public var trace: TraceContext?
     public var kind: String

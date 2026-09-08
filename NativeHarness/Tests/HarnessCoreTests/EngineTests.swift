@@ -22,6 +22,17 @@ private actor WaitingProvider: TestModelProvider {
     }
 }
 
+private actor RecoveryCountingTools: ToolExecutor {
+    nonisolated let workspaceIdentity: String
+    nonisolated let definitions: [ToolDefinition] = []
+    private(set) var dispatches = 0
+    init(workspace: String) { workspaceIdentity = workspace }
+    func execute(_ call: ToolCall) async throws -> String {
+        dispatches += 1
+        return "unexpected historical dispatch"
+    }
+}
+
 @MainActor final class EngineTests: XCTestCase {
     func directory() throws -> URL {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
@@ -71,6 +82,49 @@ private actor WaitingProvider: TestModelProvider {
         let request = await provider.requests[0]
         XCTAssertEqual(request.map(\.role), ["assistant", "tool", "user"])
         XCTAssertTrue(request[1].content.contains("UNKNOWN"))
+    }
+
+    func testReopenedProjectionRepairsCrashTailAndNeverRedispatchesOldTools() async throws {
+        let root = try directory()
+        let path = root.appendingPathComponent("projected.sqlite").path
+        let calls = [ToolCall(id: "started", name: "edit_file", arguments: "{}"),
+                     ToolCall(id: "unstarted", name: "shell", arguments: "{}")]
+        var projectedMessage: Message!
+        do {
+            let original = try EventStore(path: path)
+            try await original.append([.init("message", message: .init(role: "user", content: "old request")),
+                .init("message", message: .init(role: "assistant", content: "old answer"))], session: "a")
+            let projection = try await original.replaceContext(session: "a", expectedVersion: 2, through: 2,
+                summary: "old facts", provenance: .init(model: "fixture", requestIDs: ["summary"]))
+            projectedMessage = projection.message
+            try await original.append([.init("turn.started"),
+                .init("message", message: .init(role: "assistant", content: "inspect", calls: calls)),
+                .init("tool.started", call: calls[0])], session: "a")
+        }
+        let store = try EventStore(path: path)
+        let tools = RecoveryCountingTools(workspace: root.path)
+        let provider = ScriptedProvider([.init(message: .init(role: "assistant", content: "resumed")),
+            .init(message: .init(role: "assistant", content: "continued"))])
+        let engine = SessionEngine(id: "a", store: store, provider: provider, tools: tools)
+        _ = try await engine.run(prompt: "verify before retry")
+        _ = try await engine.run(prompt: "next turn")
+        let requests = await provider.requests
+        XCTAssertEqual(requests[0].map(\.role), ["user", "assistant", "tool", "tool", "user"])
+        XCTAssertEqual(requests[0][0], projectedMessage)
+        XCTAssertTrue(requests[0][2].content.hasPrefix("TOOL_OUTCOME_UNKNOWN"))
+        XCTAssertTrue(requests[0][3].content.hasPrefix("TOOL_NOT_STARTED"))
+        XCTAssertEqual(Array(requests[1].prefix(requests[0].count)), requests[0])
+        XCTAssertEqual(requests[1].suffix(2).map(\.content), ["resumed", "next turn"])
+        let count = await tools.dispatches
+        XCTAssertEqual(count, 0)
+        let events = try await store.load(session: "a")
+        XCTAssertTrue(SessionEngine.recovery(events).isEmpty)
+        XCTAssertEqual(events.compactMap(\.message).prefix(2).map(\.content), ["old request", "old answer"])
+        XCTAssertEqual(events.filter { $0.message?.toolCallID == "started" }.count, 1)
+        XCTAssertEqual(events.filter { $0.message?.toolCallID == "unstarted" }.count, 1)
+        let context = try await store.loadContext(session: "a")
+        XCTAssertEqual(context.messages[0], projectedMessage)
+        XCTAssertEqual(context.version, 10) // 2 original + replacement + call + 2 repairs + 4 new messages
     }
 
     func testSecondOwnerCannotOpenDatabase() throws {
