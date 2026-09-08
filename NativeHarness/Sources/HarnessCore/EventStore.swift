@@ -43,62 +43,93 @@ public actor EventStore {
     /// source rows, and the schema marker advances only with the committed state.
     private static func migrate(_ db: OpaquePointer) throws {
         let version = try rows(db, "PRAGMA user_version", []).first?.first
-        guard version == "0" || version == "1" else {
+        guard version == "0" || version == "1" || version == "2" else {
             throw HarnessError.storage("Unsupported event-store schema version: \(version ?? "unknown")")
         }
         guard sqlite3_exec(db, "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;", nil, nil, nil) == SQLITE_OK else {
             throw HarnessError.storage(String(cString: sqlite3_errmsg(db)))
         }
-        guard version == "0" else { return }
-        let schema = """
-        BEGIN IMMEDIATE;
-        CREATE TABLE IF NOT EXISTS events (
-          seq INTEGER PRIMARY KEY AUTOINCREMENT, session TEXT NOT NULL, body TEXT NOT NULL);
-        CREATE INDEX IF NOT EXISTS events_session ON events(session,seq);
-        CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, workspace TEXT NOT NULL);
-        CREATE TABLE IF NOT EXISTS commands (
-          seq INTEGER PRIMARY KEY AUTOINCREMENT, session TEXT NOT NULL, id TEXT NOT NULL,
-          prompt TEXT NOT NULL, mode TEXT NOT NULL, state TEXT NOT NULL,
-          UNIQUE(session,id));
-        CREATE INDEX IF NOT EXISTS commands_pending ON commands(session,state,seq);
-        CREATE TABLE context_state (
-          session TEXT PRIMARY KEY, version INTEGER NOT NULL CHECK(version >= 0),
-          projection TEXT);
-        """
-        do {
-            guard sqlite3_exec(db, schema, nil, nil, nil) == SQLITE_OK else {
-                throw HarnessError.storage(String(cString: sqlite3_errmsg(db)))
-            }
-            var statement: OpaquePointer?
-            guard sqlite3_prepare_v2(db, "SELECT session,body FROM events ORDER BY seq", -1, &statement, nil) == SQLITE_OK else {
-                throw HarnessError.storage(String(cString: sqlite3_errmsg(db)))
-            }
-            var counts: [String: Int64] = [:]
+        if version == "0" {
+            let schema = """
+            BEGIN IMMEDIATE;
+            CREATE TABLE IF NOT EXISTS events (
+              seq INTEGER PRIMARY KEY AUTOINCREMENT, session TEXT NOT NULL, body TEXT NOT NULL);
+            CREATE INDEX IF NOT EXISTS events_session ON events(session,seq);
+            CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, workspace TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS commands (
+              seq INTEGER PRIMARY KEY AUTOINCREMENT, session TEXT NOT NULL, id TEXT NOT NULL,
+              prompt TEXT NOT NULL, mode TEXT NOT NULL, state TEXT NOT NULL,
+              UNIQUE(session,id));
+            CREATE INDEX IF NOT EXISTS commands_pending ON commands(session,state,seq);
+            CREATE TABLE context_state (
+              session TEXT PRIMARY KEY, version INTEGER NOT NULL CHECK(version >= 0),
+              projection TEXT);
+            """
             do {
-                defer { sqlite3_finalize(statement) }
-                while true {
-                    let code = sqlite3_step(statement)
-                    if code == SQLITE_DONE { break }
-                    guard code == SQLITE_ROW, let session = sqlite3_column_text(statement, 0),
-                          let body = sqlite3_column_text(statement, 1) else {
-                        throw HarnessError.storage(String(cString: sqlite3_errmsg(db)))
-                    }
-                    let data = Data(bytes: body, count: Int(sqlite3_column_bytes(statement, 1)))
-                    if try JSONDecoder().decode(SessionEvent.self, from: data).modelMessage != nil {
-                        counts[String(cString: session), default: 0] += 1
+                guard sqlite3_exec(db, schema, nil, nil, nil) == SQLITE_OK else {
+                    throw HarnessError.storage(String(cString: sqlite3_errmsg(db)))
+                }
+                var statement: OpaquePointer?
+                guard sqlite3_prepare_v2(db, "SELECT session,body FROM events ORDER BY seq", -1, &statement, nil) == SQLITE_OK else {
+                    throw HarnessError.storage(String(cString: sqlite3_errmsg(db)))
+                }
+                var counts: [String: Int64] = [:]
+                do {
+                    defer { sqlite3_finalize(statement) }
+                    while true {
+                        let code = sqlite3_step(statement)
+                        if code == SQLITE_DONE { break }
+                        guard code == SQLITE_ROW, let session = sqlite3_column_text(statement, 0),
+                              let body = sqlite3_column_text(statement, 1) else {
+                            throw HarnessError.storage(String(cString: sqlite3_errmsg(db)))
+                        }
+                        let data = Data(bytes: body, count: Int(sqlite3_column_bytes(statement, 1)))
+                        if try JSONDecoder().decode(SessionEvent.self, from: data).modelMessage != nil {
+                            counts[String(cString: session), default: 0] += 1
+                        }
                     }
                 }
+                for (session, count) in counts {
+                    _ = try rows(db, "INSERT INTO context_state(session,version) VALUES (?,?)", [session,String(count)])
+                }
+                guard sqlite3_exec(db, "PRAGMA user_version=1; COMMIT;", nil, nil, nil) == SQLITE_OK else {
+                    throw HarnessError.storage(String(cString: sqlite3_errmsg(db)))
+                }
+            } catch {
+                sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
+                throw error
             }
-            for (session, count) in counts {
-                _ = try rows(db, "INSERT INTO context_state(session,version) VALUES (?,?)", [session,String(count)])
-            }
-            guard sqlite3_exec(db, "PRAGMA user_version=1; COMMIT;", nil, nil, nil) == SQLITE_OK else {
+        }
+        if version != "2" {
+            guard sqlite3_exec(db, """
+                BEGIN IMMEDIATE;
+                CREATE TABLE context_operations(session TEXT NOT NULL, id TEXT NOT NULL,
+                  receipt TEXT NOT NULL, fingerprint TEXT NOT NULL, PRIMARY KEY(session,id));
+                PRAGMA user_version=2;
+                COMMIT;
+                """, nil, nil, nil) == SQLITE_OK else {
+                sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
                 throw HarnessError.storage(String(cString: sqlite3_errmsg(db)))
             }
-        } catch {
-            sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
-            throw error
         }
+        // Interrupted operations are durable refusals, never work to resume on open.
+        // The single-host lock is already held; no live owner can be using these rows.
+        guard sqlite3_exec(db, "BEGIN IMMEDIATE", nil, nil, nil) == SQLITE_OK else {
+            throw HarnessError.storage(String(cString: sqlite3_errmsg(db)))
+        }
+        do {
+            for row in try rows(db, "SELECT session,id,receipt FROM context_operations", []) {
+                var receipt = try JSONDecoder().decode(CompactionReceipt.self, from: Data(row[2].utf8))
+                if receipt.state == .running {
+                    receipt.state = .interrupted; receipt.code = CompactionError.interrupted.rawValue
+                    let json = String(decoding: try JSONEncoder().encode(receipt), as: UTF8.self)
+                    _ = try rows(db, "UPDATE context_operations SET receipt=? WHERE session=? AND id=?", [json,row[0],row[1]])
+                }
+            }
+            guard sqlite3_exec(db, "COMMIT", nil, nil, nil) == SQLITE_OK else {
+                throw HarnessError.storage(String(cString: sqlite3_errmsg(db)))
+            }
+        } catch { sqlite3_exec(db, "ROLLBACK", nil, nil, nil); throw error }
     }
 
     public func bindWorkspace(_ workspace: String, session: String) throws {
@@ -315,54 +346,121 @@ public actor EventStore {
                                owner: String? = nil) throws -> ContextProjection {
         guard executionOwners[session] == owner else { throw HarnessError.busy }
         return try transaction {
-            try Task.checkCancellation()
-            let current = try loadContext(session: session)
-            guard current.version == expectedVersion else { throw ContextProjectionError.staleVersion }
-            guard current.version < Int64.max,
-                  !summary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                  !provenance.model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                  !provenance.requestIDs.isEmpty,
-                  provenance.requestIDs.allSatisfy({ !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }),
-                  Set(provenance.requestIDs).count == provenance.requestIDs.count,
-                  provenance.createdAt.timeIntervalSince1970.isFinite else { throw ContextProjectionError.invalidSummary }
-            let prefix = current.tail.filter { $0.sequence <= sequence && $0.event.modelMessage != nil }
-            guard let first = prefix.first, prefix.last?.sequence == sequence,
-                  sequence > (current.projection?.metadata.coveredThrough ?? 0) else {
-                throw ContextProjectionError.invalidBoundary
-            }
-            // Storage rejects cut tool groups too. Selection/recent-turn protection
-            // and proving that a summary reduces the prepared request belong to C4.
-            var pending: Set<String> = []
-            for row in prefix {
-                guard let message = row.event.modelMessage else { continue }
-                if message.role == "tool" {
-                    guard let id = message.toolCallID, pending.remove(id) != nil else {
+            try replaceContextInTransaction(session: session, expectedVersion: expectedVersion,
+                through: sequence, summary: summary, provenance: provenance)
+        }
+    }
+
+    private func replaceContextInTransaction(session: String, expectedVersion: Int64, through sequence: Int64,
+                                             summary: String, provenance: ContextSummaryProvenance) throws -> ContextProjection {
+        try Task.checkCancellation()
+        let current = try loadContext(session: session)
+        guard current.version == expectedVersion else { throw ContextProjectionError.staleVersion }
+        guard current.version < Int64.max,
+              !summary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !provenance.model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !provenance.requestIDs.isEmpty,
+              provenance.requestIDs.allSatisfy({ !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }),
+              Set(provenance.requestIDs).count == provenance.requestIDs.count,
+              provenance.createdAt.timeIntervalSince1970.isFinite else { throw ContextProjectionError.invalidSummary }
+        let prefix = current.tail.filter { $0.sequence <= sequence && $0.event.modelMessage != nil }
+        guard let first = prefix.first, prefix.last?.sequence == sequence,
+              sequence > (current.projection?.metadata.coveredThrough ?? 0) else {
+            throw ContextProjectionError.invalidBoundary
+        }
+        // Storage rejects cut tool groups too. Selection/recent-turn protection
+        // and proving that a summary reduces the prepared request belong to C4.
+        var pending: Set<String> = []
+        for row in prefix {
+            guard let message = row.event.modelMessage else { continue }
+            if message.role == "tool" {
+                guard let id = message.toolCallID, pending.remove(id) != nil else {
+                    throw ContextProjectionError.invalidBoundary
+                }
+            } else {
+                guard pending.isEmpty else { throw ContextProjectionError.invalidBoundary }
+                for call in message.calls {
+                    guard message.role == "assistant", !call.id.isEmpty, pending.insert(call.id).inserted else {
                         throw ContextProjectionError.invalidBoundary
-                    }
-                } else {
-                    guard pending.isEmpty else { throw ContextProjectionError.invalidBoundary }
-                    for call in message.calls {
-                        guard message.role == "assistant", !call.id.isEmpty, pending.insert(call.id).inserted else {
-                            throw ContextProjectionError.invalidBoundary
-                        }
                     }
                 }
             }
-            guard pending.isEmpty else { throw ContextProjectionError.invalidBoundary }
-            let metadata = ContextCompactionMetadata(sourceVersion: current.version, version: current.version + 1,
-                coveredFrom: current.projection?.metadata.coveredFrom ?? first.sequence,
-                coveredThrough: sequence, provenance: provenance)
-            let projection = ContextProjection(formatVersion: 1, summary: summary, metadata: metadata)
-            let json = String(decoding: try JSONEncoder().encode(projection), as: UTF8.self)
-            try Task.checkCancellation()
-            _ = try rows("UPDATE context_state SET version=?,projection=? WHERE session=? AND version=?",
-                [String(metadata.version),json,session,String(expectedVersion)])
-            guard sqlite3_changes(connection.db) == 1 else { throw ContextProjectionError.staleVersion }
-            var audit = SessionEvent("context.compacted")
-            audit.contextCompaction = metadata
-            try insertEvents([audit], session: session)
-            return projection
         }
+        guard pending.isEmpty else { throw ContextProjectionError.invalidBoundary }
+        let metadata = ContextCompactionMetadata(sourceVersion: current.version, version: current.version + 1,
+            coveredFrom: current.projection?.metadata.coveredFrom ?? first.sequence,
+            coveredThrough: sequence, provenance: provenance)
+        let projection = ContextProjection(formatVersion: 1, summary: summary, metadata: metadata)
+        let json = String(decoding: try JSONEncoder().encode(projection), as: UTF8.self)
+        try Task.checkCancellation()
+        _ = try rows("UPDATE context_state SET version=?,projection=? WHERE session=? AND version=?",
+            [String(metadata.version),json,session,String(expectedVersion)])
+        guard sqlite3_changes(connection.db) == 1 else { throw ContextProjectionError.staleVersion }
+        var audit = SessionEvent("context.compacted")
+        audit.contextCompaction = metadata
+        try insertEvents([audit], session: session)
+        return projection
+    }
+
+    public func compactionReceipt(session: String, operationID: String) throws -> CompactionReceipt? {
+        guard let row = try rows("SELECT receipt FROM context_operations WHERE session=? AND id=?", [session,operationID]).first else { return nil }
+        return try JSONDecoder().decode(CompactionReceipt.self, from: Data(row[0].utf8))
+    }
+
+    func beginCompaction(session: String, owner: String, operationID: String,
+                         sourceVersion: Int64, fingerprint: String, before: ContextBudget) throws -> CompactionReceipt {
+        guard executionOwners[session] == owner else { throw HarnessError.busy }
+        guard !operationID.isEmpty, operationID.utf8.count <= 128, !operationID.contains("\0") else {
+            throw HarnessError.invalid("Invalid compaction operation ID")
+        }
+        return try transaction {
+            if let old = try compactionReceipt(session: session, operationID: operationID) { return old }
+            guard try loadContext(session: session).version == sourceVersion else { throw ContextProjectionError.staleVersion }
+            let receipt = CompactionReceipt(operationID: operationID, state: .running, sourceVersion: sourceVersion, before: before)
+            let json = String(decoding: try JSONEncoder().encode(receipt), as: UTF8.self)
+            _ = try rows("INSERT INTO context_operations(session,id,receipt,fingerprint) VALUES (?,?,?,?)", [session,operationID,json,fingerprint])
+            try insertEvents([SessionEvent("context.compaction.started", detail: operationID)], session: session)
+            return receipt
+        }
+    }
+
+    func finishCompaction(session: String, owner: String, receipt: CompactionReceipt) throws -> CompactionReceipt {
+        guard executionOwners[session] == owner else { throw HarnessError.busy }
+        return try transaction {
+            guard let old = try compactionReceipt(session: session, operationID: receipt.operationID) else { throw failure() }
+            guard old.state == .running else { return old }
+            guard receipt.state == .failed || receipt.state == .cancelled else { throw HarnessError.invalid("Invalid terminal compaction receipt") }
+            try writeCompactionReceipt(receipt, session: session)
+            try insertEvents([SessionEvent("context.compaction.ended", detail: receipt.code)], session: session)
+            return receipt
+        }
+    }
+
+    func commitCompaction(session: String, owner: String, operationID: String, plan: CompactionPlan) throws -> CompactionReceipt {
+        guard executionOwners[session] == owner else { throw HarnessError.busy }
+        return try transaction {
+            guard let old = try compactionReceipt(session: session, operationID: operationID), old.state == .running,
+                  old.sourceVersion == plan.snapshot.version,
+                  try rows("SELECT fingerprint FROM context_operations WHERE session=? AND id=?", [session,operationID]).first?.first == plan.original.fingerprint else {
+                throw ContextProjectionError.staleVersion
+            }
+            // Linearization: cancellation checked immediately before the first
+            // projection write. Once this transaction commits, completion wins a
+            // later cancellation; the caller must return this persisted receipt.
+            let projection = try replaceContextInTransaction(session: session, expectedVersion: plan.snapshot.version,
+                through: plan.through, summary: plan.summary, provenance: plan.provenance)
+            var receipt = old
+            receipt.state = .completed; receipt.version = projection.metadata.version
+            receipt.after = plan.after; receipt.summaryRequests = plan.provenance.requestIDs.count
+            try writeCompactionReceipt(receipt, session: session)
+            return receipt
+        }
+    }
+
+    private func writeCompactionReceipt(_ receipt: CompactionReceipt, session: String) throws {
+        let json = String(decoding: try JSONEncoder().encode(receipt), as: UTF8.self)
+        _ = try rows("UPDATE context_operations SET receipt=? WHERE session=? AND id=?", [json,session,receipt.operationID])
+        guard sqlite3_changes(connection.db) == 1 else { throw failure() }
     }
 
     private func failure() -> HarnessError { .storage(String(cString: sqlite3_errmsg(connection.db))) }

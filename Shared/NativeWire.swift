@@ -186,7 +186,7 @@ struct NativeRequestInfo: Codable, Sendable, Equatable, Identifiable {
     var turnID: String? { string("turnID") }
     var validIdentity: Bool { id != "unknown" && id.count <= 128 && turnID != nil && turnID!.count <= 128 }
     var stage: String { string("stage") ?? "unknown" }
-    var isFinished: Bool { ["modelCompleted", "failed", "cancelled", "interrupted"].contains(stage) }
+    var isFinished: Bool { ["modelCompleted", "failed", "cancelled", "interrupted", "superseded"].contains(stage) }
     var inputKind: String { string("budget.input.kind") ?? "unknown" }
     var inputTokens: Int? { ["exact", "estimated"].contains(inputKind) ? tokens("budget.input.tokens") : nil }
     var capacity: Int? { tokens("budget.capabilities.capacity.tokens").flatMap { $0 > 0 ? $0 : nil } }
@@ -203,7 +203,7 @@ struct NativeRequestInfo: Codable, Sendable, Equatable, Identifiable {
         guard !isFinished else { return }
         fields["stage"] = .string("interrupted"); fields["code"] = .string("HOST_RESTARTED")
     }
-    static let knownStages: Set<String> = Set("accepted restoring ready preparing measuring measured requesting headers firstData firstReasoning firstText modelCompleted toolStarted toolCompleted toolFailed persisting cancellationRequested completed cancelled failed queued steered turnCompleted interrupted".split(separator: " ").map(String.init))
+    static let knownStages: Set<String> = Set("accepted restoring ready preparing measuring measured requesting headers firstData firstReasoning firstText modelCompleted toolStarted toolCompleted toolFailed persisting cancellationRequested completed cancelled failed queued steered turnCompleted interrupted superseded".split(separator: " ").map(String.init))
     /// Removes controls and bounds display of unfamiliar protocol names.
     static func label(_ text: String) -> String {
         String(text.unicodeScalars.filter { !CharacterSet.controlCharacters.contains($0) }.prefix(96))
@@ -226,6 +226,7 @@ extension NativeRequestInfo {
         case "firstReasoning": return "Reasoning"
         case "firstText": return "Responding"
         case "modelCompleted": return "Response complete"
+        case "superseded": return "Preparation complete; not sent"
         case "failed": return "Request failed"
         case "cancelled": return "Stopped"
         case "interrupted": return "Interrupted"

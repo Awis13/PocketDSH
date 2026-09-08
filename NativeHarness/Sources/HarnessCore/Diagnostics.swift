@@ -20,6 +20,7 @@ public struct DiagnosticStage: RawRepresentable, Codable, Sendable, Hashable {
     public static let ready = Self(rawValue: "ready")
     public static let preparing = Self(rawValue: "preparing")
     public static let measuring = Self(rawValue: "measuring")
+    public static let superseded = Self(rawValue: "superseded")
     public static let measured = Self(rawValue: "measured")
     public static let requesting = Self(rawValue: "requesting")
     public static let headers = Self(rawValue: "headers")
@@ -65,6 +66,7 @@ public struct RequestTiming: Codable, Sendable {
     public let requestID: String
     public var turnID: String?
     public var purpose: String?
+    public var dispatched: Bool?
     public var stage: String?
     public var code: String?
     public var budget: ContextBudget?
@@ -107,9 +109,9 @@ struct RequestLedger {
         if let request = event.request { requests[i] = request; return }
         // Tool execution / final persistence must not inflate model latency or
         // change a completed request into a failed tool operation.
-        if ["modelCompleted", "failed", "cancelled"].contains(requests[i].stage ?? "") { return }
+        if ["modelCompleted", "failed", "cancelled", "superseded"].contains(requests[i].stage ?? "") { return }
         let stages: Set<DiagnosticStage> = [.preparing, .measuring, .measured, .requesting, .headers,
-            .firstData, .firstReasoning, .firstText, .modelCompleted, .failed, .cancelled]
+            .firstData, .firstReasoning, .firstText, .modelCompleted, .failed, .cancelled, .superseded]
         guard stages.contains(event.stage) else { return }
         requests[i].stage = event.stage.rawValue; requests[i].code = event.code
         requests[i].elapsedMS = max(0, event.elapsedMS - (started[id] ?? event.elapsedMS))
@@ -120,7 +122,7 @@ struct RequestLedger {
         if event.stage == .measured, let start = measuring[id] {
             requests[i].measurementMS = max(0, event.elapsedMS - start)
         }
-        if event.stage == .requesting, dispatched[id] == nil { dispatched[id] = event.elapsedMS }
+        if event.stage == .requesting, dispatched[id] == nil { dispatched[id] = event.elapsedMS; requests[i].dispatched = true }
         guard let sent = dispatched[id] else { return }
         let ms = max(0, event.elapsedMS - sent)
         switch event.stage {
@@ -132,9 +134,9 @@ struct RequestLedger {
         default: break
         }
     }
-    mutating func attach(budget: ContextBudget?, usage: ProviderUsage?, requestID: String?) {
+    mutating func attach(budget: ContextBudget?, usage: ProviderUsage?, requestID: String?, purpose: String) {
         guard let i = requests.firstIndex(where: { $0.requestID == requestID }) else { return }
-        requests[i].budget = budget; requests[i].usage = usage
+        requests[i].budget = budget; requests[i].usage = usage; requests[i].purpose = purpose
     }
 }
 
@@ -151,6 +153,7 @@ public final class DiagnosticTrace: @unchecked Sendable {
     private var ledger = RequestLedger()
     private var budget: ContextBudget?
     private var usage: ProviderUsage?
+    private var purpose = "conversation"
     private var context: TraceContext
     private let sink: @Sendable (DiagnosticEvent) -> Void
     public init(sessionID: String = UUID().uuidString, sink: @escaping @Sendable (DiagnosticEvent) -> Void = { _ in }) {
@@ -160,10 +163,10 @@ public final class DiagnosticTrace: @unchecked Sendable {
         self.sink = sink
     }
 
-    public func beginRequest() {
+    public func beginRequest(purpose: String = "conversation") {
         lock.lock(); defer { lock.unlock() }
         context.stepID = UUID().uuidString; context.requestID = UUID().uuidString; context.toolID = nil
-        budget = nil; usage = nil
+        budget = nil; usage = nil; self.purpose = purpose
         record(.preparing)
     }
     public func setBudget(_ value: ContextBudget) {
@@ -189,7 +192,7 @@ public final class DiagnosticTrace: @unchecked Sendable {
         var event = DiagnosticEvent(sequence: sequence, elapsedMS: Self.ms(started.duration(to: now)),
             sincePreviousMS: Self.ms(previous.duration(to: now)), context: context, stage: stage, code: code)
         ledger.append(event)
-        ledger.attach(budget: budget, usage: usage, requestID: context.requestID)
+        ledger.attach(budget: budget, usage: usage, requestID: context.requestID, purpose: purpose)
         event.request = ledger.requests.last(where: { $0.requestID == context.requestID })
         previous = now
         if records.count == 256 { records.removeFirst(); dropped += 1 }
@@ -206,6 +209,10 @@ public final class DiagnosticTrace: @unchecked Sendable {
     }
     static func errorCode(_ error: Error) -> String {
         if error is CancellationError || (error as? URLError)?.code == .cancelled { return "CANCELLED" }
+        if let error = error as? CompactionFailure { return error.receipt.code ?? "COMPACTION_FAILED" }
+        if let error = error as? CompactionError { return error.rawValue }
+        if error as? ContextProjectionError == .staleVersion { return "CONTEXT_STALE" }
+        if error is ContextProjectionError { return "CONTEXT_INVALID" }
         if let error = error as? HarnessError {
             switch error {
             case .busy: return "BUSY"

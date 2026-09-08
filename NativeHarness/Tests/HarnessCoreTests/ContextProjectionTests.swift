@@ -65,7 +65,7 @@ import CSQLite
             do { try await store.bindWorkspace("/different", session: "s"); XCTFail("Migration must preserve workspace binding") }
             catch HarnessError.invalid { }
         }
-        XCTAssertEqual(try sql(path, "PRAGMA user_version"), [["1"]])
+        XCTAssertEqual(try sql(path, "PRAGMA user_version"), [["2"]])
         XCTAssertEqual(try sql(path, "SELECT seq,session,body FROM events ORDER BY seq"), before)
     }
 

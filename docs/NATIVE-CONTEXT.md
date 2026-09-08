@@ -1,6 +1,6 @@
 # Native context and request accounting
 
-C1 prepares and measures model requests in HarnessCore. C2 exposes those observations in the shared Shell/Chat indicator and request inspector, and preserves them in diagnostic and presentation journals. C3 adds a durable model-only context projection. Automatic summary generation and user controls remain C4–C5; ordinary sessions still send their full history until a projection is explicitly installed through the core API, with the existing bounded terminal excerpt transformation.
+C1 prepares and measures model requests in HarnessCore. C2 exposes those observations in the shared Shell/Chat indicator and request inspector, and preserves them in diagnostic and presentation journals. C3 adds a durable model-only context projection. C4 adds bounded summary generation, automatic pressure handling and a manual engine/driver API. User controls remain C5; `/compact` is not exposed in the app or CLI yet. The original conversation and terminal history remain intact.
 
 ## Configuration
 
@@ -57,7 +57,7 @@ NativeWire preserves unknown envelope fields and the complete extensible request
 
 The execution journal remains the source of truth for history, tool dispatch and recovery. `load(session:)` still returns original events. `loadSequenced(session:after:)` additionally exposes SQLite's global sequence numbers, filtered to one session; these are not array indexes or turn IDs.
 
-Opening an unversioned event database migrates it to schema version 1 in one transaction. It adds `context_state`, initializes each session's version from its existing model messages, and retains event bodies/sequences, workspace bindings and pending commands. It does not rewrite or delete source rows. Migration scans one event at a time. Reopening is idempotent; unsupported future database/projection versions fail explicitly. A failed migration rolls back its schema changes and version marker.
+The C3 migration takes an unversioned event database to schema version 1 in one transaction; C4 then adds operation receipts in schema version 2. It adds `context_state`, initializes each session's version from its existing model messages, and retains event bodies/sequences, workspace bindings and pending commands. It does not rewrite or delete source rows. Migration scans one event at a time. Reopening is idempotent; unsupported future database/projection versions fail explicitly. A failed migration rolls back its schema changes and version marker.
 
 `loadContext(session:)` returns an immutable snapshot with the session ID, current version, optional projection and sequenced uncovered tail. Without a projection its messages equal the legacy history. A projection stores summary text, its covered source prefix and provenance (model, summary request IDs, creation time, source/applied versions). The model receives a labelled summary at user priority followed by uncovered messages. Summary text is neither a new system instruction nor a user-visible assistant answer; it contains no executable tool calls. The execution and presentation journals retain the complete original history.
 
@@ -67,7 +67,40 @@ The version advances for every admitted model message (including inbox claims an
 
 Recovery always reads the original execution log and closes unfinished tool pairs before the engine builds the projected history. `TOOL_OUTCOME_UNKNOWN` and `TOOL_NOT_STARTED` remain in the model's tail; historical tool calls are not dispatched again. The projection never writes to the Shell/Chat presentation journal, raw PTY output, drafts or pane state.
 
-C3 is storage and consumption infrastructure only. It does not call a model to summarize, select protected recent turns, prove token reduction, implement operation receipts or expose `/compact`. Those checks and orchestration belong to C4–C5. This is also not journal retention: the original history continues to occupy disk space.
+C3 supplies storage and consumption; C4 supplies the bounded compactor below. This is not journal retention: the original history continues to occupy disk space.
+
+## Bounded compaction (C4)
+
+`SessionEngine` automatically considers compaction at a model-step boundary when input plus output reserve reaches **90% of a known capacity**. It uses the same session execution owner as the conversation. It attempts at most one automatic operation per turn. Unknown capacity never invents a pressure threshold. If no older turns are eligible, the existing exact-overflow refusal / estimated-budget behavior remains. Failure of an attempted compaction stops that turn with a specific code and preserves its admitted messages.
+
+`SessionDriver.compact(operationID:)` and `SessionEngine.compact(operationID:)` provide the manual core API. A new operation is accepted while idle; a competing conversation or maintenance operation receives `BUSY`. A previously admitted ID returns its persisted receipt instead of repeating summary generation, including after reconnect or process restart. Status reports compaction during both manual and automatic work. App/wire/CLI commands and buttons belong to C5.
+
+Selection retains the **two most recent completed turns plus the current unfinished turn**. Legacy histories without turn markers are conservatively grouped at user messages. The older prefix is partitioned only at balanced message boundaries: an assistant's multiple tool calls and all their results stay together, and orphan/duplicate/incomplete groups are rejected. Recovery closes interrupted tool calls before manual selection. An automatic operation runs after the previous step's tool results have been stored.
+
+The compactor merges a prior summary with bounded portions of historical records, with **no tool schemas enabled**. It measures candidate requests before dispatch, includes the actual output reserve and uses binary search to find fitting portions. Defaults allow at most **four summary generations** and **64 planning/dispatch measurements**, plus the initial baseline and final revalidation. `CompactionPolicy` can retain 1–16 recent turns, allow 1–8 generations and lower the measurement cap through the Swift API. These limits do not start unbounded retries. A protected tail or indivisible tool group that cannot fit produces a refusal, not hidden truncation.
+
+Each summary must be a complete, nonempty assistant response with no tool calls or tool-result identity, and must reduce the serialized historical payload. The final **whole conversation request**, including normal tools/system/options and the retained tail, must fit and be smaller in both serialized bytes and comparable input counts. Counts keep their exact/estimated provenance. Estimated fit is still a heuristic, not a guarantee against provider rejection; the configured/server capacity remains explicit. Changing count provenance, capacity or prepared parameters during the operation causes rejection.
+
+Before commit, preparation of the original and candidate requests is repeated and fingerprints/envelopes compared, then the candidate budget is measured again. The store checks the frozen source version, execution owner and admitted request fingerprint. Projection, provenance audit and completed operation receipt commit in one SQLite transaction. Queue/steer admission during summary awaits does not change model history; it stays pending and the normal driver consumes it after successful maintenance. Stop preserves unclaimed work for explicit resume.
+
+Cancellation is checked after model responses, during final validation and immediately before the first projection write. That last check begins the indivisible commit section: if the transaction commits successfully, a later cancellation returns the saved success receipt. Cancellation before it rejects even a provider response that arrives late. Failed or cancelled summaries leave the previous projection untouched; a receipt-write failure also rolls back the projection/audit. On startup, schema-v2 operations left running become `interrupted` and never resume inference automatically.
+
+Diagnostic request purposes distinguish `conversation`, `compaction` and `compactionValidation`. `superseded` marks preparation/counting that was not sent for generation, and `dispatched` identifies actual requests. Summary text and reasoning never enter the visible answer stream. A summary's lifecycle completion does not complete its enclosing agent turn. Operation receipts retain before/after budgets, source/applied versions, summary request count and sanitized failure codes.
+
+Typical refusals are `CONTEXT_CAPACITY_UNKNOWN`, `CONTEXT_PROTECTED_TAIL_TOO_LARGE`, `CONTEXT_GROUP_TOO_LARGE`, `COMPACTION_REQUEST_LIMIT`, `COMPACTION_MEASUREMENT_LIMIT`, `COMPACTION_INVALID_SUMMARY`, `COMPACTION_NOT_SMALLER`, `CONTEXT_STILL_TOO_LARGE`, `CONTEXT_PARAMETERS_CHANGED` and `CONTEXT_STALE`. Storage and cancellation retain `STORAGE_FAILURE` / `CANCELLED`. This validates structural correctness and size; semantic summary quality still depends on the model.
+
+## C4 verification
+
+On 2026-09-08, `sh scripts/check.sh` passed with **121 Swift core/host tests**, all client protocol/Markdown/Shell checks and **11 mocked voice tests**. New tests cover bounded chunks, protected recent/open turns, multiple tool calls, oversized groups/tails, unknown and estimated counts, invalid/nonshrinking summaries, final-request overflow, generation/measurement limits, stale history/provider changes, two competing engines, queue/steer, cancellation before and after model output, cancellation after commit, transaction rollback and receipt recovery. Historical tool dispatch remains zero. Schema-v1 projections survive the v2 migration.
+
+```sh
+python3 scripts/probe-native-compaction.py
+python3 scripts/probe-native-request-replay.py
+```
+
+The compaction probe runs the real CLI and compatible HTTP/SSE provider against an isolated deterministic server. It seeds an old unversioned database, forces four bounded summary requests, continues the conversation, restarts the process and checks reuse of the saved projection. All 24 original rows remain byte-identical. An incomplete summary is rejected without projection changes or tool execution. The fixture reports byte-based counts to exercise budgets; it is not a tokenizer benchmark or Home Rig evidence. The separate WebSocket/restart probe also passed for ordinary request metadata/replay.
+
+Mac Catalyst and generic iOS Debug builds passed. No app installation, production migration/restart or Home Rig inference was performed. Manual `/compact` controls, full client interaction checks and physical iPad validation remain C5.
 
 ## C3 verification
 

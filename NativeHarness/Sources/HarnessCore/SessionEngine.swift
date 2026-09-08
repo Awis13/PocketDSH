@@ -8,24 +8,29 @@ public actor SessionEngine {
     private let provider: any ModelProvider
     private let tools: any ToolExecutor
     private var running = false
+    private var compacting = false
     private var activeTask: Task<String, Error>?
+    private var compactionTask: Task<CompactionReceipt, Error>?
+    private let compactionPolicy: CompactionPolicy
     private var trace: DiagnosticTrace?
     private var latestBudget: ContextBudget?
     private var latestUsage: ProviderUsage?
     private var usageAnchor: UsageAnchor?
 
+    public func isCompacting() -> Bool { compacting }
     public func diagnostics() -> DiagnosticSnapshot? { trace?.snapshot() }
     public func contextBudget() -> ContextBudget? { latestBudget }
     public func providerUsage() -> ProviderUsage? { latestUsage }
 
     public func cancel() {
-        guard let activeTask else { return }
+        guard activeTask != nil || compactionTask != nil else { return }
         trace?.record(.cancellationRequested)
-        activeTask.cancel()
+        activeTask?.cancel(); compactionTask?.cancel()
     }
 
-    public init(id: String, store: EventStore, provider: any ModelProvider, tools: any ToolExecutor) {
-        self.id = id; self.store = store; self.provider = provider; self.tools = tools
+    public init(id: String, store: EventStore, provider: any ModelProvider, tools: any ToolExecutor,
+                compactionPolicy: CompactionPolicy = try! CompactionPolicy()) {
+        self.id = id; self.store = store; self.provider = provider; self.tools = tools; self.compactionPolicy = compactionPolicy
     }
 
     public func enqueue(prompt: String, mode: DeliveryMode = .queue, commandID: String = UUID().uuidString) async throws -> CommandReceipt {
@@ -77,6 +82,79 @@ public actor SessionEngine {
         }
     }
 
+    public func compactionReceipt(operationID: String) async throws -> CompactionReceipt? {
+        try await store.compactionReceipt(session: id, operationID: operationID)
+    }
+
+    public func compact(operationID: String, onUpdate: @escaping @Sendable (LiveUpdate) -> Void = { _ in }) async throws -> CompactionReceipt {
+        guard !operationID.isEmpty, operationID.utf8.count <= 128, !operationID.contains("\0") else {
+            throw HarnessError.invalid("Invalid compaction operation ID")
+        }
+        if let previous = try await compactionReceipt(operationID: operationID) { return previous }
+        guard !running else { throw HarnessError.busy }
+        running = true
+        let owner = UUID().uuidString
+        latestBudget = nil; latestUsage = nil
+        let currentTrace = DiagnosticTrace(sessionID: id) { onUpdate(.diagnostic($0)) }
+        trace = currentTrace; currentTrace.record(.accepted)
+        let task = Task {
+            try Task.checkCancellation()
+            try await self.store.acquireExecution(session: self.id, owner: owner)
+            try await self.store.bindWorkspace(self.tools.workspaceIdentity, session: self.id)
+            let source = try await self.store.load(session: self.id)
+            let repairs = Self.recovery(source)
+            if !repairs.isEmpty { try await self.store.append(repairs, session: self.id) }
+            return try await self.performCompaction(operationID: operationID, owner: owner, trace: currentTrace)
+        }
+        compactionTask = task
+        defer { running = false; compactionTask = nil }
+        do {
+            let result = try await withTaskCancellationHandler { try await task.value } onCancel: { task.cancel() }
+            await store.releaseExecution(session: id, owner: owner)
+            if result.state == .completed { usageAnchor = nil; latestBudget = result.after }
+            return result
+        } catch {
+            await store.releaseExecution(session: id, owner: owner)
+            currentTrace.record(DiagnosticTrace.errorCode(error) == "CANCELLED" ? .cancelled : .failed,
+                code: DiagnosticTrace.errorCode(error))
+            throw error
+        }
+    }
+
+    private func performCompaction(operationID: String, owner: String, trace: DiagnosticTrace) async throws -> CompactionReceipt {
+        compacting = true
+        defer { compacting = false }
+        try Task.checkCancellation()
+        let snapshot = try await store.loadContext(session: id)
+        trace.beginRequest(purpose: "compactionValidation")
+        let original = try await provider.prepare(messages: snapshot.messages, tools: tools.definitions,
+            requestID: trace.identifiers().requestID!)
+        trace.record(.measuring)
+        let before = try await provider.measure(original, anchor: nil)
+        trace.setBudget(before); trace.record(.superseded)
+        try Task.checkCancellation()
+        var receipt = try await store.beginCompaction(session: id, owner: owner, operationID: operationID,
+            sourceVersion: snapshot.version, fingerprint: original.fingerprint, before: before)
+        if receipt.state != .running { return receipt }
+        do {
+            let compactor = ContextCompactor(provider: provider, tools: tools.definitions, policy: compactionPolicy)
+            let plan = try await compactor.prepare(snapshot: snapshot, original: original, before: before, trace: trace)
+            try await compactor.revalidate(plan)
+            let result = try await store.commitCompaction(session: id, owner: owner, operationID: operationID, plan: plan)
+            // No cancellation check after a committed result: completion wins.
+            trace.record(.completed)
+            return result
+        } catch {
+            let code = DiagnosticTrace.errorCode(error)
+            receipt.state = code == "CANCELLED" ? .cancelled : .failed
+            receipt.code = code
+            receipt.summaryRequests = trace.snapshot().requests.filter { $0.purpose == "compaction" && $0.dispatched == true }.count
+            let result = try await store.finishCompaction(session: id, owner: owner, receipt: receipt)
+            trace.record(code == "CANCELLED" ? .cancelled : .failed, code: code)
+            return result
+        }
+    }
+
     private func save(_ events: [SessionEvent], trace: DiagnosticTrace) async throws {
         trace.record(.persisting)
         let stamped = events.map { event in
@@ -110,18 +188,55 @@ public actor SessionEngine {
                 history += claimed
                 trace.record(.ready)
                 var finishedTurn = false
+                var compactedThisTurn = false
                 for _ in 0..<maxSteps {
                     try Task.checkCancellation()
                     trace.beginRequest()
                     history += try await store.claim(session: id, owner: owner, startsTurn: false, trace: trace.identifiers())
                     latestBudget = nil; latestUsage = nil
-                    let request = try await provider.prepare(messages: history, tools: tools.definitions,
+                    var request = try await provider.prepare(messages: history, tools: tools.definitions,
                         requestID: trace.identifiers().requestID!)
                     trace.record(.measuring)
-                    let budget = try await provider.measure(request, anchor: usageAnchor)
+                    var budget = try await provider.measure(request, anchor: usageAnchor)
                     try Task.checkCancellation()
                     latestBudget = budget
                     trace.setBudget(budget)
+                    if !compactedThisTurn, let pressure = budget.fractionUsed,
+                       pressure >= compactionPolicy.pressureThreshold {
+                        let snapshot = try await store.loadContext(session: id)
+                        // No eligible old turns: preserve normal estimated-budget
+                        // behavior; exact overflow still refuses below.
+                        let eligible: Bool
+                        do {
+                            _ = try ContextCompactor.select(snapshot, recentTurns: compactionPolicy.recentTurns)
+                            eligible = true
+                        } catch CompactionError.nothingToCompact { eligible = false }
+                        if eligible {
+                            compactedThisTurn = true
+                            trace.record(.superseded, code: "COMPACTION_REQUIRED")
+                            let maintenanceTrace = DiagnosticTrace(sessionID: id) { event in
+                                // The enclosing turn owns lifecycle completion. A
+                                // finished summary must not finish the user's turn.
+                                if ![DiagnosticStage.completed, .cancelled, .failed].contains(event.stage) {
+                                    onUpdate(.diagnostic(event))
+                                }
+                            }
+                            maintenanceTrace.record(.accepted)
+                            let result = try await performCompaction(operationID: UUID().uuidString, owner: owner, trace: maintenanceTrace)
+                            if result.state == .cancelled { throw CancellationError() }
+                            guard result.state == .completed else { throw CompactionFailure(receipt: result) }
+                            usageAnchor = nil
+                            _ = try await store.claim(session: id, owner: owner, startsTurn: false, trace: trace.identifiers())
+                            history = try await store.loadContext(session: id).messages
+                            trace.beginRequest()
+                            request = try await provider.prepare(messages: history, tools: tools.definitions,
+                                requestID: trace.identifiers().requestID!)
+                            trace.record(.measuring)
+                            budget = try await provider.measure(request, anchor: nil)
+                            try Task.checkCancellation()
+                            latestBudget = budget; trace.setBudget(budget)
+                        }
+                    }
                     if budget.shouldReject { throw HarnessError.contextLimit }
                     trace.record(.requesting)
                     let observer = RequestDiagnostics(trace)

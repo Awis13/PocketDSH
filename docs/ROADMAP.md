@@ -4,7 +4,7 @@ Updated 2026-09-08 after packaging the native workspace in [PR #1](https://githu
 
 This is a source-based reconciliation of the earlier DSH and Warp research, not another live walkthrough of either product. It supersedes implementation-status claims in the older research notes. Recommended work below is a plan, not approved implementation. Do not infer a completion percentage from the number of broad feature rows.
 
-Subsequent increment, 2026-09-08: **NH-CONTEXT C1–C3 are implemented** — frozen provider requests, usage normalization, optional llama.cpp count/props, configured limits, estimated fallback, a shared Shell/Chat context indicator and retained request diagnostics. C1–C2 were pushed to `codex/native-context-compaction`; C3 adds a versioned, durable model-only context projection as a local increment. [Request accounting and diagnostics](NATIVE-CONTEXT.md) records configuration and verification. C4–C5 summary generation, safe compaction orchestration and controls are still pending.
+Subsequent increment, 2026-09-08: **NH-CONTEXT C1–C4 are implemented** — frozen provider requests, usage normalization, optional llama.cpp count/props, configured limits, estimated fallback, a shared Shell/Chat context indicator and retained request diagnostics. C1–C2 were pushed to `codex/native-context-compaction`; C3–C4 add durable model-only projections and bounded compaction as local increments. [Request accounting and diagnostics](NATIVE-CONTEXT.md) records configuration and verification. C4 covers summary generation, validation, cancellation, operation receipts and automatic pressure handling. C5 app/wire/CLI controls remain pending.
 
 ## Product contract
 
@@ -33,14 +33,14 @@ These are the ten boundaries from [the source research](NATIVE-HARNESS-RESEARCH.
 
 | Mechanic | State | Remaining work |
 | --- | --- | --- |
-| One execution owner | Implemented foundation | Maintenance/compaction needs the same exclusivity and cancellation semantics as turns |
+| One execution owner | Implemented in core | Conversation and compaction share ownership; manual maintenance refuses BUSY and Stop preserves pending work |
 | Queue vs steering | Core implemented; client partial | Host prompts enqueue; CLI exposes queue/steer/remove/resume. The native wire/UI lacks delivery mode and queue item controls. Add pending-state projection and stable-ID edit/remove/steer operations |
-| History vs model context | Partial | Engine and presentation journals are separate; bounded terminal attachments exist. Model context still grows from full history. Add token budgeting, context projection and request provenance |
+| History vs model context | Implemented in core | Versioned model projection plus retained source/UI journals, token budgets and request provenance; retention/paging remains separate |
 | Provisional streaming | Implemented foundation | Keep partial versus completed identity; future retries need attempt reconciliation. UI currently discards some unfamiliar event kinds |
 | Parallel tools | Missing | Engine executes sequentially. Add bounded concurrency, exclusive barriers and deterministic commits without hiding live per-tool progress |
 | Permission policy | Partial | One-use approvals exist. General access profiles, scoped persistent grants, client policy selection and actual OS enforcement do not |
 | Crash recovery | Implemented foundation | No automatic command replay; preserve unknown outcomes. Retention quotas, paging, disk-full/power-loss tests and large-history measurements remain |
-| Balanced compaction | Missing | ANSI/base64 context inflation was fixed; that repair is not compaction. Preserve tool pairs, recent tail and original transcript, reject bad summaries, commit against a frozen context generation |
+| Balanced compaction | Core implemented; controls pending | Bounded summary requests, balanced groups, protected recent/current turns, validated smaller request and atomic versioned commit/receipts; C5 exposes manual controls |
 | Goals and children | Missing | No native goal/plan/subagent/workflow drivers. Define lineage, authority, concurrency and cancellation before adding their UI |
 | Reconnect reconciliation | Implemented foundation | Ordered replay, acknowledged prompt IDs and saved drafts exist. Add version/capability negotiation, explicit unknown-event handling, paged replay and multi-client policy |
 
@@ -61,7 +61,7 @@ All 46 original IDs are retained below. The original audit described the **DSH a
 | G15, G16 | Existing workspace choice/filter; no metadata management, grouping/manual order | Native session creation uses the host workspace; no workspace catalog/management |
 | G17 | Subagents filtered out; no lineage navigation | Native child-agent execution and identity are also missing |
 | G19, G20 | No remote @file/@folder/@session picker | Native terminal-block attachments are implemented; they do not cover file/session references |
-| G22, G23, G24, G26 | No context meter, injection inspector, compaction UI or usage/performance readout | Missing token accounting/compaction; existing core diagnostic events need an honest client projection |
+| G22, G23, G24, G26 | Shared context meter and request/usage inspector now implemented; injection inspector and compaction controls remain | C1–C4 implement accounting, durable diagnostics and bounded core compaction; C5 adds manual controls |
 | G25, G27, G28 | No trajectory or persistent tool side inspector; Markdown/diff/tool rendering partial | Better terminal styles do not implement native file/diff contracts or request inspection |
 | G29, G30 | No completed-turn grouping or durable turn navigator | Native block navigation is present, but does not navigate agent turns. Any process compaction must stay optional in Shell |
 | G31 | Retry/token-limit/unknown-event coverage incomplete | Native context-limit error is now explicit; retries and general compatibility fallback remain missing |
@@ -112,7 +112,7 @@ All 55 research IDs are mapped. “Partial” means the useful core exists, not 
 The broader comparison changes the priority from adding another input feature to making long native sessions dependable. These are bounded proposals; nothing here starts a development cycle.
 
 1. **NH-CONTEXT — visible context pressure.** C1 provider accounting and C2 shared context/request diagnostics are implemented, including explicit unknowns, durable metrics, bounded protocol notes and preservation of unknown envelope/request fields. Acceptance uses a verified/configured capacity and distinguishes exact counting from estimates; an arbitrary provider with unknown capacity cannot guarantee advance warning. Users can inspect the failed request stage. Never fabricate cache hits or prefill percentages.
-2. **NH-COMPACT — bounded model context.** C3 implements separate durable projections, migration, version checks, atomic replacement and complete tool boundaries. C4–C5 still need summary generation/validation, retained recent turns, cancellation/operation receipts and user controls. Acceptance: continue a deliberately over-budget conversation without losing the original UI history or replaying tool effects; failed/cancelled summaries leave the old projection intact. Follow with bounded provider retries and request-attempt reconciliation.
+2. **NH-COMPACT — bounded model context.** C3 implements separate durable projections, migration, version checks, atomic replacement and complete tool boundaries. C4 adds summary generation/validation, protected recent/current turns, cancellation, receipts and automatic pressure handling. C5 still needs user-facing commands/buttons and integrated controls. Acceptance: continue a deliberately over-budget conversation without losing the original UI history or replaying tool effects; failed/cancelled summaries leave the old projection intact. Follow with bounded provider retries and request-attempt reconciliation.
 3. **NH-DAILY — control the native session.** Expose core queue/steering/pending cancellation first; then model/effort and explicit access mode, rename/archive/fork and content search. Split delivery controls from session management into separate changes. Acceptance: edit pending work while output streams, handle already-consumed IDs, and reopen the same session with truthful settings.
 4. **NH-TERMINAL — complete focus and monitoring.** First full-pane TUI/return, directional pane focus/maximize and real iPad keyboard/touch validation; then model-visible command/screen state. Agent input/takeover is a separate guarded host milestone (NH-CONTROL), with human input revoking permission and stale writes rejected.
 5. **NH-REVIEW — inspect changes beside work.** Read-only workspace/branch diff, changed-files list, hunk attachments and artifact open/share. Acceptance: inspect the correct file/base and ask about a selected hunk while preserving the current session, draft and scroll position.
