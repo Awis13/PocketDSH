@@ -7,7 +7,9 @@ enum NativeRecovery {
         var block: NativeEvent?
         var tools: [NativeEvent] = []
         var active = false
+        var request: NativeRequestInfo?
         for event in history {
+            if let latest = event.request, latest.validIdentity { request = latest }
             switch event.op {
             case "blockStart": block = event
             case "blockEnd": block = nil
@@ -26,9 +28,10 @@ enum NativeRecovery {
             result.append(NativeEvent(op: "toolResult", session: session, id: tool.id,
                 text: "Interrupted. Outcome unknown; verify external state before retrying.", failed: true))
         }
+        if request?.isFinished == false { request?.interrupt() }
         if active || engineInterrupted || pendingCount > 0 || !tools.isEmpty {
             result.append(NativeEvent(op: "stage", session: session,
-                text: "Host restarted. Unfinished work was interrupted; queued requests were not run. Send a new request to continue.", stage: "interrupted"))
+                text: "Host restarted. Unfinished work was interrupted; queued requests were not run. Send a new request to continue.", stage: "interrupted", request: request))
         }
         return result
     }

@@ -82,6 +82,38 @@ import Foundation
         attached.apply(NativeEvent(op: "opened")); attached.apply(sent)
         precondition(attached.rows == sentRows, "Reconnect must restore the same question and captured context")
         print("PASS attached context: readable question, exact sent excerpt and idempotent replay")
+
+        let fixture = Data(#"{"op":"stage","session":"metrics","sequence":1,"stage":"failed","request":{"requestID":"r1","turnID":"t1","purpose":"conversation","stage":"failed","code":"HTTP_400","elapsedMS":500,"budget":{"input":{"tokens":300,"kind":"estimated","source":"serializedBytes"},"outputReserve":100,"capabilities":{"capacity":{"tokens":1000,"source":"configured"},"inputCounting":"unsupported"}},"usage":{"promptTokens":300,"completionTokens":2,"cachedTokens":null},"future":{"apiKey":"PRIVATE_KEY","endpoint":"PRIVATE_ENDPOINT","prompt":"PRIVATE_PROMPT"}},"future":{"large":9007199254740993,"nested":[true,null,{"x":"y"}]}}"#.utf8)
+        let decoded = try JSONDecoder().decode(NativeEvent.self, from: fixture)
+        let encoded = try JSONEncoder().encode(decoded)
+        let originalJSON = try JSONDecoder().decode(NativeJSON.self, from: fixture)
+        let roundtripJSON = try JSONDecoder().decode(NativeJSON.self, from: encoded)
+        precondition(roundtripJSON == originalJSON, "Unknown envelope/request fields must survive replay, including large integers")
+        let info = decoded.request!
+        precondition(info.fraction == 0.4 && info.remaining == 600 && info.inputKind == "estimated")
+        precondition(info.tokens("usage.cachedTokens") == nil)
+        precondition(!info.diagnosticExport.contains("PRIVATE_"), "Export must allowlist metadata, excluding raw extensions")
+        let malformed = try JSONDecoder().decode(NativeRequestInfo.self, from: Data(#"{"requestID":"r","turnID":"t","budget":{"input":{"tokens":true,"kind":"exact"},"outputReserve":-1,"capabilities":{"capacity":{"tokens":0}}},"usage":{"promptTokens":1.5,"completionTokens":9007199254740992},"firstTextMS":-5}"#.utf8))
+        precondition(malformed.inputTokens == nil && malformed.fraction == nil && malformed.reserve == nil)
+        precondition(malformed.tokens("usage.promptTokens") == nil && malformed.tokens("usage.completionTokens") == nil)
+        precondition(malformed.milliseconds("firstTextMS") == nil)
+        let bad = try JSONDecoder().decode(NativeEvent.self, from: Data(#"{"op":"stage","stage":"preparing","request":"future-format"}"#.utf8))
+        precondition(bad.request == nil && bad.extraFields["request"] != nil, "New metadata format must not disconnect the client")
+        var metrics = NativeTranscript()
+        metrics.apply(NativeEvent(op: "opened", session: "metrics")); metrics.apply(decoded); metrics.apply(decoded)
+        precondition(metrics.requests.count == 1 && metrics.requests[0] == info && metrics.rows.count == 1)
+        metrics.apply(NativeEvent(op: "opened", session: "metrics")); metrics.apply(decoded)
+        precondition(metrics.requests == [info], "Reconnect restores the completed request without duplication")
+        for op in ["pty", "status", "synced", "completion", "terminalSize", "approval", "workspaceAction"] { metrics.apply(NativeEvent(op: op)) }
+        precondition(metrics.protocolNotices.isEmpty, "Known PTY/control events are not unsupported operations")
+        metrics.apply(NativeEvent(op: "stage", stage: "futureStage"))
+        for n in 0..<30 { metrics.apply(NativeEvent(op: "future\(n)")) }
+        precondition(metrics.protocolNotices.count == 8, "Unknown significant events need bounded visible diagnostic notes")
+        metrics.apply(NativeEvent(op: "opened", session: "other")); metrics.apply(decoded)
+        precondition(metrics.requests.isEmpty && metrics.rows.isEmpty && metrics.protocolNotices.isEmpty, "Late metrics cannot leak into another session")
+        metrics.apply(NativeEvent(op: "stage", session: "other", stage: "requesting", sequence: 1))
+        precondition(metrics.requests.isEmpty, "Old hosts without metadata must show unknown, not invented zeroes")
+        print("PASS request metadata: lossless future fields, safe export, validated counts, session isolation, bounded protocol notes and replay")
         guard CommandLine.arguments.count > 1 else { return }
         let config = try JSONDecoder().decode([String:String].self, from: Data(contentsOf: URL(fileURLWithPath: CommandLine.arguments[1])))
         let id = UUID().uuidString

@@ -3,6 +3,37 @@ import Foundation
 
 /// Offline fixtures for reproducible screenshots. Never included in Release builds.
 extension PocketStore {
+    /// Displays a captured NativeEvent replay in the actual Shell/Chat views.
+    /// This debug-only mode creates no transport and never runs shell input.
+    func loadNativeReplay(_ path: String) {
+        do {
+            let handle = try FileHandle(forReadingFrom: URL(fileURLWithPath: path))
+            defer { try? handle.close() }
+            let data = try handle.read(upToCount: 4_194_305) ?? Data()
+            guard data.count <= 4_194_304 else { throw HarnessError(message: "Preview exceeds 4 MiB") }
+            let events = try JSONDecoder().decode([NativeEvent].self, from: data)
+            guard let opened = events.first, opened.op == "opened", let id = opened.session else {
+                throw HarnessError(message: "Preview requires a session replay beginning with opened")
+            }
+            endpoint = "ws://127.0.0.1:1"; connected = true; connecting = false; error = nil
+            selectedID = id
+            model = .object(["model": .string(opened.model ?? "Preview")])
+            sessions = [HarnessSession(raw: .object(["sessionId": .string(id), "cwd": .string(opened.workspace ?? ""),
+                "updatedAt": .number(Date().timeIntervalSince1970 * 1000), "running": .bool(false),
+                "projections": .object(["values": .object(["title": .string("Request diagnostics · offline replay")])])]))]
+            var transcript = NativeTranscript()
+            let client = NativeClient(id: id, endpoint: endpoint, token: "")
+            client.externalSend = { _ in }
+            for event in events {
+                transcript.apply(event)
+                if ["opened", "synced", "pty", "blockStart", "blockEnd", "ptyExit", "shellReset", "terminalSize"].contains(event.op) { client.receive(event) }
+            }
+            for block in client.blocks { transcript.updateShell(block) }
+            nativeShell = client; rows = transcript.rows
+            nativeRequests = transcript.requests; nativeProtocolNotices = transcript.protocolNotices
+        } catch { self.error = "Cannot load offline replay: " + error.localizedDescription }
+    }
+
     func loadDemo() {
         endpoint = "https://harness.example.com"
         connected = true

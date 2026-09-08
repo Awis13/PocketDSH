@@ -44,4 +44,29 @@ final class RecoveryTests: XCTestCase {
         restored.send(NativeEvent(op: "blockEnd", session: "s", exitCode: 7))
         XCTAssertEqual(try restored.history().map(\.sequence), [1, 2, 3])
     }
+
+    func testRequestMetadataAndUnknownFieldsSurviveJournalReopen() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let path = root.appendingPathComponent("metadata.sqlite").path
+        let metadata = NativeSessionInfo(id: "s", title: "New task", workspace: "/tmp", model: "fixture", running: false, updatedAt: 0)
+        let original = try JSONDecoder().decode(NativeEvent.self, from: Data(#"{"op":"stage","session":"s","stage":"requesting","futureEnvelope":{"enabled":true},"request":{"requestID":"r","turnID":"t","stage":"requesting","futureRequest":{"data":[1,null,"x"]}}}"#.utf8))
+        do {
+            let sink = try NativeSink(journal: PresentationJournal(path: path), info: metadata)
+            sink.send(original)
+            for _ in 0..<270 { sink.send(NativeEvent(op: "stage", session: "s", stage: "queued")) }
+        }
+        let sink = try NativeSink(journal: PresentationJournal(path: path), info: metadata)
+        let history = try sink.history()
+        XCTAssertEqual(history.first?.extraFields, original.extraFields)
+        XCTAssertEqual(history.first?.request, original.request)
+        let recovery = NativeRecovery.events(history, session: "s", engineInterrupted: true, pendingCount: 0)
+        XCTAssertEqual(recovery.last?.request?.id, "r")
+        XCTAssertEqual(recovery.last?.request?.stage, "interrupted")
+        XCTAssertEqual(recovery.last?.request?.string("code"), "HOST_RESTARTED")
+        XCTAssertEqual(recovery.last?.request?.fields["futureRequest"], original.request?.fields["futureRequest"])
+        recovery.forEach { sink.send($0) }
+        XCTAssertTrue(NativeRecovery.events(try sink.history(), session: "s", engineInterrupted: false, pendingCount: 0).isEmpty)
+    }
 }

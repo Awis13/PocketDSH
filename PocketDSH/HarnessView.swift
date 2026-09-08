@@ -93,6 +93,7 @@ struct HarnessView: View {
                 Button { connection = true } label: { Label(store.connecting ? "Reconnecting…" : "Not connected · tap to connect", systemImage: "wifi.exclamationmark").font(.caption).padding(10).frame(maxWidth: .infinity) }
                     .background(.orange.opacity(0.1))
             }
+            if store.usesNativeHarness { ContextStatusView() }
             ScrollViewReader { proxy in
                 ScrollView {
                     // Exact heights prevent estimated lazy-row sizes from feeding back

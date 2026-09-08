@@ -135,7 +135,9 @@ private actor NativeHostSession {
             case .tool: break
             case .toolCall(let call): sink.send(NativeEvent(op: "toolCall", session: id, id: call.id, text: call.name, arguments: call.arguments))
             case .toolResult(let callID, let output, let failed): sink.send(NativeEvent(op: "toolResult", session: id, id: callID, text: output, failed: failed))
-            case .diagnostic(let event): sink.send(NativeEvent(op: "stage", session: id, text: event.code, stage: event.stage.rawValue))
+            case .diagnostic(let event):
+                let request = event.request.flatMap { try? NativeRequestInfo(encoding: $0) }
+                sink.send(NativeEvent(op: "stage", session: id, text: event.code, stage: event.stage.rawValue, request: request))
             case .shell(let output): sink.send(NativeEvent(op: "shellOutput", session: id, text: output.stream, bytes: output.bytes))
             case .approval(let request):
                 let delivered = sink.send(NativeEvent(op: "approval", session: id, approval: NativeApproval(id: request.id, name: request.call.name, arguments: request.call.arguments, workspace: request.workspace)))

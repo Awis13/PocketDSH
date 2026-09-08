@@ -41,6 +41,11 @@ private actor BudgetEngineProvider: TestModelProvider {
         let history = try await store.load(session: "fixture")
         XCTAssertEqual(history.compactMap(\.message).map(\.content), ["retain me"])
         XCTAssertTrue(SessionEngine.recovery(history).isEmpty)
+        let report = await engine.diagnostics()!
+        XCTAssertEqual(report.requests.last?.budget, budget)
+        XCTAssertEqual(report.requests.last?.code, "CONTEXT_LIMIT")
+        XCTAssertEqual(report.requests.last?.stage, "failed")
+        XCTAssertNil(report.requests.last?.firstTextMS)
     }
     func testOverBudgetEstimateDoesNotBlockAndUsageFeedsNextRequest() async throws {
         let provider = BudgetEngineProvider(exact: false)
@@ -57,6 +62,8 @@ private actor BudgetEngineProvider: TestModelProvider {
         let trace = await engine.diagnostics()
         XCTAssertEqual(budget?.requestID, requests.last?.id)
         XCTAssertEqual(trace?.requests.last?.requestID, requests.last?.id)
+        XCTAssertEqual(trace?.requests.last?.usage?.totalTokens, 101)
+        XCTAssertEqual(trace?.events.last?.request?.usage?.totalTokens, 101)
     }
     func testStopDuringMeasurementCancelsWithoutGenerationAndRetainsQueuedWork() async throws {
         let provider = BudgetEngineProvider(exact: false, holdMeasurement: true)
@@ -77,5 +84,8 @@ private actor BudgetEngineProvider: TestModelProvider {
         XCTAssertEqual(pending.map(\.id), ["pending"])
         let trace = await engine.diagnostics()
         XCTAssertEqual(trace?.events.last?.stage, .cancelled)
+        XCTAssertEqual(trace?.requests.last?.stage, "cancelled")
+        XCTAssertEqual(trace?.requests.last?.code, "CANCELLED")
+        XCTAssertNil(trace?.requests.last?.budget)
     }
 }

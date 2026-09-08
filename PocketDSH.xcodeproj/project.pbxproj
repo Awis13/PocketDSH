@@ -30,6 +30,7 @@
 		A52477BEDBE0E382C6C2C105 /* LiveReasoningView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1DB1F53D3DE276524D2EFC7 /* LiveReasoningView.swift */; };
 		A8F3CECEBAD3E60B962CBAB9 /* TerminalAppearance.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA1BA7A9B1DC97856095C0CB /* TerminalAppearance.swift */; };
 		AB8C7FF9C25F4275D73B6A31 /* DemoData.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9A23CDF070AEDF1D7FEED50A /* DemoData.swift */; };
+		B3E5A6229657B8C03CA87DEB /* ContextStatusView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4536C46B3F5C4076165E8409 /* ContextStatusView.swift */; };
 		C103524CD83608A91CE30F86 /* ConnectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F88F3CD3883D2F6BFE7D5AE7 /* ConnectionView.swift */; };
 		C9D4CACAFC991269FE6A7BCB /* PocketDSHApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = F816DAE6C96C8E45D149EEF5 /* PocketDSHApp.swift */; };
 		D82FC2E56324E4886177E337 /* PocketStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = C49C2AC1DB6173218484FA24 /* PocketStore.swift */; };
@@ -65,6 +66,7 @@
 		362036A7D1E27D64FD77D956 /* PocketDSHUITests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = PocketDSHUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		3F19FB2A62A2A1ADAA7337ED /* Simulator.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Simulator.entitlements; sourceTree = "<group>"; };
 		44B25DCB6141C9DBACE0EE9B /* ShellBlockViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShellBlockViews.swift; sourceTree = "<group>"; };
+		4536C46B3F5C4076165E8409 /* ContextStatusView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContextStatusView.swift; sourceTree = "<group>"; };
 		486CDE1EAA2F792AC9153AB0 /* AssistantMarkdown.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AssistantMarkdown.swift; sourceTree = "<group>"; };
 		51A0DE6E9EE1DD8033673D14 /* ShellBlockInteraction.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShellBlockInteraction.swift; sourceTree = "<group>"; };
 		5BA7754331250B9CF01F8A4F /* TurnNotificationState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TurnNotificationState.swift; sourceTree = "<group>"; };
@@ -139,6 +141,7 @@
 				07CDD0CC0057F5866D24FF20 /* Assets.xcassets */,
 				486CDE1EAA2F792AC9153AB0 /* AssistantMarkdown.swift */,
 				F88F3CD3883D2F6BFE7D5AE7 /* ConnectionView.swift */,
+				4536C46B3F5C4076165E8409 /* ContextStatusView.swift */,
 				9A23CDF070AEDF1D7FEED50A /* DemoData.swift */,
 				213F6D56A815333905F5F393 /* HarnessAPI.swift */,
 				0A6ACA8367AD55DAF03625A7 /* HarnessProtocol.swift */,
@@ -317,6 +320,7 @@
 				4A02EBFCFE7F078CC03880F1 /* Appearance.swift in Sources */,
 				FE7F024F37CCF50D8A612C40 /* AssistantMarkdown.swift in Sources */,
 				C103524CD83608A91CE30F86 /* ConnectionView.swift in Sources */,
+				B3E5A6229657B8C03CA87DEB /* ContextStatusView.swift in Sources */,
 				AB8C7FF9C25F4275D73B6A31 /* DemoData.swift in Sources */,
 				40BBF01895004C9E8FAC5FE0 /* HarnessAPI.swift in Sources */,
 				5860D86558FAB4821B9CBDF9 /* HarnessProtocol.swift in Sources */,

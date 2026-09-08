@@ -33,7 +33,10 @@ final class PocketStore: ObservableObject {
     @Published var readingMode = false
     var openDefaultTaskWhenConnected = false
     @Published var voiceRecording = false
-    @Published var selectedID: String? { didSet { persistPane() } }
+    @Published var selectedID: String? { didSet {
+        if selectedID != oldValue { nativeRequests = []; nativeProtocolNotices = [] }
+        persistPane()
+    } }
     @Published var composerFocusRequest: UUID?
     private var newlyCreatedSession: String?
     func focusNewSessionComposer() {
@@ -41,6 +44,8 @@ final class PocketStore: ObservableObject {
         newlyCreatedSession = nil
         if selectedID == id { composerFocusRequest = UUID() }
     }
+    @Published var nativeRequests: [NativeRequestInfo] = []
+    @Published var nativeProtocolNotices: [String] = []
     @Published var rows: [TranscriptRow] = []
     @Published var interactions: [Interaction] = []
     @Published var queues: [String: JSON] = [:]
@@ -163,6 +168,7 @@ final class PocketStore: ObservableObject {
     }
     func connect(input: String? = nil) async {
         #if DEBUG
+        if let replay = ProcessInfo.processInfo.environment["DSH_NATIVE_REPLAY"] { loadNativeReplay(replay); return }
         if ProcessInfo.processInfo.environment["DSH_DEMO"] == "1" { loadDemo(); return }
         #endif
         let requested = (input ?? endpoint).trimmingCharacters(in: .whitespacesAndNewlines)
@@ -196,7 +202,7 @@ final class PocketStore: ObservableObject {
         nativeReconnect?.cancel(); nativeReconnect = nil
         generation = UUID(); connectionTask?.cancel(); connectionTask = nil
         nativeShell?.disconnect(); nativeShell = nil
-        native?.disconnect(); native = nil; nativeReady = false; nativeSubmission = nil; api = nil
+        native?.disconnect(); native = nil; nativeRequests = []; nativeProtocolNotices = []; nativeReady = false; nativeSubmission = nil; api = nil
         socket?.cancel(with: .goingAway, reason: nil); socket = nil
         connected = false; connecting = false; loadingHistory = false; interactions = []; clientID = ""
     }
@@ -357,6 +363,7 @@ final class PocketStore: ObservableObject {
     }
     func select(_ id: String?) async {
         #if DEBUG
+        if let replay = ProcessInfo.processInfo.environment["DSH_NATIVE_REPLAY"] { loadNativeReplay(replay); return }
         if ProcessInfo.processInfo.environment["DSH_DEMO"] == "1" { loadDemo(); selectedID = id; return }
         #endif
         if let old = selectedID { drafts[old] = draft }
@@ -369,7 +376,7 @@ final class PocketStore: ObservableObject {
         if model == .null { model = catalog["default"] }
         guard connected else { return }
         if let native {
-            nativeReady = false; nativeTranscript = NativeTranscript(); interactions = []
+            nativeReady = false; nativeTranscript = NativeTranscript(); nativeRequests = []; nativeProtocolNotices = []; interactions = []
             guard let id else { native.selectedID = nil; return }
             loadingHistory = true; native.selectedID = id
             do { try await native.send(NativeCommand(op: "open", session: id)) }
@@ -634,6 +641,8 @@ extension PocketStore {
         if ["opened", "synced", "pty", "blockStart", "blockEnd", "ptyExit", "shellReset", "terminalSize"].contains(event.op) { nativeShell?.receive(event) }
         if event.op == "workspaceAction" || event.op == "pty" { return }
         nativeTranscript.apply(event)
+        if nativeRequests != nativeTranscript.requests { nativeRequests = nativeTranscript.requests }
+        if nativeProtocolNotices != nativeTranscript.protocolNotices { nativeProtocolNotices = nativeTranscript.protocolNotices }
         if ["blockStart", "blockEnd", "ptyExit"].contains(event.op), let block = nativeShell?.blocks.last {
             nativeTranscript.updateShell(block)
         }
@@ -651,7 +660,7 @@ extension PocketStore {
                 UserDefaults.standard.removeObject(forKey: nativeRequestKey(id)); nativeSubmission = nil
             }
         }
-        if event.op == "stage", let id = selectedID {
+        if event.op == "stage", NativeRequestInfo.knownStages.contains(event.stage ?? ""), let id = selectedID {
             let ended = ["completed", "cancelled", "failed", "interrupted"].contains(event.stage ?? "")
             updateSession(id, key: "running", value: .bool(!ended))
             if ended { interactions = [] }

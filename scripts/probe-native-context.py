@@ -102,6 +102,20 @@ def probe(binary, scenario):
             assert payload['messages'][0]['role'] == 'system' and payload['tools']
             report = json.loads(trace.read_text())
             last = report['events'][-1]
+            metadata = report['requests'][-1]
+            assert metadata['requestID'] == last['context']['requestID']
+            assert metadata['turnID'] == last['context']['turnID']
+            assert metadata['purpose'] == 'conversation'
+            assert metadata['stage'] == ('modelCompleted' if expected_success else 'cancelled' if scenario == 'cancel' else 'failed')
+            assert last['request'] == metadata
+            if scenario != 'cancel':
+                assert metadata['budget']['outputReserve'] == 64
+            if expected_success:
+                assert metadata['usage']['promptTokens'] == 100
+                assert metadata['firstTextMS'] >= 0
+            if scenario == 'overflow':
+                assert metadata['budget']['input']['kind'] == 'exact'
+                assert metadata['code'] == 'CONTEXT_LIMIT' and 'firstTextMS' not in metadata
             if scenario == 'overflow':
                 assert last['code'] == 'CONTEXT_LIMIT', report
             if scenario == 'cancel':

@@ -1,6 +1,6 @@
 # Native model request accounting
 
-The first context milestone (C1) prepares and measures model requests in HarnessCore. Client indicators, durable request metrics and general history compaction are later commits; the conversation is still retained and sent in full, with the existing bounded terminal excerpt transformation.
+C1 prepares and measures model requests in HarnessCore. C2 exposes those observations in the shared Shell/Chat indicator and request inspector, and preserves them in diagnostic and presentation journals. General history compaction remains C3–C5; the conversation is still retained and sent in full, with the existing bounded terminal excerpt transformation.
 
 ## Configuration
 
@@ -32,9 +32,44 @@ This implementation follows the pinned [llama.cpp count endpoint documentation](
 
 `ReplyAssembly` consumes usage before examining choices, including final empty-choices frames after `finish_reason`. Repeated frames replace the usage snapshot instead of accumulating it. Prompt, completion and total counts remain optional; missing/null, negative, fractional, boolean, string or out-of-range values are not converted into token counts. Cached prompt and reasoning details are subsets of their parent counts. Contradictory totals/details become unknown. Usage does not bypass the required finish reason or `[DONE]` stream terminator.
 
-`SessionEngine.contextBudget()` and `providerUsage()` expose the current request's in-memory observations for the next client/diagnostic integration. They are reset before the next preparation; they are not yet wired into NativeWire or persisted. Existing request IDs are shared with diagnostics. Queue, cancellation and recovery continue to use the same execution owner; a local overflow preserves the admitted prompt and never dispatches tools.
+`SessionEngine.contextBudget()` and `providerUsage()` expose the current request's in-memory observations, reset before the next preparation. C2 also attaches request metadata to diagnostic events and NativeWire stage events. Request and turn IDs match the engine journal. Queue, cancellation and recovery continue to use the same execution owner; a local overflow preserves the admitted prompt and never dispatches tools.
 
-## Verification
+## Request inspector and retained diagnostics (C2)
+
+The compact **Context** button above the conversation opens **Request details** in both Shell and Chat. Both views use the same session-bound request list. It includes:
+
+- input tokens with exact/estimated/unknown provenance, capacity and its source, output reserve, and remaining space;
+- provider-reported prompt/completion/total tokens and optional cached/reasoning subsets;
+- request/turn IDs, purpose, preparation/measurement/response stages and sanitized result code;
+- first headers/data/reasoning/text timings and final model-response time.
+
+The bar includes input **plus the output reserve**. `≈` marks estimated input; missing capacity shows `?` and no percentage. Response timings start at host dispatch and include transport delays. They are not provider queue/prefill breakdowns or cache-hit measurements. Request elapsed time updates at observed milestones, not with a synthetic progress timer. Completed model timing is not inflated by subsequent tool execution or persistence. The inspector follows the latest request by default; a previous request can be selected explicitly.
+
+Each stage carries an optional, self-contained request snapshot, written through the existing presentation journal before delivery. Final metadata survives reconnect and host restart; unfinished requests are marked interrupted without restarting inference. The UI shows the most recent 128 requests in that session. Older journal records remain stored, pending a separate retention/paging milestone. Older sessions and hosts without metadata show unavailable values rather than zero.
+
+`DiagnosticTrace` and `DiagnosticArchive` each keep a separate bounded ledger of 128 request summaries and a dropped-request count. Overflow of the 256-event ring no longer loses a request's first milestones or final result. `harness --trace NEW_FILE` and `harness --inspect-trace FILE` retain the same request identity, budget, usage and timing semantics as the UI. Existing version-1 traces remain readable. New diagnostic stage strings survive decoding.
+
+NativeWire preserves unknown envelope fields and the complete extensible request object during decode/encode/journal replay, including nested values and large integer values. Unknown significant operations/stages produce up to eight bounded protocol notes. Known PTY, session, approval and workspace control events are not reported as unsupported. Malformed/future request objects do not disconnect the client. Known numeric fields are validated before display or arithmetic.
+
+**Share request diagnostics** exports an allowlist of scalar metadata. It excludes the raw extensible object, endpoint, headers, credentials, prompts, reasoning and tool output. The underlying conversation journal still contains private conversation and terminal data; it is not a diagnostic export.
+
+## C2 verification
+
+On 2026-09-08, `sh scripts/check.sh` passed with **89 Swift core/host tests**, client protocol/Markdown/Shell/transcript checks and **11 mocked voice tests**. The seven real-HTTP context probes also passed with assertions on final metadata, including preflight refusal, cancellation, timeout and truncated transport.
+
+```sh
+sh scripts/check-native.sh # also compiles the isolated WebSocket probe client
+python3 scripts/probe-native-context.py
+python3 scripts/probe-native-request-replay.py
+```
+
+The WebSocket probe starts its own loopback provider and Native Harness host in a temporary workspace/database. It verifies successful and HTTP-400 requests, exact count/capacity provenance, usage, first milestones, duplicate replay and host restart. Restart/replay must not generate another model request. `--hold` keeps only this test host alive for visual inspection until Enter is pressed. The temporary folder also contains `<session UUID>-events.json` replay files for the Debug UI mode below.
+
+Mac Catalyst and generic iOS Debug builds passed. The actual Chat/Shell views and inspector were checked in a separate Mac test app using a recorded replay from the isolated host. This is fixture evidence, not a live Home Rig or physical iPad check. The production app/host and Home Rig configuration were not updated.
+
+For repeatable offline UI diagnosis, a Debug build accepts `DSH_NATIVE_REPLAY=/absolute/path/events.json`: an array of NativeWire events beginning with `opened` and ending with `synced`, limited to 4 MiB. It renders the regular client views, creates no transport, and never runs shell commands. Use a separate test app identity to keep normal preferences isolated. Release builds do not include this mode.
+
+## C1 verification
 
 On 2026-09-08, `sh scripts/check.sh` passed: 84 Swift core/host tests, client protocol/Markdown/Shell/transcript checks and 11 mocked voice tests. New cases cover serialized system/tools/template inputs, terminal clipping, tool ordering, usage snapshots and numeric validation, known/unknown budgets, anchor invalidation, cancellation during measurement and the generation boundary.
 

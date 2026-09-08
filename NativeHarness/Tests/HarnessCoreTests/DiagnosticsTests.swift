@@ -60,4 +60,38 @@ final class DiagnosticsTests: XCTestCase {
         let stages = snap.events.map(\.stage)
         XCTAssertEqual(stages, [.firstReasoning, .firstText])
     }
+
+    func testRequestSummarySurvivesRingOverflowAndMilestonesAreFirstOnly() {
+        let trace = DiagnosticTrace()
+        trace.beginRequest(); trace.record(.measuring); trace.record(.measured); trace.record(.requesting)
+        trace.record(.firstData); trace.record(.firstText)
+        let first = trace.snapshot().requests[0].firstTextMS
+        for _ in 0..<300 { trace.record(.queued) }
+        trace.record(.firstText); trace.record(.modelCompleted)
+        let result = trace.snapshot()
+        XCTAssertFalse(result.events.contains { $0.stage == .requesting })
+        XCTAssertEqual(result.requests.count, 1)
+        XCTAssertEqual(result.requests[0].firstTextMS, first)
+        XCTAssertEqual(result.requests[0].stage, "modelCompleted")
+        XCTAssertEqual(result.events.last?.request?.requestID, result.requests[0].requestID)
+        XCTAssertNotNil(result.requests[0].preparationMS)
+        XCTAssertNotNil(result.requests[0].measurementMS)
+        let elapsed = result.requests[0].elapsedMS
+        trace.record(.toolStarted); trace.record(.failed, code: "STORAGE_FAILURE")
+        XCTAssertEqual(trace.snapshot().requests[0].elapsedMS, elapsed)
+        XCTAssertEqual(trace.snapshot().requests[0].stage, "modelCompleted", "Tool/persistence failure is not a failed model request")
+    }
+    func testIndependentRequestRetentionIsBounded() {
+        let trace = DiagnosticTrace()
+        for _ in 0..<140 { trace.beginRequest(); trace.record(.requesting); trace.record(.failed, code: "HTTP_400") }
+        XCTAssertEqual(trace.snapshot().requests.count, 128)
+        XCTAssertEqual(trace.snapshot().droppedRequests, 12)
+        XCTAssertEqual(trace.snapshot().requests.last?.code, "HTTP_400")
+    }
+    func testUnknownStageSurvivesDiagnosticRoundtrip() throws {
+        let source = Data(#"{"sequence":1,"elapsedMS":0,"sincePreviousMS":0,"context":{"sessionID":"s","turnID":"t"},"stage":"futureOperation"}"#.utf8)
+        let event = try JSONDecoder().decode(DiagnosticEvent.self, from: source)
+        XCTAssertEqual(event.stage.rawValue, "futureOperation")
+        XCTAssertEqual(try JSONDecoder().decode(DiagnosticEvent.self, from: JSONEncoder().encode(event)).stage, event.stage)
+    }
 }

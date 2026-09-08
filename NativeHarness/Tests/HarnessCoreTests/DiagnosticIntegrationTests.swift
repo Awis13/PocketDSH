@@ -55,6 +55,11 @@ private actor DiagnosticWaitingProvider: TestModelProvider {
         let snapshot = await engine.diagnostics()!
         XCTAssertEqual(snapshot.events.last?.stage, .failed)
         XCTAssertEqual(snapshot.events.last?.code, "PROVIDER_FAILURE")
+        XCTAssertEqual(snapshot.requests.last?.stage, "failed")
+        XCTAssertEqual(snapshot.requests.last?.code, "PROVIDER_FAILURE")
+        XCTAssertEqual(snapshot.requests.last?.purpose, "conversation")
+        XCTAssertNil(snapshot.requests.last?.firstTextMS)
+        XCTAssertNotNil(snapshot.requests.last?.budget)
         XCTAssertFalse(String(decoding: try JSONEncoder().encode(snapshot), as: UTF8.self).contains("PRIVATE_"))
     }
     func testPublicCancelWhileProviderIsWaiting() async throws {
@@ -95,5 +100,22 @@ private actor DiagnosticWaitingProvider: TestModelProvider {
         XCTAssertEqual(loaded.events.last?.sequence, 270)
         XCTAssertThrowsError(try DiagnosticArchive(url: url))
         XCTAssertEqual(try DiagnosticArchive.read(url: url).events.last?.sequence, 270)
+    }
+
+    func testArchiveRetainsFinalRequestAfterStartEvicted() throws {
+        let root = try directory(), trace = DiagnosticTrace()
+        let url = root.appendingPathComponent("request.json")
+        let archive = try DiagnosticArchive(url: url)
+        trace.beginRequest(); trace.record(.requesting)
+        for event in trace.snapshot().events { try archive.append(event) }
+        for _ in 0..<260 { trace.record(.queued); try archive.append(trace.snapshot().events.last!) }
+        trace.record(.failed, code: "HTTP_400"); try archive.append(trace.snapshot().events.last!)
+        let report = try DiagnosticArchive.read(url: url)
+        XCTAssertFalse(report.events.contains { $0.stage == .requesting })
+        XCTAssertEqual(report.requests?.last?.stage, "failed")
+        XCTAssertEqual(report.requests?.last?.code, "HTTP_400")
+        XCTAssertEqual(report.requests?.last?.turnID, trace.identifiers().turnID)
+        XCTAssertNotNil(report.requests?.last?.elapsedMS)
+        XCTAssertNil(report.requests?.last?.firstTextMS)
     }
 }

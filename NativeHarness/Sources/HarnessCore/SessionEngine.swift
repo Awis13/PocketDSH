@@ -116,9 +116,11 @@ public actor SessionEngine {
                     latestBudget = nil; latestUsage = nil
                     let request = try await provider.prepare(messages: history, tools: tools.definitions,
                         requestID: trace.identifiers().requestID!)
+                    trace.record(.measuring)
                     let budget = try await provider.measure(request, anchor: usageAnchor)
                     try Task.checkCancellation()
                     latestBudget = budget
+                    trace.setBudget(budget)
                     if budget.shouldReject { throw HarnessError.contextLimit }
                     trace.record(.requesting)
                     let observer = RequestDiagnostics(trace)
@@ -126,9 +128,9 @@ public actor SessionEngine {
                         observer.observe(update)
                         onUpdate(update)
                     }
-                    trace.record(.modelCompleted)
                     try Task.checkCancellation()
                     latestUsage = reply.usage
+                    trace.setUsage(reply.usage)
                     if let anchor = UsageAnchor(request: request, usage: reply.usage) { usageAnchor = anchor }
                     guard ["stop", "tool_calls"].contains(reply.finishReason) else {
                         throw HarnessError.provider("Incomplete model response: \(reply.finishReason)")
@@ -143,6 +145,7 @@ public actor SessionEngine {
                     guard !calls.isEmpty || !reply.message.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                         throw HarnessError.provider("Empty assistant response")
                     }
+                    trace.record(.modelCompleted)
                     try await save([SessionEvent("message", message: reply.message)], trace: trace)
                     history.append(reply.message)
                     if calls.isEmpty {

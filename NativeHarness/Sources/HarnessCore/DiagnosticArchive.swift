@@ -10,6 +10,7 @@ public struct DiagnosticReport: Codable, Sendable {
     public var events: [DiagnosticEvent]
     public var droppedEvents: Int
     public var requests: [RequestTiming]?
+    public var droppedRequests: Int?
 }
 
 /// Replaces a bounded snapshot atomically. This is disposable diagnostics, not
@@ -17,6 +18,7 @@ public struct DiagnosticReport: Codable, Sendable {
 public final class DiagnosticArchive: @unchecked Sendable {
     private let lock = NSLock()
     private let url: URL
+    private var ledger = RequestLedger()
     private var report: DiagnosticReport
     public init(url: URL) throws {
         self.url = url
@@ -32,7 +34,8 @@ public final class DiagnosticArchive: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         if report.events.count == 256 { report.events.removeFirst(); report.droppedEvents += 1 }
         report.events.append(event); report.updatedAt = Date()
-        report.requests = RequestTiming.summarize(report.events)
+        ledger.append(event)
+        report.requests = ledger.requests; report.droppedRequests = ledger.dropped
         try publish()
     }
     private func publish() throws {

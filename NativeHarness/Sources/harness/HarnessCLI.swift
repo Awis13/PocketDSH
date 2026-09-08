@@ -103,7 +103,8 @@ import Darwin
                         }
                     case .diagnostic(let event):
                         if event.stage == .turnCompleted { FileHandle.standardOutput.write(Data([10])) }
-                        let status = "\n[\(event.stage.rawValue) +\(Int(event.elapsedMS))ms]\(event.code.map { " \($0)" } ?? "")\n"
+                        let identity = event.context.requestID.map { " request=" + $0 } ?? ""
+                        let status = "\n[\(event.stage.rawValue) +\(Int(event.elapsedMS))ms]\(identity)\(event.code.map { " \($0)" } ?? "")\n"
                         FileHandle.standardError.write(Data(status.utf8))
                         do { try archive?.append(event) }
                         catch { FileHandle.standardError.write(Data("[diagnostic write failed; session execution continues]\n".utf8)) }

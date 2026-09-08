@@ -78,13 +78,27 @@ final class NativeChatConnection {
 /// Folds native events into the same rows rendered by the existing rich chat.
 struct NativeTranscript {
     private(set) var rows: [TranscriptRow] = []
+    private(set) var requests: [NativeRequestInfo] = []
+    private(set) var protocolNotices: [String] = []
+    private var sessionID: String?
     private var sequence = 0
     private var toolArguments: [String: String] = [:]
     private var toolStreams: [String: [String: Data]] = [:]
     mutating func apply(_ event: NativeEvent) {
-        if event.op == "opened" { rows = []; sequence = 0; toolArguments = [:]; toolStreams = [:]; return }
+        if event.op == "opened" {
+            self = NativeTranscript(); sessionID = event.session; return
+        }
+        if let sessionID, let incoming = event.session, sessionID != incoming { return }
         if let next = event.sequence {
             guard next > sequence else { return }; sequence = next
+        }
+        if let request = event.request, request.validIdentity {
+            if let i = requests.firstIndex(where: { $0.id == request.id }) { requests[i] = request }
+            else { requests.append(request); if requests.count > 128 { requests.removeFirst() } }
+        }
+        if event.extraFields["request"] != nil { notice("Unsupported request metadata") }
+        if let stage = event.stage, !NativeRequestInfo.knownStages.contains(stage) {
+            notice("Unrecognized stage: " + NativeRequestInfo.label(stage))
         }
         func finish() {
             for i in rows.indices where rows[i].kind != .shell { rows[i].complete = true }
@@ -139,8 +153,14 @@ struct NativeTranscript {
                                           text: event.stage == "cancelled" ? "Response stopped" : event.text == "CONTEXT_LIMIT" ? "Model context limit exceeded. Terminal and conversation are preserved." : "Native Harness turn failed", failed: event.stage == "failed"))
             }
         case "shellReset": rows.append(TranscriptRow(id: "native-shell-reset-\(sequence)", kind: .notice, text: event.text ?? "New shell; previous commands were not rerun."))
-        default: break
+        // These events belong to session controls, PTY or workspace state.
+        case "pty", "terminalSize", "workspaceAction", "sessions", "status", "synced", "accepted", "approval", "completion", "error": break
+        default: notice("Unrecognized event: " + NativeRequestInfo.label(event.op))
         }
+    }
+    private mutating func notice(_ value: String) {
+        guard protocolNotices.count < 8, !protocolNotices.contains(value) else { return }
+        protocolNotices.append(value)
     }
 
     private static func arguments(_ text: String) -> String {
