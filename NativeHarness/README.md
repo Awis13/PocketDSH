@@ -254,3 +254,14 @@ The research and broader target remain in [architecture research](../docs/NATIVE
 The shell/approval slice was checked with 44 passing Swift tests, five real CLI/process scenarios, and the existing transport and inbox crash probes. Home Rig supplied an initial shell test draft; unused scripts and an unsupported environment assumption were removed before integration. A live Qwen turn then requested one exact read-only shell command, received one-use approval, and reported its actual stdout and exit status. Request/response and execution evidence remain under the gitignored `output/native-harness/` directory. No Pocket DSH UI or production server deployment is included in this slice.
 
 For the PTY slice, Home Rig was also queried for additional terminal checks. Its two suggested snippets were rejected: one incorrectly expected `tty` to return `/dev/tty`, and neither tested the claimed condition correctly. Actual verification uses the local Darwin contract and real PTY subprocess probes.
+
+### Context maintenance controls
+
+`--interactive` accepts `{"op":"compact","id":"stable-operation-id"}`,
+`{"op":"compactStatus","id":"stable-operation-id"}`, and `{"op":"cancel"}`.
+The operation shares the session execution owner and refuses a busy agent.
+Stdin remains responsive while the summary runs. `compaction` replies carry the
+receipt, including failure/cancellation and before/after budgets; historical
+source messages and terminal commands are preserved. Pocket DSH exposes the same
+operation through `/compact` and the context toolbar. See
+[the context contract and verification](../docs/NATIVE-CONTEXT.md#manual-controls-c5).

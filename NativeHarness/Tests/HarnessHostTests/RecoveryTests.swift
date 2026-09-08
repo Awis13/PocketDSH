@@ -3,6 +3,21 @@ import HarnessCore
 @testable import harness
 
 final class RecoveryTests: XCTestCase {
+    func testCompactionRecoveryUsesCommittedReceiptAndDoesNotInventAnAgentTurn() {
+        let running = NativeCompactionInfo(id: "compact", state: "running")
+        let completed = NativeCompactionInfo(id: "compact", state: "completed")
+        let history = [NativeEvent(op: "compaction", session: "s", compaction: running),
+            NativeEvent(op: "request", session: "s", stage: "requesting")]
+        XCTAssertEqual(NativeRecovery.unfinishedCompactions(history), [running])
+        let committed = NativeRecovery.compactionEvent(running, stored: completed, session: "s")
+        XCTAssertEqual(committed.compaction, completed)
+        XCTAssertTrue(NativeRecovery.unfinishedCompactions(history + [committed]).isEmpty)
+        XCTAssertTrue(NativeRecovery.events(history, session: "s", engineInterrupted: false, pendingCount: 0).isEmpty)
+        let interrupted = NativeRecovery.compactionEvent(running, stored: nil, session: "s")
+        XCTAssertEqual(interrupted.compaction?.state, "interrupted")
+        XCTAssertEqual(interrupted.compaction?.code, "COMPACTION_INTERRUPTED")
+        XCTAssertTrue(NativeRecovery.unfinishedCompactions(history + [interrupted]).isEmpty)
+    }
     func testInterruptedWorkClosesWithoutInventingSuccessAndRecoveryIsIdempotent() {
         let history = [NativeEvent(op: "blockStart", id: "shell", text: "upgrade", workspace: "/tmp"),
                        NativeEvent(op: "user", id: "prompt", text: "check"),

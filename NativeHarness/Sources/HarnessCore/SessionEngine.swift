@@ -57,7 +57,9 @@ public actor SessionEngine {
         guard prompt == nil || !prompt!.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               maxSteps > 0 else { throw HarnessError.invalid("Empty prompt or invalid step limit") }
         running = true
-        let currentTrace = DiagnosticTrace(sessionID: id) { onUpdate(.diagnostic($0)) }
+        let currentTrace = DiagnosticTrace(sessionID: id) { event in
+            if event.request != nil { onUpdate(.diagnostic(event)) }
+        }
         trace = currentTrace
         currentTrace.record(.accepted)
         let owner = UUID().uuidString
@@ -95,8 +97,10 @@ public actor SessionEngine {
         running = true
         let owner = UUID().uuidString
         latestBudget = nil; latestUsage = nil
-        let currentTrace = DiagnosticTrace(sessionID: id) { onUpdate(.diagnostic($0)) }
-        trace = currentTrace; currentTrace.record(.accepted)
+        let currentTrace = DiagnosticTrace(sessionID: id) { event in
+            if event.request != nil { onUpdate(.diagnostic(event)) }
+        }
+        trace = currentTrace
         let task = Task {
             try Task.checkCancellation()
             try await self.store.acquireExecution(session: self.id, owner: owner)
@@ -104,7 +108,7 @@ public actor SessionEngine {
             let source = try await self.store.load(session: self.id)
             let repairs = Self.recovery(source)
             if !repairs.isEmpty { try await self.store.append(repairs, session: self.id) }
-            return try await self.performCompaction(operationID: operationID, owner: owner, trace: currentTrace)
+            return try await self.performCompaction(operationID: operationID, owner: owner, trace: currentTrace, onUpdate: onUpdate)
         }
         compactionTask = task
         defer { running = false; compactionTask = nil }
@@ -121,7 +125,23 @@ public actor SessionEngine {
         }
     }
 
-    private func performCompaction(operationID: String, owner: String, trace: DiagnosticTrace) async throws -> CompactionReceipt {
+    private func performCompaction(operationID: String, owner: String, trace: DiagnosticTrace,
+                                   onUpdate: @escaping @Sendable (LiveUpdate) -> Void) async throws -> CompactionReceipt {
+        onUpdate(.compaction(CompactionReceipt(operationID: operationID, state: .running)))
+        do {
+            let result = try await prepareCompaction(operationID: operationID, owner: owner, trace: trace, onUpdate: onUpdate)
+            onUpdate(.compaction(result))
+            return result
+        } catch {
+            let code = DiagnosticTrace.errorCode(error)
+            onUpdate(.compaction(CompactionReceipt(operationID: operationID,
+                state: code == "CANCELLED" ? .cancelled : .failed, code: code)))
+            throw error
+        }
+    }
+
+    private func prepareCompaction(operationID: String, owner: String, trace: DiagnosticTrace,
+                                   onUpdate: @escaping @Sendable (LiveUpdate) -> Void) async throws -> CompactionReceipt {
         compacting = true
         defer { compacting = false }
         try Task.checkCancellation()
@@ -136,6 +156,7 @@ public actor SessionEngine {
         var receipt = try await store.beginCompaction(session: id, owner: owner, operationID: operationID,
             sourceVersion: snapshot.version, fingerprint: original.fingerprint, before: before)
         if receipt.state != .running { return receipt }
+        onUpdate(.compaction(receipt))
         do {
             let compactor = ContextCompactor(provider: provider, tools: tools.definitions, policy: compactionPolicy)
             let plan = try await compactor.prepare(snapshot: snapshot, original: original, before: before, trace: trace)
@@ -221,8 +242,7 @@ public actor SessionEngine {
                                     onUpdate(.diagnostic(event))
                                 }
                             }
-                            maintenanceTrace.record(.accepted)
-                            let result = try await performCompaction(operationID: UUID().uuidString, owner: owner, trace: maintenanceTrace)
+                            let result = try await performCompaction(operationID: UUID().uuidString, owner: owner, trace: maintenanceTrace, onUpdate: onUpdate)
                             if result.state == .cancelled { throw CancellationError() }
                             guard result.state == .completed else { throw CompactionFailure(receipt: result) }
                             usageAnchor = nil

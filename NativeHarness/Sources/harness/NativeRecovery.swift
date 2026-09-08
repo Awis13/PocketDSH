@@ -1,6 +1,18 @@
 import Foundation
 
 enum NativeRecovery {
+    static func unfinishedCompactions(_ history: [NativeEvent]) -> [NativeCompactionInfo] {
+        var latest: [String: NativeCompactionInfo] = [:]
+        for event in history where event.op == "compaction" {
+            if let receipt = event.compaction { latest[receipt.id] = receipt }
+        }
+        return latest.values.filter(\.isRunning).sorted { $0.id < $1.id }
+    }
+    /// The core receipt is authoritative when commit preceded UI publication.
+    static func compactionEvent(_ previous: NativeCompactionInfo, stored: NativeCompactionInfo?, session: String) -> NativeEvent {
+        NativeEvent(op: "compaction", session: session, id: previous.id,
+            compaction: stored ?? NativeCompactionInfo(id: previous.id, state: "interrupted", code: "COMPACTION_INTERRUPTED"))
+    }
     /// Repairs only unfinished work. Repeated recovery is idempotent; it never
     /// invents an exit code or a successful result for an interrupted command.
     static func events(_ history: [NativeEvent], session: String, engineInterrupted: Bool, pendingCount: Int) -> [NativeEvent] {
@@ -9,7 +21,7 @@ enum NativeRecovery {
         var active = false
         var request: NativeRequestInfo?
         for event in history {
-            if let latest = event.request, latest.validIdentity { request = latest }
+            if event.op == "stage", let latest = event.request, latest.validIdentity { request = latest }
             switch event.op {
             case "blockStart": block = event
             case "blockEnd": block = nil

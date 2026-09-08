@@ -28,6 +28,8 @@ enum Interactive {
         var context: String?
         var terminals: [TerminalInfo]?
         var observation: TerminalRead?
+        var operationID: String?
+        var compaction: CompactionReceipt?
     }
     static func emit(_ reply: Reply) {
         if let data = try? JSONEncoder().encode(reply) {
@@ -48,6 +50,7 @@ enum Interactive {
         // Stdin is a local developer control channel, not a remote API.
         await Task.detached {
             var terminalReplies: [Task<Void, Never>] = []
+            var compactionReplies: [Task<Void, Never>] = []
             while let line = readLine() {
                 do {
                     guard line.utf8.count <= 300_000 else { throw HarnessError.invalid("Control line too large") }
@@ -94,7 +97,17 @@ enum Interactive {
                     case "remove":
                         guard let id = command.id else { throw HarnessError.invalid("id required") }
                         emit(Reply(control: "removed", removed: try await engine.removePending(commandID: id)))
-                    case "cancel": await driver.stop(); emit(Reply(control: "cancellationRequested"))
+                    case "compact":
+                        guard let id = command.id, !id.isEmpty, id.utf8.count <= 128, !id.contains("\0") else { throw HarnessError.invalid("Valid operation id required") }
+                        // Keep reading stdin so cancel/status remain available during inference.
+                        compactionReplies.append(Task {
+                            do { emit(Reply(control: "compaction", operationID: id, compaction: try await driver.compact(operationID: id))) }
+                            catch { emit(Reply(control: "compactionRejected", error: DiagnosticTrace.errorCode(error), operationID: id)) }
+                        })
+                    case "compactStatus":
+                        guard let id = command.id else { throw HarnessError.invalid("id required") }
+                        emit(Reply(control: "compaction", operationID: id, compaction: try await engine.compactionReceipt(operationID: id)))
+                    case "cancel": compactionReplies.forEach { $0.cancel() }; await driver.stop(); emit(Reply(control: "cancellationRequested"))
                     case "resume": await driver.resume(); emit(Reply(control: "resumed"))
                     case "status": emit(Reply(control: "status", status: try await driver.status()))
                     default: throw HarnessError.invalid("Unknown control operation")
@@ -104,7 +117,7 @@ enum Interactive {
             await pty.shutdown()
             await approvals.close()
             await terminal.cancel()
-            for reply in terminalReplies { await reply.value }
+            for reply in terminalReplies + compactionReplies { await reply.value }
             await driver.waitUntilIdle()
         }.value
         let status = try await driver.status()

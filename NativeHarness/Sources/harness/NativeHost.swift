@@ -52,6 +52,7 @@ final class NativeSink: @unchecked Sendable {
     private weak var peer: NativePeer?
     let journal: PresentationJournal
     private let sessionID: String
+    private var compaction: NativeCompactionInfo?
     private var metadata: NativeSessionInfo
     private var sequence = 0
     private var failed = false
@@ -66,6 +67,7 @@ final class NativeSink: @unchecked Sendable {
         self.metadata = try JSONDecoder().decode(NativeSessionInfo.self, from: journal.metadata(session: info.id)!)
         self.sequence = try journal.load(session: info.id).last.map { try JSONDecoder().decode(NativeEvent.self, from: $0).sequence ?? 0 } ?? 0
     }
+    func compactionInfo() -> NativeCompactionInfo? { lock.lock(); defer { lock.unlock() }; return compaction }
     func info() -> NativeSessionInfo { lock.withLock { metadata } }
     func history() throws -> [NativeEvent] {
         try journal.load(session: sessionID).map { try JSONDecoder().decode(NativeEvent.self, from: $0) }
@@ -77,6 +79,7 @@ final class NativeSink: @unchecked Sendable {
         guard let peer else { return }
         do {
             let events = try history().filter { $0.op != "workspaceAction" && $0.op != "approval" }
+            compaction = events.last(where: { $0.op == "compaction" })?.compaction
             peer.replay((opened.map { [$0] } ?? []) + events + [NativeEvent(op: "synced", session: metadata.id, sequence: sequence)])
         } catch { peer.send(NativeEvent(op: "error", text: "Cannot restore session: \(error)")) }
     }
@@ -97,6 +100,7 @@ final class NativeSink: @unchecked Sendable {
             failureHandler?()
             return false
         }
+        if event.op == "compaction" { compaction = event.compaction }
         sequence += 1; metadata = info
         peer?.send(event); return peer != nil
     }
@@ -115,6 +119,7 @@ private actor NativeHostSession {
     let store: EventStore
     private var peerID: UUID?
     private var admitted = Set<String>()
+    private var maintenance: Task<Void, Never>?
     private var terminalRows = 24
     private var terminalColumns = 80
 
@@ -135,9 +140,14 @@ private actor NativeHostSession {
             case .tool: break
             case .toolCall(let call): sink.send(NativeEvent(op: "toolCall", session: id, id: call.id, text: call.name, arguments: call.arguments))
             case .toolResult(let callID, let output, let failed): sink.send(NativeEvent(op: "toolResult", session: id, id: callID, text: output, failed: failed))
+            case .compaction(let receipt):
+                if let info = try? NativeCompactionInfo(encoding: receipt) {
+                    sink.send(NativeEvent(op: "compaction", session: id, id: info.id, compaction: info))
+                }
             case .diagnostic(let event):
                 let request = event.request.flatMap { try? NativeRequestInfo(encoding: $0) }
-                sink.send(NativeEvent(op: "stage", session: id, text: event.code, stage: event.stage.rawValue, request: request))
+                let maintenance = event.request?.purpose?.hasPrefix("compaction") == true
+                sink.send(NativeEvent(op: maintenance ? "request" : "stage", session: id, text: event.code, stage: event.stage.rawValue, request: request))
             case .shell(let output): sink.send(NativeEvent(op: "shellOutput", session: id, text: output.stream, bytes: output.bytes))
             case .approval(let request):
                 let delivered = sink.send(NativeEvent(op: "approval", session: id, approval: NativeApproval(id: request.id, name: request.call.name, arguments: request.call.arguments, workspace: request.workspace)))
@@ -169,14 +179,14 @@ private actor NativeHostSession {
     }
     func info() async throws -> NativeSessionInfo {
         let state = try await driver.status()
-        var info = sink.info(); info.running = state.running; return info
+        var info = sink.info(); info.running = state.running || maintenance != nil; return info
     }
     func attach(_ peer: NativePeer) async throws {
         try sink.checkStorage()
         guard peerID == nil || peerID == peer.id else { throw HarnessError.busy }
         // Reserve the attachment before any suspension so another peer cannot win it.
         peerID = peer.id
-        sink.attach(peer, opened: NativeEvent(op: "opened", session: id, model: model, workspace: workspace, ptyID: observation.id))
+        sink.attach(peer, opened: NativeEvent(op: "opened", session: id, model: model, workspace: workspace, ptyID: observation.id, capabilities: [NativeCompactionInfo.capability]))
         for request in await approvals.pending() where peerID == peer.id {
             peer.send(NativeEvent(op: "approval", session: id, approval: NativeApproval(id: request.id, name: request.call.name, arguments: request.call.arguments, workspace: request.workspace)))
         }
@@ -232,10 +242,40 @@ private actor NativeHostSession {
             guard let requestID = command.id else { throw HarnessError.invalid("Missing request ID") }
             _ = try await driver.submit(prompt: "Observe terminal \(observation.id) using terminal_inspect/read/wait. Read the current output, then wait for new output. Report what actually changes. Do not type into the terminal or run shell commands. Distinguish whole-PTY exit from completion of a command. Ask the user if a decision is needed.", commandID: requestID)
             sink.send(NativeEvent(op: "accepted", session: id, id: requestID, text: "Watch this terminal"))
+        case "compact":
+            guard let operationID = command.id, NativeCompactionInfo(id: operationID, state: "running").valid else {
+                throw HarnessError.invalid("Valid compaction operation ID required")
+            }
+            // A persisted receipt wins over every retry, even after a disconnect/restart.
+            if let receipt = try await engine.compactionReceipt(operationID: operationID) {
+                peer.send(NativeEvent(op: "compaction", session: id, id: operationID, compaction: try NativeCompactionInfo(encoding: receipt)))
+                return
+            }
+            if let previous = try sink.history().last(where: { $0.op == "compaction" && $0.compaction?.id == operationID }) {
+                peer.send(previous); return
+            }
+            let status = try await driver.status()
+            guard maintenance == nil, !status.running else {
+                peer.send(NativeEvent(op: "compactionRejected", session: id, id: operationID, text: "BUSY")); return
+            }
+            sink.send(NativeEvent(op: "compaction", session: id, id: operationID,
+                compaction: NativeCompactionInfo(id: operationID, state: "running")))
+            try sink.checkStorage()
+            maintenance = Task { await self.compact(operationID) }
+        case "compactStatus":
+            guard let operationID = command.id else { throw HarnessError.invalid("Operation ID required") }
+            let receipt: NativeCompactionInfo
+            if let stored = try await engine.compactionReceipt(operationID: operationID) {
+                receipt = try NativeCompactionInfo(encoding: stored)
+            } else if let previous = try sink.history().last(where: { $0.compaction?.id == operationID })?.compaction {
+                receipt = previous
+            } else { receipt = NativeCompactionInfo(id: operationID, state: "failed", code: "OPERATION_NOT_FOUND") }
+            peer.send(NativeEvent(op: "compaction", session: id, id: operationID, compaction: receipt))
         case "status":
             let status = try await driver.status()
-            peer.send(NativeEvent(op: "status", session: id, text: status.errorCode, running: status.running))
-        case "cancel": await driver.stop()
+            peer.send(NativeEvent(op: "status", session: id, text: status.errorCode, running: status.running || maintenance != nil,
+                compaction: sink.compactionInfo()))
+        case "cancel": maintenance?.cancel(); await driver.stop()
         case "approval":
             guard let id = command.id, let allow = command.allow else { throw HarnessError.invalid("Missing approval") }
             let answered = await approvals.answer(id: id, allow: allow)
@@ -244,7 +284,18 @@ private actor NativeHostSession {
         default: throw HarnessError.invalid("Unknown native command")
         }
     }
-    func stop() async { sink.attach(nil); await approvals.close(); await driver.stop(); pty.close(); _ = await pty.wait() }
+    private func compact(_ operationID: String) async {
+        defer { maintenance = nil }
+        do {
+            let result = try await driver.compact(operationID: operationID)
+            sink.send(NativeEvent(op: "compaction", session: id, id: operationID, compaction: try NativeCompactionInfo(encoding: result)))
+        } catch {
+            let code = DiagnosticTrace.errorCode(error)
+            sink.send(NativeEvent(op: "compaction", session: id, id: operationID,
+                compaction: NativeCompactionInfo(id: operationID, state: code == "CANCELLED" ? "cancelled" : "failed", code: code)))
+        }
+    }
+    func stop() async { maintenance?.cancel(); sink.attach(nil); await approvals.close(); await driver.stop(); pty.close(); _ = await pty.wait() }
 }
 
 actor NativeHost {
@@ -293,6 +344,11 @@ actor NativeHost {
                 if let requestID = event.commandID, !shown.contains(requestID), let text = try journal.originalRequest(session: id, id: requestID) {
                     sink.send(NativeEvent(op: "user", session: id, id: requestID, text: text))
                 }
+            }
+            for receipt in NativeRecovery.unfinishedCompactions(history) {
+                let stored = try await store.compactionReceipt(session: id, operationID: receipt.id)
+                let recovered = try stored.map { try NativeCompactionInfo(encoding: $0) }
+                sink.send(NativeRecovery.compactionEvent(receipt, stored: recovered, session: id))
             }
             for event in NativeRecovery.events(history, session: id, engineInterrupted: !repairs.isEmpty, pendingCount: pending.count) { sink.send(event) }
         }

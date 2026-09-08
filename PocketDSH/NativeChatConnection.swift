@@ -80,13 +80,17 @@ struct NativeTranscript {
     private(set) var rows: [TranscriptRow] = []
     private(set) var requests: [NativeRequestInfo] = []
     private(set) var protocolNotices: [String] = []
+    private(set) var supportsCompaction = false
+    private(set) var compactions: [NativeCompactionInfo] = []
+    var compaction: NativeCompactionInfo? { compactions.last }
     private var sessionID: String?
     private var sequence = 0
     private var toolArguments: [String: String] = [:]
     private var toolStreams: [String: [String: Data]] = [:]
     mutating func apply(_ event: NativeEvent) {
         if event.op == "opened" {
-            self = NativeTranscript(); sessionID = event.session; return
+            self = NativeTranscript(); sessionID = event.session
+            supportsCompaction = event.capabilities?.contains(NativeCompactionInfo.capability) == true; return
         }
         if let sessionID, let incoming = event.session, sessionID != incoming { return }
         if let next = event.sequence {
@@ -96,6 +100,15 @@ struct NativeTranscript {
             if let i = requests.firstIndex(where: { $0.id == request.id }) { requests[i] = request }
             else { requests.append(request); if requests.count > 128 { requests.removeFirst() } }
         }
+        if let receipt = event.compaction, receipt.valid {
+            if let index = compactions.firstIndex(where: { $0.id == receipt.id }) {
+                if !compactions[index].isFinished || receipt.isFinished { compactions[index] = receipt }
+            } else {
+                compactions.append(receipt)
+                if compactions.count > 64 { compactions.removeFirst() }
+            }
+        }
+        if event.extraFields["compaction"] != nil { notice("Unsupported compaction metadata") }
         if event.extraFields["request"] != nil { notice("Unsupported request metadata") }
         if let stage = event.stage, !NativeRequestInfo.knownStages.contains(stage) {
             notice("Unrecognized stage: " + NativeRequestInfo.label(stage))
@@ -154,7 +167,7 @@ struct NativeTranscript {
             }
         case "shellReset": rows.append(TranscriptRow(id: "native-shell-reset-\(sequence)", kind: .notice, text: event.text ?? "New shell; previous commands were not rerun."))
         // These events belong to session controls, PTY or workspace state.
-        case "pty", "terminalSize", "workspaceAction", "sessions", "status", "synced", "accepted", "approval", "completion", "error": break
+        case "request", "compaction", "compactionRejected", "pty", "terminalSize", "workspaceAction", "sessions", "status", "synced", "accepted", "approval", "completion", "error": break
         default: notice("Unrecognized event: " + NativeRequestInfo.label(event.op))
         }
     }

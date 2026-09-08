@@ -1,6 +1,37 @@
 # Native context and request accounting
 
-C1 prepares and measures model requests in HarnessCore. C2 exposes those observations in the shared Shell/Chat indicator and request inspector, and preserves them in diagnostic and presentation journals. C3 adds a durable model-only context projection. C4 adds bounded summary generation, automatic pressure handling and a manual engine/driver API. User controls remain C5; `/compact` is not exposed in the app or CLI yet. The original conversation and terminal history remain intact.
+C1 prepares and measures model requests in HarnessCore. C2 exposes those observations in the shared Shell/Chat indicator and request inspector, and preserves them in diagnostic and presentation journals. C3 adds a durable model-only context projection. C4 adds bounded summary generation, automatic pressure handling and a manual engine/driver API. C5 exposes `/compact`, a shared button/status/Stop, and ID-based native host and developer CLI controls. The original conversation and terminal history remain intact.
+
+## Manual controls (C5)
+
+The native host advertises `context.compact.v1` in `opened.capabilities`. Missing capability means unsupported; the app disables the button and gives an explicit refusal for `/compact`. The DSH backend is not treated as a native host.
+
+In either presentation, `/compact` in the ordinary editor starts maintenance. Shell Tab completes its prefix locally. Input owned by a running TUI is passed through unchanged. The button preserves the existing draft and attachments; the slash action consumes only the literal command. Maintenance does not insert a user/model message, move the scroll position, switch presentations, or interrupt the PTY.
+
+The shared status reads **Compacting context** while running, then shows before/after input tokens (with `≈` for estimates) or a refusal reason. Request details retains individual summary/validation timings and usage as well as the operation ID. Stop cancels model maintenance; the independent terminal interrupt remains available.
+
+Wire commands, after opening the session:
+
+```json
+{"op":"compact","session":"SESSION_UUID","id":"OPERATION_ID"}
+{"op":"compactStatus","session":"SESSION_UUID","id":"OPERATION_ID"}
+{"op":"cancel","session":"SESSION_UUID"}
+```
+
+`compaction` events carry the core receipt; `request` events carry summary/validation diagnostics without changing the parent agent turn's lifecycle. Status polling includes the latest receipt. A concurrent manual request receives `compactionRejected` with `BUSY`. Work is dispatched independently of the WebSocket receive loop, so Stop/status/terminal input remain available.
+
+The client stores an unconfirmed operation ID per endpoint/session. Reconnection asks for its status; it never reissues inference. Repeating an admitted ID returns its receipt. On host restart the core receipt wins, including a committed result not yet published to the UI; an unfinished operation is marked interrupted. The full original transcript and raw terminal output stay in the presentation journal.
+
+The developer CLI accepts the same `compact`, `compactStatus` and `cancel` operations on its `--interactive` JSON stdin channel (the CLI session is selected by `--session`, so omit `session`). Supply a stable `id`; keep stdin open to inspect status or cancel. Replies use `control: "compaction"` and include `compaction`, or `compactionRejected` with an error and operation ID. Summary text never enters ordinary stdout.
+
+### C5 verification
+
+- `sh scripts/check.sh`: 122 Swift core/host tests, offline client/protocol checks including `NativeContextChecks`, and 11 mocked voice tests passed.
+- `python3 scripts/probe-native-context-controls.py`: real isolated WebSocket host, HTTP/SSE fixture and migrated SQLite journals. Manual and automatic compaction, continued response, Stop/BUSY, repeated ID, unknown capacity, crash/restart, unchanged Shell/Chat source history, running PTY and projection reuse passed. All 120 seeded execution rows were byte-identical. Fixture counts are bytes, not a tokenizer benchmark.
+- Mac Catalyst and generic iOS Debug builds passed. The actual Chat and Shell views and request inspector were visually checked in a separate Mac app with recorded fixture replay. This is UI rendering evidence; the live control protocol was tested separately. Physical iPad interaction has not been tested for C5.
+- A bounded Home Rig `qwen3.8-27b` smoke used a temporary store/workspace and the real interactive CLI: one summary reduced exact server-counted input from **4,102 to 1,742 tokens**, with a 2,048-token output reserve and provider-reported capacity **80,128**. After process restart, the next turn returned the requested marker using the saved projection. It reported 1,294 prompt tokens (matching that request's count), 20 completion tokens and zero cached tokens. All 24 original rows remained intact, with no tool executions or repeated summary. This verifies the installed count/props/usage path, not general performance or every provider.
+
+No production app/host was replaced, no physical device was updated, and no server settings were changed. Original-journal retention/paging and provider retries remain separate work.
 
 ## Configuration
 
@@ -21,7 +52,7 @@ These settings do not change a server's model, slot capacity or generation defau
 
 The optional llama.cpp profile sends the prepared body to `/v1/chat/completions/input_tokens`. With no configured limit, it also reads the model-scoped `/props?model=…&autoload=false` and uses `default_generation_settings.n_ctx`, not training context or slot count. Reverse-proxy path prefixes are preserved. Both reads run concurrently, have a three-second resource timeout and a one-MiB response limit, and refuse HTTP redirects. Capabilities are checked for each request rather than cached across server changes.
 
-This implementation follows the pinned [llama.cpp count endpoint documentation](https://github.com/ggml-org/llama.cpp/blob/f3f1a8f2760f28325a5ec20c05b171e5b7c83a29/tools/server/README.md#post-v1chatcompletionsinput_tokens-token-counting) and [props contract](https://github.com/ggml-org/llama.cpp/blob/f3f1a8f2760f28325a5ec20c05b171e5b7c83a29/tools/server/README.md#get-props-get-server-global-properties). Count is a provider extension, not a universal compatible API. Support on the installed Home Rig build has not been verified or enabled by this increment.
+This implementation follows the pinned [llama.cpp count endpoint documentation](https://github.com/ggml-org/llama.cpp/blob/f3f1a8f2760f28325a5ec20c05b171e5b7c83a29/tools/server/README.md#post-v1chatcompletionsinput_tokens-token-counting) and [props contract](https://github.com/ggml-org/llama.cpp/blob/f3f1a8f2760f28325a5ec20c05b171e5b7c83a29/tools/server/README.md#get-props-get-server-global-properties). Count is a provider extension, not a universal compatible API. C5 verified count/props on the installed Home Rig build using an isolated client session; production configuration was not changed. See the evidence below.
 
 - A valid count response is an exact observation of that prepared request at the count endpoint. It does not guarantee that the server configuration stays unchanged until generation.
 - Otherwise, the budget uses a clearly labelled UTF-8 JSON bytes / 4 heuristic. This includes system/tools overhead but is neither a tokenizer nor a safe upper bound, especially across languages and templates.
@@ -100,7 +131,7 @@ python3 scripts/probe-native-request-replay.py
 
 The compaction probe runs the real CLI and compatible HTTP/SSE provider against an isolated deterministic server. It seeds an old unversioned database, forces four bounded summary requests, continues the conversation, restarts the process and checks reuse of the saved projection. All 24 original rows remain byte-identical. An incomplete summary is rejected without projection changes or tool execution. The fixture reports byte-based counts to exercise budgets; it is not a tokenizer benchmark or Home Rig evidence. The separate WebSocket/restart probe also passed for ordinary request metadata/replay.
 
-Mac Catalyst and generic iOS Debug builds passed. No app installation, production migration/restart or Home Rig inference was performed. Manual `/compact` controls, full client interaction checks and physical iPad validation remain C5.
+Mac Catalyst and generic iOS Debug builds passed. No app installation, production migration/restart or Home Rig inference was performed. C5 subsequently added manual controls and integration checks below. Physical iPad validation remains outstanding.
 
 ## C3 verification
 

@@ -50,6 +50,7 @@ public actor SessionDriver {
     public func compact(operationID: String) async throws -> CompactionReceipt {
         if let receipt = try await engine.compactionReceipt(operationID: operationID) { return receipt }
         guard task == nil, maintenance == nil else { throw HarnessError.busy }
+        errorCode = nil
         let work = Task { try await self.engine.compact(operationID: operationID, onUpdate: self.update) }
         maintenance = work
         do {

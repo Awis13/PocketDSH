@@ -55,6 +55,8 @@ struct NativeEvent: Codable, Sendable {
     var candidates: [String]?
     var limited: Bool?
     var request: NativeRequestInfo?
+    var capabilities: [String]?
+    var compaction: NativeCompactionInfo?
     var extraFields: [String: NativeJSON] = [:]
 }
 
@@ -117,8 +119,10 @@ extension NativeEvent {
         candidates = try c.decodeIfPresent([String].self, forKey: NativeWireKey("candidates"))
         limited = try c.decodeIfPresent(Bool.self, forKey: NativeWireKey("limited"))
         request = try? c.decodeIfPresent(NativeRequestInfo.self, forKey: NativeWireKey("request"))
-        let known: Set<String> = ["op", "session", "id", "text", "bytes", "stage", "model", "workspace", "ptyID", "chats", "approval", "running", "gap", "sequence", "exitCode", "arguments", "failed", "sessions", "rows", "columns", "candidates", "limited", "request"]
-        for key in c.allKeys where !known.contains(key.stringValue) || (key.stringValue == "request" && request == nil) {
+        capabilities = try c.decodeIfPresent([String].self, forKey: NativeWireKey("capabilities"))
+        compaction = try? c.decodeIfPresent(NativeCompactionInfo.self, forKey: NativeWireKey("compaction"))
+        let known: Set<String> = ["op", "session", "id", "text", "bytes", "stage", "model", "workspace", "ptyID", "chats", "approval", "running", "gap", "sequence", "exitCode", "arguments", "failed", "sessions", "rows", "columns", "candidates", "limited", "request", "capabilities", "compaction"]
+        for key in c.allKeys where !known.contains(key.stringValue) || (key.stringValue == "request" && request == nil) || (key.stringValue == "compaction" && compaction == nil) {
             extraFields[key.stringValue] = try c.decode(NativeJSON.self, forKey: key)
         }
     }
@@ -148,6 +152,8 @@ extension NativeEvent {
         try c.encodeIfPresent(candidates, forKey: NativeWireKey("candidates"))
         try c.encodeIfPresent(limited, forKey: NativeWireKey("limited"))
         try c.encodeIfPresent(request, forKey: NativeWireKey("request"))
+        try c.encodeIfPresent(capabilities, forKey: NativeWireKey("capabilities"))
+        try c.encodeIfPresent(compaction, forKey: NativeWireKey("compaction"))
     }
 }
 
@@ -250,5 +256,61 @@ extension NativeRequestInfo {
         for key in timings { if let value = milliseconds(key) { clean[key] = .number(Decimal(value)) } }
         let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         return (try? encoder.encode(clean)).map { String(decoding: $0, as: UTF8.self) } ?? "{}"
+    }
+}
+
+/// Foundation-only view of the durable core receipt. Preserve future fields.
+struct NativeCompactionInfo: Codable, Sendable, Equatable, Identifiable {
+    static let capability = "context.compact.v1"
+    var metadata: NativeRequestInfo
+    init(id: String, state: String, code: String? = nil) {
+        var fields: [String: NativeJSON] = ["operationID": .string(id), "state": .string(state)]
+        if let code { fields["code"] = .string(code) }
+        metadata = NativeRequestInfo(fields: fields)
+    }
+    init<T: Encodable>(encoding value: T) throws {
+        metadata = try NativeRequestInfo(encoding: value)
+    }
+    init(from decoder: Decoder) throws { metadata = try NativeRequestInfo(from: decoder) }
+    func encode(to encoder: Encoder) throws { try metadata.encode(to: encoder) }
+    var id: String { metadata.string("operationID") ?? "" }
+    var state: String { metadata.string("state") ?? "unknown" }
+    var code: String? { metadata.string("code") }
+    var valid: Bool { !id.isEmpty && id.utf8.count <= 128 && !id.contains("\0") }
+    var isRunning: Bool { state == "running" }
+    var isFinished: Bool { ["completed", "failed", "cancelled", "interrupted"].contains(state) }
+    var title: String {
+        switch state {
+        case "running": return "Compacting context"
+        case "completed": return "Context compacted"
+        case "cancelled": return "Compaction stopped"
+        case "interrupted": return "Compaction interrupted"
+        default: return "Context unchanged"
+        }
+    }
+    func count(_ key: String) -> String {
+        guard let value = metadata.tokens(key + ".input.tokens"),
+              let kind = metadata.string(key + ".input.kind"), ["exact", "estimated"].contains(kind) else { return "unknown" }
+        return (kind == "estimated" ? "≈" : "") + value.formatted()
+    }
+    var detail: String {
+        if state == "completed" { return count("before") + " → " + count("after") + " input tokens" }
+        switch code {
+        case "BUSY": return "Wait for the current operation to finish, or use Stop."
+        case "CONTEXT_CAPACITY_UNKNOWN": return "The host needs a known model context capacity."
+        case "CONTEXT_NOTHING_TO_COMPACT": return "No older completed turns to compact yet."
+        case "CONTEXT_PROTECTED_TAIL_TOO_LARGE": return "Recent turns alone exceed the context budget."
+        case "CONTEXT_GROUP_TOO_LARGE": return "An older turn is too large to summarize safely."
+        case "COMPACTION_INTERRUPTED": return "The host restarted. No compaction was restarted automatically."
+        case "OPERATION_NOT_FOUND": return "The host has no receipt for this operation. You can start a new one."
+        case "CANCELLED": return "Stopped; the conversation and previous context are preserved."
+        case "COMPACTION_INVALID_SUMMARY", "COMPACTION_NOT_SMALLER", "CONTEXT_STILL_TOO_LARGE": return "The summary did not pass validation. Previous context is preserved."
+        case .some(let code): return NativeRequestInfo.label(code)
+        case nil: return isRunning ? "Preparing and validating a summary; history stays intact." : ""
+        }
+    }
+    /// Only the ordinary editor owns slash controls; active terminal programs own raw input.
+    static func isEditorCommand(_ text: String, terminalRunning: Bool = false) -> Bool {
+        !terminalRunning && text.trimmingCharacters(in: .whitespacesAndNewlines) == "/compact"
     }
 }

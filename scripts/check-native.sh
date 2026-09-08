@@ -9,3 +9,5 @@ xcrun swiftc -parse-as-library PocketDSH/HarnessProtocol.swift PocketDSH/Harness
 .build/checks/native-chat-checks
 # Compile the opt-in isolated host/restart probe; it never runs against production here.
 xcrun swiftc -parse-as-library PocketDSH/HarnessProtocol.swift PocketDSH/HarnessAPI.swift Shared/NativeWire.swift PocketDSH/ShellBlockInteraction.swift PocketDSH/NativeChatConnection.swift Tests/NativeRequestReplayChecks.swift -o .build/checks/native-request-replay
+xcrun swiftc -parse-as-library PocketDSH/HarnessProtocol.swift PocketDSH/HarnessAPI.swift Shared/NativeWire.swift PocketDSH/ShellBlockInteraction.swift PocketDSH/NativeChatConnection.swift Tests/NativeContextChecks.swift -o .build/checks/native-context-checks
+.build/checks/native-context-checks

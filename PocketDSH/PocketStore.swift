@@ -34,7 +34,7 @@ final class PocketStore: ObservableObject {
     var openDefaultTaskWhenConnected = false
     @Published var voiceRecording = false
     @Published var selectedID: String? { didSet {
-        if selectedID != oldValue { nativeRequests = []; nativeProtocolNotices = [] }
+        if selectedID != oldValue { nativeRequests = []; nativeProtocolNotices = []; nativeCompaction = nil; nativeSupportsCompaction = false; nativeCompactionPending = false }
         persistPane()
     } }
     @Published var composerFocusRequest: UUID?
@@ -44,6 +44,12 @@ final class PocketStore: ObservableObject {
         newlyCreatedSession = nil
         if selectedID == id { composerFocusRequest = UUID() }
     }
+    @Published var nativeCompaction: NativeCompactionInfo?
+    @Published var nativeCompactionPending = false
+    @Published var nativeSupportsCompaction = false
+    var compactingContext: Bool { nativeCompactionPending || nativeCompaction?.isRunning == true }
+    var canCompactContext: Bool { usesNativeHarness && nativeSupportsCompaction && connected && nativeReady && !running && !compactingContext && nativeSubmission == nil }
+    private func compactionKey(_ session: String) -> String { "harness.compaction." + endpoint + "|" + session }
     @Published var nativeRequests: [NativeRequestInfo] = []
     @Published var nativeProtocolNotices: [String] = []
     @Published var rows: [TranscriptRow] = []
@@ -131,7 +137,7 @@ final class PocketStore: ObservableObject {
     private var pendingRequest: (id: String, text: String, session: String, imageIDs: [UUID])?
     private var projectionSeq: [String: Int] = [:]
     var selected: HarnessSession? { sessions.first { $0.id == selectedID } }
-    var running: Bool { selected?.running ?? false }
+    var running: Bool { (selected?.running ?? false) || compactingContext }
     var liveReasoning: TranscriptRow? {
         guard connected, running, let latest = rows.last(where: { $0.kind != .notice }),
               latest.kind == .reasoning, !latest.complete, !latest.text.isEmpty else { return nil }
@@ -202,7 +208,7 @@ final class PocketStore: ObservableObject {
         nativeReconnect?.cancel(); nativeReconnect = nil
         generation = UUID(); connectionTask?.cancel(); connectionTask = nil
         nativeShell?.disconnect(); nativeShell = nil
-        native?.disconnect(); native = nil; nativeRequests = []; nativeProtocolNotices = []; nativeReady = false; nativeSubmission = nil; api = nil
+        native?.disconnect(); native = nil; nativeRequests = []; nativeProtocolNotices = []; nativeCompaction = nil; nativeSupportsCompaction = false; nativeCompactionPending = false; nativeReady = false; nativeSubmission = nil; api = nil
         socket?.cancel(with: .goingAway, reason: nil); socket = nil
         connected = false; connecting = false; loadingHistory = false; interactions = []; clientID = ""
     }
@@ -376,7 +382,7 @@ final class PocketStore: ObservableObject {
         if model == .null { model = catalog["default"] }
         guard connected else { return }
         if let native {
-            nativeReady = false; nativeTranscript = NativeTranscript(); nativeRequests = []; nativeProtocolNotices = []; interactions = []
+            nativeReady = false; nativeTranscript = NativeTranscript(); nativeRequests = []; nativeProtocolNotices = []; nativeCompaction = nil; nativeSupportsCompaction = false; nativeCompactionPending = false; interactions = []
             guard let id else { native.selectedID = nil; return }
             loadingHistory = true; native.selectedID = id
             do { try await native.send(NativeCommand(op: "open", session: id)) }
@@ -489,6 +495,26 @@ final class PocketStore: ObservableObject {
         guard let data = Data(base64Encoded: value["data"].string), !data.isEmpty, data.count <= 32 * 1024 * 1024 else { throw HarnessError(message: "DSH returned an invalid image") }
         imageCache.setObject(data as NSData, forKey: key as NSString, cost: data.count)
         return data
+    }
+    func compactContext(fromEditor: Bool = false) async {
+        guard usesNativeHarness, nativeSupportsCompaction else {
+            error = "This host does not support context compaction. Connect to an updated Native Harness host."; return
+        }
+        guard connected, nativeReady, let native, let session = selectedID else {
+            error = "Reconnect to the native host before compacting context."; return
+        }
+        guard !running, !compactingContext, nativeSubmission == nil else {
+            error = "Wait for the current operation to finish, or use Stop."; return
+        }
+        let operationID = UUID().uuidString
+        UserDefaults.standard.set(operationID, forKey: compactionKey(session))
+        nativeCompactionPending = true
+        if fromEditor, NativeCompactionInfo.isEditorCommand(draft) { draft = "" }
+        do {
+            try await native.send(NativeCommand(op: "compact", session: session, id: operationID))
+        } catch {
+            if selectedID == session { nativeCompactionPending = false; self.error = "Compaction not confirmed. Reconnect to retrieve its status: " + error.localizedDescription }
+        }
     }
     func cancel() async {
         if let native, let id = selectedID {
@@ -641,6 +667,25 @@ extension PocketStore {
         if ["opened", "synced", "pty", "blockStart", "blockEnd", "ptyExit", "shellReset", "terminalSize"].contains(event.op) { nativeShell?.receive(event) }
         if event.op == "workspaceAction" || event.op == "pty" { return }
         nativeTranscript.apply(event)
+        nativeSupportsCompaction = nativeTranscript.supportsCompaction
+        if nativeCompaction != nativeTranscript.compaction { nativeCompaction = nativeTranscript.compaction }
+        if let session = selectedID {
+            let key = compactionKey(session)
+            let pending = UserDefaults.standard.string(forKey: key)
+            if let receipt = event.compaction, receipt.id == pending {
+                nativeCompactionPending = false
+                if receipt.isFinished { UserDefaults.standard.removeObject(forKey: key) }
+            }
+            if event.op == "compactionRejected" {
+                if event.id == pending { UserDefaults.standard.removeObject(forKey: key); nativeCompactionPending = false }
+                error = NativeCompactionInfo(id: event.id ?? "rejected", state: "failed", code: event.text).detail
+            }
+            // Reconcile only. Reconnecting must never start inference by itself.
+            if event.op == "synced", let pending, nativeSupportsCompaction {
+                nativeCompactionPending = true
+                Task { try? await native?.send(NativeCommand(op: "compactStatus", session: session, id: pending)) }
+            }
+        }
         if nativeRequests != nativeTranscript.requests { nativeRequests = nativeTranscript.requests }
         if nativeProtocolNotices != nativeTranscript.protocolNotices { nativeProtocolNotices = nativeTranscript.protocolNotices }
         if ["blockStart", "blockEnd", "ptyExit"].contains(event.op), let block = nativeShell?.blocks.last {
@@ -668,7 +713,7 @@ extension PocketStore {
         if event.op == "status", let id = selectedID {
             updateSession(id, key: "running", value: .bool(event.running ?? false))
             if event.running == false { interactions = [] }
-            if let code = event.text, code != "CANCELLED" {
+            if let code = event.text, code != "CANCELLED", code != event.compaction?.code {
                 error = code == "CONTEXT_LIMIT" ? "Model context limit exceeded. Terminal and history are preserved; start a new session or attach less output." : "Native Harness: " + code
             } else if error?.hasPrefix("Native Harness:") == true { error = nil }
         }

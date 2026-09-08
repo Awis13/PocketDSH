@@ -60,6 +60,7 @@ public enum LiveUpdate: Sendable {
     case providerHeaders, providerData
     case approval(ApprovalRequest), shell(ShellOutput)
     case diagnostic(DiagnosticEvent)
+    case compaction(CompactionReceipt)
 }
 
 public protocol ModelProvider: Sendable {

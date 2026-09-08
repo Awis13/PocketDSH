@@ -193,7 +193,7 @@ struct NativeShellPane: View {
                         if let pending = store.pendingText {
                             Text("❯ YOU · sending\n" + pending).font(.system(size: theme.messageSize, design: .monospaced))
                         }
-                        if store.running {
+                        if store.running && !store.compactingContext {
                             HStack(spacing: 8) { ProgressView().controlSize(.small); Text("Agent is working") }
                                 .font(.caption.monospaced()).foregroundStyle(.secondary)
                         }
@@ -248,7 +248,7 @@ struct NativeShellPane: View {
                         accessibilityName: "Shell command or agent question", accessibilityID: "shellComposer",
                         sendToAgent: store.currentInteractions.isEmpty ? { ask(store.draft) } : nil,
                         interruptCommand: client.shellRunning ? { client.interruptCommand() } : nil,
-                        yieldFocusOnSend: true, allowsRequestedFocus: !findVisible && (!client.shellRunning || !store.shellAttachments.isEmpty),
+                        yieldFocusOnSend: !NativeCompactionInfo.isEditorCommand(store.draft, terminalRunning: client.shellRunning), allowsRequestedFocus: !findVisible && (!client.shellRunning || !store.shellAttachments.isEmpty),
                         shellCompletion: client.shellRunning ? nil : requestCompletion,
                         shellHistory: client.shellRunning ? nil : { direction, text, selection in
                             dismissCompletion()
@@ -325,6 +325,9 @@ struct NativeShellPane: View {
     }
     private func requestCompletion(_ text: String, _ selection: NSRange) {
         dismissCompletion()
+        if !client.shellRunning, "/compact".hasPrefix(text), text.hasPrefix("/"), selection.length == 0, selection.location == text.utf16.count {
+            shellEdit = ShellEditorEdit(original: text, selection: selection, text: "/compact", cursor: 8); store.draft = "/compact"; return
+        }
         guard let input = ShellCompletionInput(text, selection: selection) else {
             completionStatus = "Move the caret to a command or path to complete"; return
         }
@@ -360,7 +363,10 @@ struct NativeShellPane: View {
     private func run() {
         dismissCompletion(); history.reset()
         let text = store.draft
-        if text.trimmingCharacters(in: .whitespacesAndNewlines) == "/view" {
+        if NativeCompactionInfo.isEditorCommand(text, terminalRunning: client.shellRunning) {
+            Task { await store.compactContext(fromEditor: true) }; return
+        }
+        if !client.shellRunning, text.trimmingCharacters(in: .whitespacesAndNewlines) == "/view" {
             store.draft = ""; nativePanelTerminal?.wrappedValue = false; store.composerFocusRequest = UUID(); return
         }
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, !client.shellExited else { return }
@@ -369,6 +375,9 @@ struct NativeShellPane: View {
         resumeFollowing()
     }
     private func ask(_ text: String) {
+        if NativeCompactionInfo.isEditorCommand(text, terminalRunning: client.shellRunning) {
+            Task { await store.compactContext(fromEditor: true) }; return
+        }
         dismissCompletion(); history.reset()
         var context: NativeBlock?
         if store.shellAttachments.isEmpty, let selected = client.terminal.getSelection(), !selected.isEmpty {

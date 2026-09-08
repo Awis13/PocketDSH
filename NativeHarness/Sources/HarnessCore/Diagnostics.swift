@@ -207,7 +207,7 @@ public final class DiagnosticTrace: @unchecked Sendable {
     static func ms(_ duration: Duration) -> Double {
         Double(duration.components.seconds) * 1000 + Double(duration.components.attoseconds) / 1e15
     }
-    static func errorCode(_ error: Error) -> String {
+    public static func errorCode(_ error: Error) -> String {
         if error is CancellationError || (error as? URLError)?.code == .cancelled { return "CANCELLED" }
         if let error = error as? CompactionFailure { return error.receipt.code ?? "COMPACTION_FAILED" }
         if let error = error as? CompactionError { return error.rawValue }

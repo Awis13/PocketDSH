@@ -8,6 +8,8 @@ struct ContextStatusView: View {
     private var latest: NativeRequestInfo? { store.nativeRequests.last }
 
     var body: some View {
+        VStack(spacing: 0) {
+        HStack(spacing: 8) {
         Button { showingDetails = true } label: {
             HStack(spacing: 8) {
                 Image(systemName: "chart.bar.xaxis").foregroundStyle(theme.accent)
@@ -19,12 +21,36 @@ struct ContextStatusView: View {
                 }
                 Spacer(minLength: 4)
                 if !store.nativeProtocolNotices.isEmpty { Image(systemName: "exclamationmark.circle").foregroundStyle(.orange) }
-                Text(latest?.stageLabel ?? "Request details").lineLimit(1).foregroundStyle(.secondary)
+                Text(store.compactingContext ? "Compacting context" : latest?.stageLabel ?? "Request details").lineLimit(1).foregroundStyle(.secondary)
                 Image(systemName: "chevron.right").font(.system(size: 9, weight: .semibold)).foregroundStyle(.secondary)
             }.font(.caption).padding(.horizontal, 20).padding(.vertical, 9)
                 .contentShape(Rectangle())
         }.buttonStyle(.plain).accessibilityIdentifier("contextStatus")
             .accessibilityLabel("Context and request details")
+        Button { Task { await store.compactContext() } } label: {
+            Label("Compact", systemImage: "arrow.down.right.and.arrow.up.left")
+                .font(.caption).fixedSize()
+        }.buttonStyle(.borderless).disabled(!store.canCompactContext)
+            .help(store.nativeSupportsCompaction ? "Summarize older turns; preserve full history" : "This host does not support context compaction")
+            .accessibilityIdentifier("compactContext").padding(.trailing, 20)
+        }
+        if store.compactingContext || store.nativeCompaction != nil {
+            HStack(spacing: 10) {
+                if store.compactingContext { ProgressView().controlSize(.small) }
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(store.compactingContext ? "Compacting context" : store.nativeCompaction?.title ?? "Context")
+                        .fontWeight(.medium)
+                    Text(store.nativeCompaction?.detail ?? "Waiting for the host to confirm the operation.")
+                        .foregroundStyle(.secondary).textSelection(.enabled)
+                }
+                Spacer(minLength: 4)
+                if store.compactingContext {
+                    Button("Stop") { Task { await store.cancel() } }.accessibilityIdentifier("stopCompaction")
+                }
+            }.font(.caption).padding(.horizontal, 20).padding(.bottom, 9)
+                .accessibilityIdentifier("compactionStatus")
+        }
+        }
             .sheet(isPresented: $showingDetails) {
                 ContextRequestInspector().environmentObject(store)
             }
@@ -42,6 +68,18 @@ private struct ContextRequestInspector: View {
     var body: some View {
         NavigationStack {
             Form {
+                Section("Context compaction") {
+                    if let receipt = store.nativeCompaction {
+                        field("Status", receipt.title)
+                        field("Operation ID", receipt.id)
+                        Text(receipt.detail).foregroundStyle(.secondary)
+                        if let code = receipt.code { field("Result code", code) }
+                        field("Summary requests", receipt.metadata.tokens("summaryRequests").map(String.init) ?? "Not reported")
+                    }
+                    if !store.nativeSupportsCompaction { Text("This host does not support context compaction.").foregroundStyle(.secondary) }
+                    Button("Compact context") { Task { await store.compactContext() } }.disabled(!store.canCompactContext)
+                    if store.compactingContext { Button("Stop") { Task { await store.cancel() } } }
+                }
                 if let request {
                     Section("Request") {
                         if store.nativeRequests.count > 1 {

@@ -97,6 +97,7 @@ import Darwin
                         if let data = try? JSONEncoder().encode(request) {
                             FileHandle.standardError.write(Data("{\"control\":\"approval\",\"request\":".utf8) + data + Data("}\n".utf8))
                         }
+                    case .compaction(let receipt): Interactive.emit(.init(control: "compaction", compaction: receipt))
                     case .shell(let output):
                         if let data = try? JSONEncoder().encode(output) {
                             FileHandle.standardError.write(Data("{\"control\":\"shellOutput\",\"output\":".utf8) + data + Data("}\n".utf8))

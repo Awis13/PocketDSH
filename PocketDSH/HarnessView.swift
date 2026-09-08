@@ -14,7 +14,7 @@ struct HarnessView: View {
     @State private var commandIndex = 0
     @State private var commandsDismissed = false
     @State private var creatingTask = false
-    private let commands = [("/view", "Switch chat / terminal"), ("/model", "Search models"), ("/new", "New task in default workspace")]
+    private let commands = [("/view", "Switch chat / terminal"), ("/model", "Search models"), ("/new", "New task in default workspace"), ("/compact", "Compact model context")]
     private var commandMatches: [(String, String)] {
         guard !commandsDismissed, store.draft.hasPrefix("/"), !store.draft.contains(where: { $0.isWhitespace }) else { return [] }
         return commands.filter { $0.0.hasPrefix(store.draft.lowercased()) }
@@ -22,6 +22,7 @@ struct HarnessView: View {
     private func runCommand(_ command: String) {
         guard !creatingTask else { return }
         switch command {
+        case "/compact": Task { await store.compactContext(fromEditor: true) }
         case "/view": store.draft = ""; terminalInput.toggle(); store.composerFocusRequest = UUID()
         case "/model":
             store.draft = ""
@@ -121,7 +122,7 @@ struct HarnessView: View {
                                 }
                             }
                         }
-                        if store.running {
+                        if store.running && !store.compactingContext {
                             VStack(alignment: .leading, spacing: 8) {
                                 HStack(spacing: 9) { ProgressView().controlSize(.small); Text("Agent is working").font(.caption).foregroundStyle(.secondary) }
                                 if let reasoning = store.liveReasoning {
