@@ -10,8 +10,13 @@ public actor SessionEngine {
     private var running = false
     private var activeTask: Task<String, Error>?
     private var trace: DiagnosticTrace?
+    private var latestBudget: ContextBudget?
+    private var latestUsage: ProviderUsage?
+    private var usageAnchor: UsageAnchor?
 
     public func diagnostics() -> DiagnosticSnapshot? { trace?.snapshot() }
+    public func contextBudget() -> ContextBudget? { latestBudget }
+    public func providerUsage() -> ProviderUsage? { latestUsage }
 
     public func cancel() {
         guard let activeTask else { return }
@@ -108,14 +113,23 @@ public actor SessionEngine {
                     try Task.checkCancellation()
                     trace.beginRequest()
                     history += try await store.claim(session: id, owner: owner, startsTurn: false, trace: trace.identifiers())
+                    latestBudget = nil; latestUsage = nil
+                    let request = try await provider.prepare(messages: history, tools: tools.definitions,
+                        requestID: trace.identifiers().requestID!)
+                    let budget = try await provider.measure(request, anchor: usageAnchor)
+                    try Task.checkCancellation()
+                    latestBudget = budget
+                    if budget.shouldReject { throw HarnessError.contextLimit }
                     trace.record(.requesting)
                     let observer = RequestDiagnostics(trace)
-                    let reply = try await provider.complete(messages: history, tools: tools.definitions) { update in
+                    let reply = try await provider.complete(request) { update in
                         observer.observe(update)
                         onUpdate(update)
                     }
                     trace.record(.modelCompleted)
                     try Task.checkCancellation()
+                    latestUsage = reply.usage
+                    if let anchor = UsageAnchor(request: request, usage: reply.usage) { usageAnchor = anchor }
                     guard ["stop", "tool_calls"].contains(reply.finishReason) else {
                         throw HarnessError.provider("Incomplete model response: \(reply.finishReason)")
                     }

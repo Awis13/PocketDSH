@@ -13,7 +13,7 @@ import Darwin
                       let model = env["HARNESS_MODEL"], let token = env["HARNESS_HOST_TOKEN"] else {
                     throw HarnessError.invalid("harness --host --workspace PATH --store DATABASE; set HARNESS_BASE_URL, HARNESS_MODEL, HARNESS_HOST_TOKEN")
                 }
-                let provider = try CompatibleProvider(baseURL: url, model: model, apiKey: env["HARNESS_API_KEY"], disableThinking: env["HARNESS_DISABLE_THINKING"] == "1")
+                let provider = try CompatibleProvider(baseURL: url, model: model, apiKey: env["HARNESS_API_KEY"], disableThinking: env["HARNESS_DISABLE_THINKING"] == "1", options: ProviderOptions.environment(env))
                 let store = try EventStore(path: args[4])
                 let host = try NativeHost(port: UInt16(env["HARNESS_HOST_PORT"] ?? "8768") ?? 8768, token: token, workspace: args[2], model: model, provider: provider, store: store, journal: PresentationJournal(path: args[4] + ".native.sqlite"))
                 try await host.start()
@@ -50,6 +50,9 @@ import Darwin
                 harness --terminal --workspace PATH
                 harness --host --workspace PATH --store DATABASE
                 Provider: HARNESS_BASE_URL (including /v1), HARNESS_MODEL, optional HARNESS_API_KEY.
+                Budget: optional HARNESS_CONTEXT_TOKENS, HARNESS_OUTPUT_TOKENS (default 4096).
+                HARNESS_PROVIDER_PROFILE=llama-cpp enables bounded count/props checks; default compatible does not probe.
+                HARNESS_INCLUDE_USAGE=0|1 overrides streaming usage (default on for llama-cpp, off for compatible).
                 Host: HARNESS_HOST_TOKEN (at least 32 bytes), optional HARNESS_HOST_PORT (default 8768); loopback only.
                 Read-only by default. Interactive one-use approvals for shell and edits. Ctrl-C cancels the foreground turn.
                 """)
@@ -71,7 +74,7 @@ import Darwin
                   let id = options["--session"], !id.isEmpty else {
                 throw HarnessError.invalid("Missing required arguments or provider environment; use --help")
             }
-            let provider = try CompatibleProvider(baseURL: url, model: model, apiKey: env["HARNESS_API_KEY"], disableThinking: env["HARNESS_DISABLE_THINKING"] == "1")
+            let provider = try CompatibleProvider(baseURL: url, model: model, apiKey: env["HARNESS_API_KEY"], disableThinking: env["HARNESS_DISABLE_THINKING"] == "1", options: ProviderOptions.environment(env))
             let store = try EventStore(path: URL(fileURLWithPath: db).standardizedFileURL.path)
             let approvals = options["--interactive"] != nil ? ApprovalController() : nil
             let observations = TerminalObservations()

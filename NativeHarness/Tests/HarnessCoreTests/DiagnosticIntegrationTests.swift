@@ -1,9 +1,9 @@
 import XCTest
 @testable import HarnessCore
 
-private struct DiagnosticProvider: ModelProvider {
+private struct DiagnosticProvider: TestModelProvider {
     let fail: Bool
-    func complete(messages: [Message], tools: [ToolDefinition], onUpdate: @escaping @Sendable (LiveUpdate) -> Void) async throws -> ModelReply {
+    func complete(_ request: PreparedModelRequest, onUpdate: @escaping @Sendable (LiveUpdate) -> Void) async throws -> ModelReply {
         onUpdate(.providerHeaders)
         onUpdate(.reasoning("PRIVATE_REASONING"))
         if fail { throw HarnessError.provider("PRIVATE_ERROR_WITH_KEY") }
@@ -12,9 +12,9 @@ private struct DiagnosticProvider: ModelProvider {
     }
 }
 
-private actor DiagnosticWaitingProvider: ModelProvider {
+private actor DiagnosticWaitingProvider: TestModelProvider {
     var entered = false
-    func complete(messages: [Message], tools: [ToolDefinition], onUpdate: @escaping @Sendable (LiveUpdate) -> Void) async throws -> ModelReply {
+    func complete(_ request: PreparedModelRequest, onUpdate: @escaping @Sendable (LiveUpdate) -> Void) async throws -> ModelReply {
         entered = true
         try await Task.sleep(for: .seconds(30))
         throw HarnessError.provider("Should have cancelled")

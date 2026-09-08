@@ -2,13 +2,13 @@ import XCTest
 import CSQLite
 @testable import HarnessCore
 
-private actor InboxProvider: ModelProvider {
+private actor InboxProvider: TestModelProvider {
     var requests: [[Message]] = []
     private var gate: CheckedContinuation<ModelReply, Error>?
     let hold: Bool
     init(hold: Bool = true) { self.hold = hold }
-    func complete(messages: [Message], tools: [ToolDefinition], onUpdate: @escaping @Sendable (LiveUpdate) -> Void) async throws -> ModelReply {
-        requests.append(messages)
+    func complete(_ request: PreparedModelRequest, onUpdate: @escaping @Sendable (LiveUpdate) -> Void) async throws -> ModelReply {
+        requests.append(request.messages)
         if requests.count == 1 && hold {
             return try await withTaskCancellationHandler {
                 try Task.checkCancellation()

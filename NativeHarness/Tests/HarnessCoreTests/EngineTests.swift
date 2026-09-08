@@ -1,21 +1,21 @@
 import XCTest
 @testable import HarnessCore
 
-private actor ScriptedProvider: ModelProvider {
+private actor ScriptedProvider: TestModelProvider {
     var replies: [ModelReply]
     var requests: [[Message]] = []
     init(_ replies: [ModelReply]) { self.replies = replies }
-    func complete(messages: [Message], tools: [ToolDefinition], onUpdate: @escaping @Sendable (LiveUpdate) -> Void) async throws -> ModelReply {
-        requests.append(messages)
+    func complete(_ request: PreparedModelRequest, onUpdate: @escaping @Sendable (LiveUpdate) -> Void) async throws -> ModelReply {
+        requests.append(request.messages)
         guard !replies.isEmpty else { throw HarnessError.provider("Script exhausted") }
         return replies.removeFirst()
     }
 }
 
-private actor WaitingProvider: ModelProvider {
+private actor WaitingProvider: TestModelProvider {
     private var entered = false
     func hasEntered() -> Bool { entered }
-    func complete(messages: [Message], tools: [ToolDefinition], onUpdate: @escaping @Sendable (LiveUpdate) -> Void) async throws -> ModelReply {
+    func complete(_ request: PreparedModelRequest, onUpdate: @escaping @Sendable (LiveUpdate) -> Void) async throws -> ModelReply {
         entered = true
         try await Task.sleep(for: .seconds(30))
         return ModelReply(message: .init(role: "assistant", content: "unexpected"))

@@ -4,6 +4,8 @@ Updated 2026-09-08 after packaging the native workspace in [PR #1](https://githu
 
 This is a source-based reconciliation of the earlier DSH and Warp research, not another live walkthrough of either product. It supersedes implementation-status claims in the older research notes. Recommended work below is a plan, not approved implementation. Do not infer a completion percentage from the number of broad feature rows.
 
+Subsequent increment, 2026-09-08: **NH-CONTEXT C1 is implemented locally** — frozen provider requests, usage normalization, optional llama.cpp count/props, configured limits and an explicitly estimated fallback. [Request accounting](NATIVE-CONTEXT.md) records configuration and verification. C2 client metrics and C3–C5 context projection/compaction are still pending.
+
 ## Product contract
 
 One native workspace, one session journal, two parallel presentations: touch-friendly Chat and keyboard-first Shell. Shell Enter executes/sends terminal input; Command+Enter asks the integrated agent in place. Switching presentation keeps the session, draft, output and agent history. Output and agent steps stay visible in Shell. Themes, split panes, active-pane Command+W and local/private-network inference remain core requirements.
@@ -42,7 +44,7 @@ These are the ten boundaries from [the source research](NATIVE-HARNESS-RESEARCH.
 | Goals and children | Missing | No native goal/plan/subagent/workflow drivers. Define lineage, authority, concurrency and cancellation before adding their UI |
 | Reconnect reconciliation | Implemented foundation | Ordered replay, acknowledged prompt IDs and saved drafts exist. Add version/capability negotiation, explicit unknown-event handling, paged replay and multi-client policy |
 
-Provider-specific gaps: one configured compatible endpoint/model per host, fixed generation settings, no automatic provider retry policy, usage/token accounting or per-session model/effort selection. Diagnostics report observed milestones; they do not split provider queue time from prefill or establish cache hits. The [benchmark](HARNESS-BENCHMARK-2026-09-08.md) used unequal tool/context/cache conditions and is not a pure Swift-versus-TypeScript speed comparison.
+Provider-specific gaps: one configured compatible endpoint/model per host, no automatic provider retry policy or per-session model/effort selection. C1 now accounts for usage and request budgets in memory and configures the output reserve; client display and durable metric replay remain pending. Diagnostics report observed milestones; they do not split provider queue time from prefill or establish cache hits. The [benchmark](HARNESS-BENCHMARK-2026-09-08.md) used unequal tool/context/cache conditions and is not a pure Swift-versus-TypeScript speed comparison.
 
 ## DSH client inventory reconciliation
 
@@ -109,7 +111,7 @@ All 55 research IDs are mapped. “Partial” means the useful core exists, not 
 
 The broader comparison changes the priority from adding another input feature to making long native sessions dependable. These are bounded proposals; nothing here starts a development cycle.
 
-1. **NH-CONTEXT — visible context pressure.** Parse actual provider usage/capabilities, display context budget and request timing with unknown values explicit; preserve unknown relevant events. Acceptance: a long session shows evidence of pressure before a provider rejection, and users can inspect the failed request stage. Never fabricate cache hits or prefill percentages.
+1. **NH-CONTEXT — visible context pressure.** C1 provider accounting is implemented; next is C2 display of context budget and request timing with unknown values explicit, durable metrics and preservation of unknown relevant events. Acceptance uses a verified/configured capacity and distinguishes exact counting from estimates; an arbitrary provider with unknown capacity cannot guarantee advance warning. Users can inspect the failed request stage. Never fabricate cache hits or prefill percentages.
 2. **NH-COMPACT — bounded model context.** Build a separate context projection with balanced tool pairs, retained recent turns, validated summary, generation check and atomic replacement. Acceptance: continue a deliberately over-budget conversation without losing the original UI history or replaying tool effects; failed/cancelled summaries leave the old projection intact. Follow with bounded provider retries and request-attempt reconciliation.
 3. **NH-DAILY — control the native session.** Expose core queue/steering/pending cancellation first; then model/effort and explicit access mode, rename/archive/fork and content search. Split delivery controls from session management into separate changes. Acceptance: edit pending work while output streams, handle already-consumed IDs, and reopen the same session with truthful settings.
 4. **NH-TERMINAL — complete focus and monitoring.** First full-pane TUI/return, directional pane focus/maximize and real iPad keyboard/touch validation; then model-visible command/screen state. Agent input/takeover is a separate guarded host milestone (NH-CONTROL), with human input revoking permission and stale writes rejected.

@@ -35,8 +35,9 @@ public struct Message: Codable, Sendable, Equatable {
 public struct ModelReply: Sendable {
     public var message: Message
     public var finishReason: String
-    public init(message: Message, finishReason: String = "stop") {
-        self.message = message; self.finishReason = finishReason
+    public var usage: ProviderUsage?
+    public init(message: Message, finishReason: String = "stop", usage: ProviderUsage? = nil) {
+        self.message = message; self.finishReason = finishReason; self.usage = usage
     }
 }
 
@@ -61,7 +62,9 @@ public enum LiveUpdate: Sendable {
 }
 
 public protocol ModelProvider: Sendable {
-    func complete(messages: [Message], tools: [ToolDefinition],
+    func prepare(messages: [Message], tools: [ToolDefinition], requestID: String) async throws -> PreparedModelRequest
+    func measure(_ request: PreparedModelRequest, anchor: UsageAnchor?) async throws -> ContextBudget
+    func complete(_ request: PreparedModelRequest,
                   onUpdate: @escaping @Sendable (LiveUpdate) -> Void) async throws -> ModelReply
 }
 
