@@ -51,6 +51,7 @@ struct PocketDSHApp: App {
                     notifications.destination = nil
                 }
                 .onChange(of: scenePhase) { _, phase in
+                    guard !store.workspaceDetached else { return }
                     #if targetEnvironment(macCatalyst)
                     if phase == .active && !store.connected && !store.connecting { Task { await store.connect() } }
                     #else

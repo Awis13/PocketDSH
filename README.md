@@ -3,7 +3,7 @@
 </p>
 <h1 align="center">Pocket DSH</h1>
 <p align="center">Your agent. Your server. Your workspace.</p>
-<p align="center">A native SwiftUI client for DeepSeek Harness on iPhone, iPad, and Mac.</p>
+<p align="center">A native SwiftUI workspace for DeepSeek Harness and an experimental Swift agent engine.</p>
 
 ![Pocket DSH on Mac — Dracula theme, terminal mode](docs/images/mac-terminal.jpg)
 
@@ -27,7 +27,7 @@ Screenshots show the real app with offline demonstration data, not a live user's
 
 ## Run it
 
-You need a running **DeepSeek Harness** server. This client targets the Remote RPC/WebSocket contract used by DSH **0.1.2-rc.1**; it is not a standalone model runner.
+Choose a backend: an existing **DeepSeek Harness** server or the included experimental **Native Harness** host. Both connect to a separate model provider; this repository does not bundle inference weights or a model runtime. The DSH adapter started with **0.1.2-rc.1** and now also handles the separate assistant stream observed in **0.1.3-alpha.2**. This is not a claim of complete API parity across those releases.
 
 1. Open `PocketDSH.xcodeproj` in Xcode. The source project definition is `project.yml` (regenerate with `xcodegen generate` after changing it).
 2. Select the PocketDSH scheme and an iPhone/iPad simulator or **My Mac (Mac Catalyst)** destination.
@@ -37,6 +37,18 @@ You need a running **DeepSeek Harness** server. This client targets the Remote R
 Use a reachable HTTPS address for remote access. A private network such as Tailscale works well; keep the sign-in token when replacing a loopback hostname. Credentials are stored in Keychain. Model API keys remain on the Harness server.
 
 See [installation and signing](docs/INSTALL.md) for device builds and AltStore packaging, and [architecture](docs/ARCHITECTURE.md) for the code map and optional plugins.
+
+## Native Harness preview
+
+The included [Swift 6 host](NativeHarness/README.md) runs on macOS with system SQLite and a small C/POSIX PTY bridge. It has no external Swift package dependencies and needs no Node/Python runtime. Select **Native Harness** in Connection and supply its authenticated launch URL; the host binds to loopback, so remote clients require a separately configured secure tunnel.
+
+- **One session, two views.** Chat and real Shell share the same ordered history, agent activity and draft. Shell Enter runs a command; ⌘Enter asks the integrated agent without switching views.
+- **Persistent terminal.** Command blocks retain cwd, output and exit status. Interactive programs receive terminal input; Ctrl+C interrupts the foreground command while preserving the shell.
+- **Keyboard reuse.** Tab completes commands/paths; Up/Down browse history. Fish-style history suggestions accept with Right or Option+Right. Find, copy and attach selected command output to an agent question.
+- **Readable terminal output.** Theme-aware ANSI styles and bundled file symbols work in live and retained output. Optional host-side `eza` supplies `ls`, `ll`, `la` and `lt` listings.
+- **Recovery and inspection.** SQLite journals reconcile output after reconnect/restart without rerunning old commands. The agent can observe a running terminal through bounded read-only tools; file edits and agent shell commands use one-use approval.
+
+This backend is an early preview. Images, voice, model selection, full-access policy, queue/steering controls, rich diff inspection and notifications are not wired to it yet. The existing DSH backend retains its own features. Eight shells per host launch and one attached client per native session are current limits. Physical iPad verification of the new native Shell is pending. See [integration and verification](docs/NATIVE-CHAT-INTEGRATION.md).
 
 ## Keyboard shortcuts
 
@@ -53,12 +65,17 @@ See [installation and signing](docs/INSTALL.md) for device builds and AltStore p
 
 Closing a pane leaves its agent running on the server. The last pane stays open.
 
+## Roadmap
+
+See the [feature parity audit](docs/FEATURE-PARITY-AUDIT.md) for the 2026-09-08 comparison with the live Harness web client, missing capabilities, evidence boundaries, and proposed milestones.
+
 ## Development
 
-No third-party Swift packages are required. Build with a current Xcode SDK; the deployment target is iOS 17. Some scrolling and material effects use newer system APIs with fallbacks.
+Build with a current Xcode SDK; the deployment target is iOS 17. Native terminal rendering uses the bundled [SwiftTerm 1.5.1 library subset](Vendor/SwiftTerm/README.md), under its [MIT license](Vendor/SwiftTerm/LICENSE). Its CLI dependencies are not required. Some scrolling and material effects use newer system APIs with fallbacks.
 
 ```sh
-./scripts/check.sh        # Protocol, Markdown, and voice relay checks; Xcode + Node required
+sh scripts/check.sh       # Offline client/core/PTY checks and mocked voice tests; Xcode + Node
+sh scripts/check-native.sh # Native core and transcript/editor checks only; no Node/model needed
 ./scripts/build-mac.sh    # Build and verify a signed Mac Catalyst app
 ```
 
@@ -68,4 +85,4 @@ Live integration checks are opt-in and require your own Harness instance. See [c
 
 This is an independently developed personal client, being shared as an early project. It is not affiliated with DeepSeek or Apple. The Mac version uses **Mac Catalyst**. Glass styling uses system materials where available; it does not make the entire window transparent to other applications. Reliable background push notifications are not shipped. Voice needs the optional relay and your own transcription service.
 
-The Rust terminal client is a separate project and is not included here.
+The Rust terminal client and PagerTerminal are separate projects and are not included here. The application bundles third-party [licenses and notices](Vendor/THIRD-PARTY-NOTICES.txt).

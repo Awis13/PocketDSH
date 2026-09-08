@@ -142,10 +142,10 @@ struct NewTaskView: View {
         NavigationStack {
             List {
                 Section("Where the agent will work") {
-                    choice("DSH working directory", id: nil)
+                    choice(store.usesNativeHarness ? "Native host working directory" : "DSH working directory", id: nil)
                     ForEach(store.workspaces) { w in choice(w.title, id: w.id) }
                 }
-                Section { Text("Files and execution stay on your Mac. The task will also be available in your browser.").font(.footnote).foregroundStyle(.secondary) }
+                Section { Text(store.usesNativeHarness ? "Files and execution stay on the Native Harness host." : "Files and execution stay on your Mac. The task will also be available in your browser.").font(.footnote).foregroundStyle(.secondary) }
             }.scrollContentBackground(.hidden).background { ThemeBackdrop() }.navigationTitle("New task").navigationBarTitleDisplayMode(.inline)
                 .toolbar {
                     ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
@@ -202,7 +202,10 @@ struct DesktopPaneView: View {
                     }.padding(12).background(Color.orange.opacity(0.08))
                 }
                 if store.selectedID != nil {
-                    HarnessView()
+                    if store.nativeShellMode, let shell = store.nativeShell {
+                        NativeShellPane(client: shell)
+                            .id(shell.id)
+                    } else { HarnessView() }
                 } else {
                     VStack(spacing: 16) {
                         Image(systemName: "terminal").font(.system(size: 40, weight: .light)).foregroundStyle(theme.accent)
@@ -213,7 +216,8 @@ struct DesktopPaneView: View {
                     }.frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
             }.frame(maxWidth: .infinity, maxHeight: .infinity)
-        }.background { ThemeBackdrop() }.foregroundStyle(theme.ink).tint(theme.accent)
+        }.environment(\.nativePanelTerminal, $store.nativeShellMode)
+        .background { ThemeBackdrop() }.foregroundStyle(theme.ink).tint(theme.accent)
         .onChange(of: store.composerFocusRequest) { _, request in
             if request != nil && overlaySidebar { sidebar = false }
         }
@@ -298,6 +302,12 @@ struct DesktopPaneView: View {
                     }
                 }
                 Spacer(minLength: 12)
+                if store.usesNativeHarness, store.selectedID != nil {
+                    Picker("Panel mode", selection: $store.nativeShellMode) {
+                        Text("Chat").tag(false)
+                        Text("Shell").tag(true)
+                    }.pickerStyle(.segmented).frame(width: 150).disabled(store.nativeShell == nil)
+                }
                 Button { connection = true } label: {
                     HStack(spacing: 6) {
                         Circle().fill(store.connected ? Color.green : Color.orange).frame(width: 6, height: 6)
@@ -314,14 +324,23 @@ struct DesktopPaneView: View {
             if store.selectedID != nil && !store.readingMode {
                 HStack(spacing: 16) {
                     Label(store.modelLabel, systemImage: "cpu").lineLimit(1)
+                    if store.usesNativeHarness { Text("Native Harness").foregroundStyle(theme.accent) }
                     Label(!store.connected ? "Offline" : !store.currentInteractions.isEmpty ? "Needs your input" : store.running ? "Working" : "Ready", systemImage: store.running ? "circle.dotted" : "circle")
                     if !store.currentQueue.isEmpty { Text("\(store.currentQueue.count) queued") }
                     Spacer(minLength: 0)
-                    Text("Enter to send · Shift+Enter for newline").lineLimit(1)
+                    Text(store.nativeShellMode ? "Enter runs · ⌘Enter asks agent" : "Enter to send · Shift+Enter for newline").lineLimit(1)
                 }.font(.caption2).foregroundStyle(.secondary).accessibilityIdentifier("desktopTaskInfo")
             }
         }.padding(.horizontal, 20).padding(.vertical, store.readingMode ? 7 : 14)
             .modifier(HarnessNavigationSurface()).padding(theme.usesGlass ? 8 : 0)
+    }
+}
+
+private struct NativePanelTerminalKey: EnvironmentKey { static let defaultValue: Binding<Bool>? = nil }
+extension EnvironmentValues {
+    var nativePanelTerminal: Binding<Bool>? {
+        get { self[NativePanelTerminalKey.self] }
+        set { self[NativePanelTerminalKey.self] = newValue }
     }
 }
 
@@ -339,7 +358,7 @@ extension EnvironmentValues {
         set { self[AgentPaneActivateKey.self] = newValue }
     }
 }
-private indirect enum AgentLayout {
+indirect enum AgentLayout: Codable {
     case pane(UUID)
     case split(UUID, Bool, AgentLayout, AgentLayout)
     func splitting(_ target: UUID, new: UUID, stacked: Bool) -> AgentLayout {
@@ -360,11 +379,15 @@ private indirect enum AgentLayout {
     var first: UUID {
         switch self { case .pane(let id): return id; case .split(_, _, let a, _): return a.first }
     }
+    var panes: [UUID] {
+        switch self { case .pane(let id): return [id]; case .split(_, _, let a, let b): return a.panes + b.panes }
+    }
 }
 @MainActor
 private final class AgentWorkspace: ObservableObject {
     @Published var layout: AgentLayout?
-    @Published var active: UUID?
+    @Published var active: UUID? { didSet { save() } }
+    @Published var fractions: [UUID: Double] = [:] { didSet { save() } }
     @Published var sizes: [UUID: CGSize] = [:]
     func canSplit(stacked: Bool) -> Bool {
         guard UIDevice.current.userInterfaceIdiom == .pad else { return true }
@@ -373,13 +396,47 @@ private final class AgentWorkspace: ObservableObject {
     }
     var stores: [UUID: PocketStore] = [:]
     var initial: UUID?
+    private struct SavedWorkspace: Codable {
+        var layout: AgentLayout
+        var active: UUID
+        var initial: UUID
+        var panes: [UUID: PocketStore.SavedPane]
+        var fractions: [UUID: Double]
+    }
+    private var ready = false
+    private let storageKey = "harness.agentWorkspace.v1"
+    private func save() {
+        guard ready, let layout, let active, let initial else { return }
+        let snapshot = SavedWorkspace(layout: layout, active: active, initial: initial, panes: stores.mapValues(\.savedPane), fractions: fractions)
+        if let data = try? JSONEncoder().encode(snapshot) { UserDefaults.standard.set(data, forKey: storageKey) }
+        if let pane = stores[initial], let data = try? JSONEncoder().encode(pane.savedPane) { UserDefaults.standard.set(data, forKey: "harness.primaryPane.v1") }
+    }
+    private func observe(_ store: PocketStore) { store.onWorkspaceChange = { [weak self] in self?.save() } }
     func prepare(_ store: PocketStore) {
         guard layout == nil else { return }
+        if let data = UserDefaults.standard.data(forKey: storageKey), let saved = try? JSONDecoder().decode(SavedWorkspace.self, from: data),
+           !saved.panes.isEmpty, saved.panes.count <= 8, Set(saved.layout.panes) == Set(saved.panes.keys),
+           saved.layout.panes.count == saved.panes.count, saved.panes[saved.initial] != nil, saved.panes[saved.active] != nil,
+           saved.panes[saved.initial]?.endpoint == store.endpoint {
+            initial = saved.initial; active = saved.active; fractions = saved.fractions
+            for (id, state) in saved.panes {
+                let pane = id == initial ? store : PocketStore(restoringPrimary: false)
+                // The app owns the primary connection and may already be opening it.
+                if id != initial { pane.restorePane(state) }
+                stores[id] = pane; observe(pane)
+                if id != initial { Task { await pane.connect() } }
+            }
+            layout = saved.layout; ready = true
+            return
+        }
         let id = UUID(); stores[id] = store; initial = id; active = id; layout = .pane(id)
+        observe(store); ready = true; save()
     }
     func split(stacked: Bool) {
         guard canSplit(stacked: stacked), let active, let source = stores[active], let layout else { return }
-        let id = UUID(), store = PocketStore()
+        let id = UUID(), store = PocketStore(restoringPrimary: false)
+        store.endpoint = source.endpoint
+        observe(store)
         store.openDefaultTaskWhenConnected = true
         stores[id] = store
         self.layout = layout.splitting(active, new: id, stacked: stacked)
@@ -392,7 +449,8 @@ private final class AgentWorkspace: ObservableObject {
     }
     func close() {
         guard stores.count > 1, let active, let next = layout?.removing(active) else { return }
-        stores.removeValue(forKey: active)?.suspend()
+        stores.removeValue(forKey: active)?.detachPane()
+        if active == initial { initial = next.first }
         layout = next; self.active = next.first
     }
 }
@@ -450,7 +508,7 @@ struct DesktopHomeView: View {
                 .simultaneousGesture(TapGesture().onEnded { workspace.active = id })
                 .id(id))
         case .split(let id, let stacked, let a, let b):
-            return AnyView(AgentSplitView(stacked: stacked, first: render(a), second: render(b)).id(id))
+            return AnyView(AgentSplitView(stacked: stacked, first: render(a), second: render(b), savedFraction: workspace.fractions[id], onResize: { workspace.fractions[id] = $0 }).id(id))
         }
     }
 }
@@ -460,10 +518,12 @@ private struct AgentPaneSizes: PreferenceKey {
         value.merge(nextValue(), uniquingKeysWith: { _, new in new })
     }
 }
-private struct AgentSplitView: View {
+struct AgentSplitView: View {
     let stacked: Bool
     let first: AnyView
     let second: AnyView
+    var savedFraction: Double? = nil
+    var onResize: ((Double) -> Void)? = nil
     @State private var fraction: CGFloat = 0.5
     var body: some View {
         GeometryReader { geometry in
@@ -482,6 +542,7 @@ private struct AgentSplitView: View {
                 }
             }
         }.coordinateSpace(name: "split-divider")
+            .onAppear { if let savedFraction, savedFraction.isFinite { fraction = min(0.8, max(0.2, savedFraction)) } }
     }
     private func divider(length: CGFloat) -> some View {
         Rectangle().fill(Color.secondary.opacity(0.2))
@@ -489,7 +550,7 @@ private struct AgentSplitView: View {
             .contentShape(Rectangle())
             .gesture(DragGesture(coordinateSpace: .named("split-divider")).onChanged { value in
                 fraction = min(0.8, max(0.2, (stacked ? value.location.y : value.location.x) / length))
-            })
+            }.onEnded { _ in onResize?(Double(fraction)) })
             .accessibilityLabel("Resize agent panes")
     }
 }

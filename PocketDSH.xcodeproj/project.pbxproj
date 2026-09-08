@@ -8,21 +8,32 @@
 
 /* Begin PBXBuildFile section */
 		07B0636E1F8662F3B84B0B0C /* HomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6DA2E6D500176C6992989EE1 /* HomeView.swift */; };
+		17DB52B0576409D2EA9E2C0C /* SymbolsNerdFontMono-Regular.ttf in Resources */ = {isa = PBXBuildFile; fileRef = 0C0F59F2281C005DD28D2339 /* SymbolsNerdFontMono-Regular.ttf */; };
 		2BE9481F5EB86B12C151E7FD /* ImageAttachments.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8742D0DC00E6185285EF6EC5 /* ImageAttachments.swift */; };
+		345F4C2A79471DA5B8166E63 /* NativeWire.swift in Sources */ = {isa = PBXBuildFile; fileRef = D076E5E178FC4C8000A2C6BC /* NativeWire.swift */; };
+		391D0771BA57659D7EADCA65 /* NativeTerminalView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2E6534119C5B17C6485507CB /* NativeTerminalView.swift */; };
 		40BBF01895004C9E8FAC5FE0 /* HarnessAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = 213F6D56A815333905F5F393 /* HarnessAPI.swift */; };
+		458A27CD42CD88D6A09A2852 /* NativeClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 990F411D48619BD1EAC856DE /* NativeClient.swift */; };
 		482A92E75B9971A16249ED4D /* MarkdownBlocks.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9D6E11C03392FD115F72A46C /* MarkdownBlocks.swift */; };
 		4A02EBFCFE7F078CC03880F1 /* Appearance.swift in Sources */ = {isa = PBXBuildFile; fileRef = E44CCE33FA506477977F2202 /* Appearance.swift */; };
+		4B32DCC7FD423731DE545A37 /* ShellBlockViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 44B25DCB6141C9DBACE0EE9B /* ShellBlockViews.swift */; };
 		5860D86558FAB4821B9CBDF9 /* HarnessProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0A6ACA8367AD55DAF03625A7 /* HarnessProtocol.swift */; };
 		5B7831444E6CA8DC8A8A89BF /* ImageViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = A786C1D5582F6223B62081F3 /* ImageViews.swift */; };
 		6AA8B323AAB5F1859C0355FF /* VoiceRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8F45255EB3E729C10CE13B85 /* VoiceRecorder.swift */; };
 		6B1B4FB32A1AC9BFB4B73BEA /* TurnNotificationState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5BA7754331250B9CF01F8A4F /* TurnNotificationState.swift */; };
 		80C50DEC3D296393371771EE /* HarnessView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 19B8B07078D82DC7A7EE6EC4 /* HarnessView.swift */; };
 		873DD0232F9741F599714544 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 07CDD0CC0057F5866D24FF20 /* Assets.xcassets */; };
+		8A3284A72DB675093B2EB8B1 /* ShellBlockInteraction.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51A0DE6E9EE1DD8033673D14 /* ShellBlockInteraction.swift */; };
+		958504A85B823EF29E80CCF4 /* NativeWorkspace.swift in Sources */ = {isa = PBXBuildFile; fileRef = 997B7365DE1C0EC9385B47BB /* NativeWorkspace.swift */; };
+		98E7F7066873BE67CFC6E093 /* THIRD-PARTY-NOTICES.txt in Resources */ = {isa = PBXBuildFile; fileRef = 304C17A2D92890DDB8FA098C /* THIRD-PARTY-NOTICES.txt */; };
+		A0477B78FD9FE05CF698F036 /* NativeChatConnection.swift in Sources */ = {isa = PBXBuildFile; fileRef = B468EDB80C53D5E6DC92860E /* NativeChatConnection.swift */; };
 		A52477BEDBE0E382C6C2C105 /* LiveReasoningView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1DB1F53D3DE276524D2EFC7 /* LiveReasoningView.swift */; };
+		A8F3CECEBAD3E60B962CBAB9 /* TerminalAppearance.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA1BA7A9B1DC97856095C0CB /* TerminalAppearance.swift */; };
 		AB8C7FF9C25F4275D73B6A31 /* DemoData.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9A23CDF070AEDF1D7FEED50A /* DemoData.swift */; };
 		C103524CD83608A91CE30F86 /* ConnectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F88F3CD3883D2F6BFE7D5AE7 /* ConnectionView.swift */; };
 		C9D4CACAFC991269FE6A7BCB /* PocketDSHApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = F816DAE6C96C8E45D149EEF5 /* PocketDSHApp.swift */; };
 		D82FC2E56324E4886177E337 /* PocketStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = C49C2AC1DB6173218484FA24 /* PocketStore.swift */; };
+		DEC528524D504A3BD961D8F2 /* SwiftTerm in Frameworks */ = {isa = PBXBuildFile; productRef = AD6686A33E1C422500B47929 /* SwiftTerm */; };
 		EA878C65D62F5F5C13C46150 /* TurnNotifications.swift in Sources */ = {isa = PBXBuildFile; fileRef = 212067D3F85E4C892F86FBAD /* TurnNotifications.swift */; };
 		F82514CECEDCCADF6AFEEEC6 /* PocketDSHUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2857133C101D3C58E9BF2E69 /* PocketDSHUITests.swift */; };
 		FE7F024F37CCF50D8A612C40 /* AssistantMarkdown.swift in Sources */ = {isa = PBXBuildFile; fileRef = 486CDE1EAA2F792AC9153AB0 /* AssistantMarkdown.swift */; };
@@ -43,22 +54,33 @@
 		0519EE3AB14142CDB1CABDFE /* Build.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Build.xcconfig; sourceTree = "<group>"; };
 		07CDD0CC0057F5866D24FF20 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		0A6ACA8367AD55DAF03625A7 /* HarnessProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HarnessProtocol.swift; sourceTree = "<group>"; };
+		0C0F59F2281C005DD28D2339 /* SymbolsNerdFontMono-Regular.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "SymbolsNerdFontMono-Regular.ttf"; sourceTree = "<group>"; };
+		10B1E247125D45F27D6465B8 /* SwiftTerm */ = {isa = PBXFileReference; lastKnownFileType = folder; name = SwiftTerm; path = Vendor/SwiftTerm; sourceTree = SOURCE_ROOT; };
 		19B8B07078D82DC7A7EE6EC4 /* HarnessView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HarnessView.swift; sourceTree = "<group>"; };
 		212067D3F85E4C892F86FBAD /* TurnNotifications.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TurnNotifications.swift; sourceTree = "<group>"; };
 		213F6D56A815333905F5F393 /* HarnessAPI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HarnessAPI.swift; sourceTree = "<group>"; };
 		2857133C101D3C58E9BF2E69 /* PocketDSHUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PocketDSHUITests.swift; sourceTree = "<group>"; };
+		2E6534119C5B17C6485507CB /* NativeTerminalView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeTerminalView.swift; sourceTree = "<group>"; };
+		304C17A2D92890DDB8FA098C /* THIRD-PARTY-NOTICES.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "THIRD-PARTY-NOTICES.txt"; sourceTree = "<group>"; };
 		362036A7D1E27D64FD77D956 /* PocketDSHUITests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = PocketDSHUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		3F19FB2A62A2A1ADAA7337ED /* Simulator.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Simulator.entitlements; sourceTree = "<group>"; };
+		44B25DCB6141C9DBACE0EE9B /* ShellBlockViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShellBlockViews.swift; sourceTree = "<group>"; };
 		486CDE1EAA2F792AC9153AB0 /* AssistantMarkdown.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AssistantMarkdown.swift; sourceTree = "<group>"; };
+		51A0DE6E9EE1DD8033673D14 /* ShellBlockInteraction.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShellBlockInteraction.swift; sourceTree = "<group>"; };
 		5BA7754331250B9CF01F8A4F /* TurnNotificationState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TurnNotificationState.swift; sourceTree = "<group>"; };
 		6DA2E6D500176C6992989EE1 /* HomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeView.swift; sourceTree = "<group>"; };
 		8742D0DC00E6185285EF6EC5 /* ImageAttachments.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImageAttachments.swift; sourceTree = "<group>"; };
 		8F45255EB3E729C10CE13B85 /* VoiceRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceRecorder.swift; sourceTree = "<group>"; };
+		990F411D48619BD1EAC856DE /* NativeClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeClient.swift; sourceTree = "<group>"; };
+		997B7365DE1C0EC9385B47BB /* NativeWorkspace.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeWorkspace.swift; sourceTree = "<group>"; };
 		9A23CDF070AEDF1D7FEED50A /* DemoData.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DemoData.swift; sourceTree = "<group>"; };
 		9D6E11C03392FD115F72A46C /* MarkdownBlocks.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownBlocks.swift; sourceTree = "<group>"; };
 		A786C1D5582F6223B62081F3 /* ImageViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImageViews.swift; sourceTree = "<group>"; };
 		AF15F8BB41138CDD6EAFBDA7 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		B468EDB80C53D5E6DC92860E /* NativeChatConnection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeChatConnection.swift; sourceTree = "<group>"; };
+		BA1BA7A9B1DC97856095C0CB /* TerminalAppearance.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalAppearance.swift; sourceTree = "<group>"; };
 		C49C2AC1DB6173218484FA24 /* PocketStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PocketStore.swift; sourceTree = "<group>"; };
+		D076E5E178FC4C8000A2C6BC /* NativeWire.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeWire.swift; sourceTree = "<group>"; };
 		DDABBFBF5FFCE258A34E1AF0 /* PocketDSH.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = PocketDSH.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		E44CCE33FA506477977F2202 /* Appearance.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Appearance.swift; sourceTree = "<group>"; };
 		F1DB1F53D3DE276524D2EFC7 /* LiveReasoningView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveReasoningView.swift; sourceTree = "<group>"; };
@@ -66,13 +88,48 @@
 		F88F3CD3883D2F6BFE7D5AE7 /* ConnectionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectionView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
+/* Begin PBXFrameworksBuildPhase section */
+		CEE4502F0DB6A21B7EEDC688 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				DEC528524D504A3BD961D8F2 /* SwiftTerm in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
 /* Begin PBXGroup section */
+		031A63F85604C9A725E40A02 /* Vendor */ = {
+			isa = PBXGroup;
+			children = (
+				304C17A2D92890DDB8FA098C /* THIRD-PARTY-NOTICES.txt */,
+			);
+			path = Vendor;
+			sourceTree = "<group>";
+		};
+		239293F796613E0975AFCCEB /* Packages */ = {
+			isa = PBXGroup;
+			children = (
+				10B1E247125D45F27D6465B8 /* SwiftTerm */,
+			);
+			name = Packages;
+			sourceTree = "<group>";
+		};
 		3F91B83645725470796F30BB /* PocketDSHUITests */ = {
 			isa = PBXGroup;
 			children = (
 				2857133C101D3C58E9BF2E69 /* PocketDSHUITests.swift */,
 			);
 			path = PocketDSHUITests;
+			sourceTree = "<group>";
+		};
+		6F5010EB16CBFEAEE4C97FBE /* Shared */ = {
+			isa = PBXGroup;
+			children = (
+				D076E5E178FC4C8000A2C6BC /* NativeWire.swift */,
+			);
+			path = Shared;
 			sourceTree = "<group>";
 		};
 		81C35C93D8AA499A11D64DC2 /* PocketDSH */ = {
@@ -93,9 +150,16 @@
 				F1DB1F53D3DE276524D2EFC7 /* LiveReasoningView.swift */,
 				02489B2F7AE0DF7A7A2B39F6 /* Mac.entitlements */,
 				9D6E11C03392FD115F72A46C /* MarkdownBlocks.swift */,
+				B468EDB80C53D5E6DC92860E /* NativeChatConnection.swift */,
+				990F411D48619BD1EAC856DE /* NativeClient.swift */,
+				2E6534119C5B17C6485507CB /* NativeTerminalView.swift */,
+				997B7365DE1C0EC9385B47BB /* NativeWorkspace.swift */,
 				F816DAE6C96C8E45D149EEF5 /* PocketDSHApp.swift */,
 				C49C2AC1DB6173218484FA24 /* PocketStore.swift */,
+				51A0DE6E9EE1DD8033673D14 /* ShellBlockInteraction.swift */,
+				44B25DCB6141C9DBACE0EE9B /* ShellBlockViews.swift */,
 				3F19FB2A62A2A1ADAA7337ED /* Simulator.entitlements */,
+				BA1BA7A9B1DC97856095C0CB /* TerminalAppearance.swift */,
 				212067D3F85E4C892F86FBAD /* TurnNotifications.swift */,
 				5BA7754331250B9CF01F8A4F /* TurnNotificationState.swift */,
 				8F45255EB3E729C10CE13B85 /* VoiceRecorder.swift */,
@@ -111,6 +175,15 @@
 			path = Config;
 			sourceTree = "<group>";
 		};
+		B476CF8219483AA803722F7A /* NerdFonts */ = {
+			isa = PBXGroup;
+			children = (
+				0C0F59F2281C005DD28D2339 /* SymbolsNerdFontMono-Regular.ttf */,
+			);
+			name = NerdFonts;
+			path = Vendor/NerdFonts;
+			sourceTree = "<group>";
+		};
 		E91CCE0EE522AA11ED3C32BD /* Products */ = {
 			isa = PBXGroup;
 			children = (
@@ -124,8 +197,12 @@
 			isa = PBXGroup;
 			children = (
 				833AF4CB0B3C67E252C27631 /* Config */,
+				B476CF8219483AA803722F7A /* NerdFonts */,
+				239293F796613E0975AFCCEB /* Packages */,
 				81C35C93D8AA499A11D64DC2 /* PocketDSH */,
 				3F91B83645725470796F30BB /* PocketDSHUITests */,
+				6F5010EB16CBFEAEE4C97FBE /* Shared */,
+				031A63F85604C9A725E40A02 /* Vendor */,
 				E91CCE0EE522AA11ED3C32BD /* Products */,
 			);
 			sourceTree = "<group>";
@@ -139,6 +216,7 @@
 			buildPhases = (
 				EB3206929C997D006B574805 /* Sources */,
 				41D473C8CE155010249B415D /* Resources */,
+				CEE4502F0DB6A21B7EEDC688 /* Frameworks */,
 			);
 			buildRules = (
 			);
@@ -146,6 +224,7 @@
 			);
 			name = PocketDSH;
 			packageProductDependencies = (
+				AD6686A33E1C422500B47929 /* SwiftTerm */,
 			);
 			productName = PocketDSH;
 			productReference = DDABBFBF5FFCE258A34E1AF0 /* PocketDSH.app */;
@@ -195,6 +274,9 @@
 			);
 			mainGroup = FF890920F29EE53938B85EB6;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				91899FD5836906B519CB2E62 /* XCLocalSwiftPackageReference "Vendor/SwiftTerm" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = E91CCE0EE522AA11ED3C32BD /* Products */;
 			projectDirPath = "";
@@ -212,6 +294,8 @@
 			buildActionMask = 2147483647;
 			files = (
 				873DD0232F9741F599714544 /* Assets.xcassets in Resources */,
+				17DB52B0576409D2EA9E2C0C /* SymbolsNerdFontMono-Regular.ttf in Resources */,
+				98E7F7066873BE67CFC6E093 /* THIRD-PARTY-NOTICES.txt in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -242,8 +326,16 @@
 				5B7831444E6CA8DC8A8A89BF /* ImageViews.swift in Sources */,
 				A52477BEDBE0E382C6C2C105 /* LiveReasoningView.swift in Sources */,
 				482A92E75B9971A16249ED4D /* MarkdownBlocks.swift in Sources */,
+				A0477B78FD9FE05CF698F036 /* NativeChatConnection.swift in Sources */,
+				458A27CD42CD88D6A09A2852 /* NativeClient.swift in Sources */,
+				391D0771BA57659D7EADCA65 /* NativeTerminalView.swift in Sources */,
+				345F4C2A79471DA5B8166E63 /* NativeWire.swift in Sources */,
+				958504A85B823EF29E80CCF4 /* NativeWorkspace.swift in Sources */,
 				C9D4CACAFC991269FE6A7BCB /* PocketDSHApp.swift in Sources */,
 				D82FC2E56324E4886177E337 /* PocketStore.swift in Sources */,
+				8A3284A72DB675093B2EB8B1 /* ShellBlockInteraction.swift in Sources */,
+				4B32DCC7FD423731DE545A37 /* ShellBlockViews.swift in Sources */,
+				A8F3CECEBAD3E60B962CBAB9 /* TerminalAppearance.swift in Sources */,
 				6B1B4FB32A1AC9BFB4B73BEA /* TurnNotificationState.swift in Sources */,
 				EA878C65D62F5F5C13C46150 /* TurnNotifications.swift in Sources */,
 				6AA8B323AAB5F1859C0355FF /* VoiceRecorder.swift in Sources */,
@@ -513,6 +605,20 @@
 			defaultConfigurationName = Debug;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		91899FD5836906B519CB2E62 /* XCLocalSwiftPackageReference "Vendor/SwiftTerm" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = Vendor/SwiftTerm;
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		AD6686A33E1C422500B47929 /* SwiftTerm */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = SwiftTerm;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = A35E0182ECFA2A173EA8E6DB /* Project object */;
 }
