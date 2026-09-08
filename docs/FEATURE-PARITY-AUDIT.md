@@ -2,6 +2,8 @@
 
 **Date:** 2026-09-08 · **Native baseline:** `312c953` · **Live Harness:** `0.1.3-alpha.2`
 
+**Status refresh:** this audit describes the DSH backend at its original baseline. The subsequently added Swift Native Harness has a separate capability set. Use [the current roadmap](ROADMAP.md) for all G01–G46 statuses and the DSH/native distinction. Do not interpret features listed as already present below as automatically available through the native host.
+
 This is a discovery document, not an implementation commitment. The web app was opened and inspected in Chrome on the running local Harness server, then compared with the current Swift source. No prompts were submitted, permissions changed, providers edited, presets duplicated, or agents started. Opening **Session log** did start a local ZIP download; that private archive is not included here.
 
 ## Coverage and evidence

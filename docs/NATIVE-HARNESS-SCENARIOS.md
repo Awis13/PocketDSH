@@ -1,6 +1,6 @@
 # Native harness acceptance scenarios
 
-Date: 2026-09-08. Proposed checks; **none have been run against a new Swift engine**. See [research](NATIVE-HARNESS-RESEARCH.md).
+Date: 2026-09-08. Originally proposed before the Swift engine existed. Subsequent unit/process/live checks cover parts of this matrix; the checkpoint has 65 passing core/host tests and five passing process-probe suites. That is not proof all 30 scenarios below passed, particularly multi-device, disk-full, retries, compaction and goal/subagent cases. See [current state and evidence](ROADMAP.md) and [integration checks](NATIVE-CHAT-INTEGRATION.md).
 
 Use deterministic fake providers/tools for fault injection, then repeat the meaningful end-to-end paths with a real provider, Mac host, and iPad. Record event traces, command IDs, durable checkpoints, and external tool effects. UI screenshots alone cannot establish these invariants.
 

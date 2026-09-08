@@ -2,6 +2,8 @@
 
 Date: 2026-09-08. Scope: desktop terminal and integrated-agent interactions relevant to Pocket DSH / Native Harness.
 
+**Checkpoint refresh:** block selection/search/copy/attachments, Tab completion, history navigation, history suggestions and rich eza/ANSI output are now implemented. The gap table below records the earlier source-study baseline. [The current roadmap](ROADMAP.md) supersedes its implementation statuses and prioritizes context reliability, native controls, terminal focus/monitoring and review. AI suggestions remain optional backlog work.
+
 This extends the [55-area feature inventory](WARP-FEATURE-AUDIT.md). It adds current public source evidence, more visual references, and a comparison with the **integrated** Pocket DSH path. It is a research deliverable, not an implemented redesign or a claim of full Warp runtime coverage.
 
 ## Evidence and limits

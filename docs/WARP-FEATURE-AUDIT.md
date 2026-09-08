@@ -2,6 +2,8 @@
 
 Date: 2026-09-08. Status: **documentation research; installed-app walkthrough blocked**.
 
+**Current implementation status:** [the reconciled roadmap](ROADMAP.md) maps every W01–W55 area to the integrated app after the native workspace checkpoint. The earlier architecture proposals and gap tables below are historical; their statements that the bridge/emulator were uncompiled no longer describe the application. Research evidence limits remain unchanged.
+
 **Later same-day update:** [Warp UI source study](WARP-UI-SOURCE-STUDY.md) adds a pinned public-source inspection, seven visual references, an 18-area interaction shortlist and a current integrated-client gap check. The implementation-status sections below describe the earlier research checkpoint; NativeHost, segmented Shell and the shared Pocket transcript have since been implemented. Use the new study and [current integration notes](NATIVE-CHAT-INTEGRATION.md) for present state. Installed Warp control remains blocked.
 
 The user requested a broad Warp walkthrough before more terminal implementation, with particular attention to segmented commands. Computer Use rejected access to `dev.warp.Warp-Stable`: “Computer Use is not allowed to use the app 'dev.warp.Warp-Stable' for safety reasons.” No alternative app-control method was used. No installed Warp screens, account features, performance or successful workflows were verified. A subsequent browser-only visual pass examined the official pane-dragging video at two playback moments and three official UI images; see the visual addendum below. Other videos remain unexamined.

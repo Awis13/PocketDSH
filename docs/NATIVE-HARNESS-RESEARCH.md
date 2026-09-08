@@ -1,5 +1,7 @@
 # Native Swift harness: mechanics and design research
 
+**Implementation update (2026-09-08):** this is the original mechanics study. The Swift core and integrated Shell/Chat host now exist; [the current roadmap](ROADMAP.md) compares all ten researched boundaries with the actual implementation. Earlier future-tense statements here are not the current completion ledger.
+
 Date: 2026-09-08. Status: source research and proposed design; no engine implementation or runtime qualification.
 
 ## Recommendation

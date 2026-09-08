@@ -67,7 +67,7 @@ Closing a pane leaves its agent running on the server. The last pane stays open.
 
 ## Roadmap
 
-See the [feature parity audit](docs/FEATURE-PARITY-AUDIT.md) for the 2026-09-08 comparison with the live Harness web client, missing capabilities, evidence boundaries, and proposed milestones.
+See the [current roadmap](docs/ROADMAP.md) for the implemented/native-backend distinction, reconciliation of all 46 DSH and 55 Warp research areas, and proposed next milestones. The [original feature audit](docs/FEATURE-PARITY-AUDIT.md) preserves the earlier live Harness web-client evidence.
 
 ## Development
 
