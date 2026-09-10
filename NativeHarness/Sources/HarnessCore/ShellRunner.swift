@@ -42,14 +42,38 @@ public enum ShellRunner {
         guard !command.isEmpty, command.utf8.count <= 16384, !command.contains("\0"),
               !workspace.contains("\0"), timeout.isFinite, timeout > 0, timeout <= 300,
               outputLimit > 0, outputLimit <= 1_048_576 else { throw HarnessError.invalid("Invalid shell limits or command") }
+        return try await spawn(executable: "/bin/zsh", arguments: ["-f", "-c", command], command: command,
+                               workspace: workspace, id: id, timeout: timeout, outputLimit: outputLimit, onOutput: onOutput)
+    }
+
+    /// Executes a program directly with an argv vector, never through a shell.
+    /// Structured callers (like git) use this so their arguments cannot be
+    /// re-interpreted as shell syntax, options, ranges or escapes.
+    public static func run(executable: String, arguments: [String], workspace: String, id: String = UUID().uuidString,
+                           timeout: TimeInterval = 30, outputLimit: Int = 65536,
+                           onOutput: @escaping @Sendable (ShellOutput) -> Void = { _ in }) async throws -> CommandBlock {
+        let display = ([executable] + arguments).joined(separator: " ")
+        guard executable.hasPrefix("/"), !executable.contains("\0"), !arguments.isEmpty,
+              !arguments.contains(where: { $0.contains("\0") }),
+              !workspace.contains("\0"), display.utf8.count <= 16384,
+              timeout.isFinite, timeout > 0, timeout <= 300,
+              outputLimit > 0, outputLimit <= 1_048_576 else { throw HarnessError.invalid("Invalid shell limits or command") }
+        return try await spawn(executable: executable, arguments: arguments, command: display,
+                               workspace: workspace, id: id, timeout: timeout, outputLimit: outputLimit, onOutput: onOutput)
+    }
+
+    private static func spawn(executable: String, arguments: [String], command: String, workspace: String,
+                              id: String, timeout: TimeInterval, outputLimit: Int,
+                              onOutput: @escaping @Sendable (ShellOutput) -> Void) async throws -> CommandBlock {
         let worker = Task.detached {
-            try execute(command: command, workspace: workspace, id: id, timeout: timeout,
-                        outputLimit: outputLimit, onOutput: onOutput)
+            try execute(executable: executable, arguments: arguments, command: command, workspace: workspace,
+                        id: id, timeout: timeout, outputLimit: outputLimit, onOutput: onOutput)
         }
         return try await withTaskCancellationHandler { try await worker.value } onCancel: { worker.cancel() }
     }
 
-    private static func execute(command: String, workspace: String, id: String, timeout: TimeInterval,
+    private static func execute(executable: String, arguments: [String], command: String, workspace: String,
+                                id: String, timeout: TimeInterval,
                                 outputLimit: Int, onOutput: @Sendable (ShellOutput) -> Void) throws -> CommandBlock {
         try Task.checkCancellation()
         var block = CommandBlock(id: id, command: command, workspace: workspace, startedAt: Date())
@@ -86,14 +110,16 @@ public enum ShellRunner {
         for sig in [SIGINT, SIGTERM, SIGPIPE] { sigaddset(&defaults, sig) }
         try check(posix_spawnattr_setsigmask(&attr, &empty))
         try check(posix_spawnattr_setsigdefault(&attr, &defaults))
-        let argv = ["/bin/zsh", "-f", "-c", command].map { $0.withCString { strdup($0) } } + [nil]
+        let argv = ([executable] + arguments).map { $0.withCString { strdup($0) } } + [nil]
         // Do not inherit API keys or the host's entire environment.
         let env = ["PATH=/usr/bin:/bin:/usr/sbin:/sbin", "HOME=\(NSHomeDirectory())", "LANG=en_US.UTF-8"].map { $0.withCString { strdup($0) } } + [nil]
         defer { for p in argv + env { free(p) } }
         var pid: pid_t = 0
-        try check(argv.withUnsafeBufferPointer { a in env.withUnsafeBufferPointer { e in
-            posix_spawn(&pid, "/bin/zsh", &actions, &attr, a.baseAddress!, e.baseAddress!)
-        } })
+        try check(executable.withCString { path in
+            argv.withUnsafeBufferPointer { a in env.withUnsafeBufferPointer { e in
+                posix_spawn(&pid, path, &actions, &attr, a.baseAddress!, e.baseAddress!)
+            } }
+        })
         close(out[1]); out[1] = -1; close(err[1]); err[1] = -1
         // Reserve the leader PID until group cleanup finishes, even after exit.
         defer {

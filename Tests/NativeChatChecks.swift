@@ -356,6 +356,34 @@ import Foundation
                      "Duplicate ids in a row resolve deterministically")
         print("PASS pane focus left-leaning nesting: 2/3-deep columns and rows, both leanings, ties, single and duplicate ids")
 
+        var diffs = NativeTranscript()
+        diffs.apply(NativeEvent(op: "opened", session: "s", capabilities: [NativeDiffInfo.capability]))
+        precondition(diffs.supportsDiff)
+        let diffInfo = NativeDiffInfo(base: "worktree", resolvedBase: nil, files: [
+            NativeDiffFile(path: "a.txt", oldPath: nil, status: "modified", binary: false, additions: 1, deletions: 1,
+                           truncated: false, hunks: [NativeDiffHunk(path: "a.txt", header: "@@ -1 +1 @@", oldText: "old", newText: "new")])
+        ], truncated: false, error: nil)
+        diffs.apply(NativeEvent(op: "diff", session: "s", diff: diffInfo))
+        precondition(diffs.diff?.files.first?.hunks.first?.newText == "new")
+        precondition(diffs.protocolNotices.isEmpty, "A diff event is a supported operation, not an unrecognized one")
+        diffs.apply(NativeEvent(op: "opened", session: "s", capabilities: [NativeDiffInfo.capability]))
+        precondition(diffs.diff == nil && diffs.supportsDiff, "Reconnect clears the previous diff but keeps the capability")
+        let huge = NativeDiffInfo(base: "HEAD", files: [
+            NativeDiffFile(path: "big", oldPath: nil, status: "modified", binary: false, additions: 0, deletions: 0,
+                           truncated: false, hunks: [NativeDiffHunk(path: "big", header: "", oldText: "", newText: String(repeating: "x", count: 50_000))])
+        ], truncated: false, error: nil)
+        diffs.apply(NativeEvent(op: "diff", session: "s", diff: huge))
+        precondition((diffs.diff?.files.first?.hunks.first?.newText.utf8.count ?? 0) <= 16_384 && diffs.diff?.truncated == true,
+                     "An oversized host payload is re-clamped on the client")
+        let futureDiff = try JSONDecoder().decode(NativeEvent.self, from: Data(#"{"op":"diff","session":"s","diff":{"base":"worktree","files":[]},"futureDiffField":{"deep":[1,2,3]}}"#.utf8))
+        precondition(futureDiff.diff?.base == "worktree" && futureDiff.extraFields["futureDiffField"] != nil)
+        let roundtripDiff = try JSONDecoder().decode(NativeEvent.self, from: JSONEncoder().encode(futureDiff))
+        precondition(roundtripDiff.extraFields["futureDiffField"] == futureDiff.extraFields["futureDiffField"],
+                     "Unknown diff-adjacent fields survive replay")
+        precondition(NativeDiffInfo.isValidBase("HEAD") && NativeDiffInfo.isValidBase("origin/main"))
+        precondition(!NativeDiffInfo.isValidBase("../../etc") && !NativeDiffInfo.isValidBase("a b") && !NativeDiffInfo.isValidBase("$(x)"))
+        print("PASS native diff: capability, fold, bounds, reconnect reset, unknown fields and base validation")
+
         guard CommandLine.arguments.count > 1 else { return }
         let config = try JSONDecoder().decode([String:String].self, from: Data(contentsOf: URL(fileURLWithPath: CommandLine.arguments[1])))
         let id = UUID().uuidString

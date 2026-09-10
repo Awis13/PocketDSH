@@ -85,6 +85,8 @@ struct NativeTranscript {
     private(set) var supportsQueue = false
     private(set) var queue: [NativeQueueItem] = []
     private(set) var queueOmitted = 0
+    private(set) var supportsDiff = false
+    private(set) var diff: NativeDiffInfo?
     var compaction: NativeCompactionInfo? { compactions.last }
     private var sessionID: String?
     private var sequence = 0
@@ -95,6 +97,7 @@ struct NativeTranscript {
             self = NativeTranscript(); sessionID = event.session
             supportsCompaction = event.capabilities?.contains(NativeCompactionInfo.capability) == true
             supportsQueue = event.capabilities?.contains(NativeQueueInfo.capability) == true
+            supportsDiff = event.capabilities?.contains(NativeDiffInfo.capability) == true
             return
         }
         if let sessionID, let incoming = event.session, sessionID != incoming { return }
@@ -186,6 +189,10 @@ struct NativeTranscript {
             // Invalid items are dropped from the list, so fold them into omitted
             // to keep items + omitted equal to the host's reported count.
             queueOmitted = info.omitted + (info.items.count - valid.count)
+        case "diff":
+            // Read-only projection; re-clamp so an older or hostile host cannot
+            // inflate a single frame. A missing payload keeps the last good one.
+            if let incoming = event.diff { diff = incoming.sanitized() }
         // These events belong to session controls, PTY or workspace state.
         case "request", "compaction", "compactionRejected", "queueAccepted", "queueRejected", "queueText", "pty", "terminalSize", "workspaceAction", "sessions", "status", "synced", "accepted", "approval", "completion", "error": break
         default: notice("Unrecognized event: " + NativeRequestInfo.label(event.op))

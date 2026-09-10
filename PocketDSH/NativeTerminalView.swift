@@ -194,6 +194,7 @@ struct NativeShellPane: View {
             if !isExpanded {
                 ContextStatusView()
                 QueueDockView().padding(.horizontal, 20).padding(.top, 8)
+                HStack { DiffReviewButton(); Spacer(minLength: 0) }.padding(.horizontal, 20).padding(.top, 8)
                 if !blocks.isEmpty { blockToolbar }
                 if findVisible { findBar }
             }

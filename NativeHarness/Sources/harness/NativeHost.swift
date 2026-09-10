@@ -128,6 +128,30 @@ enum NativeQueueEditing {
     }
 }
 
+/// Maps the read-only core diff onto the wire. Kept pure and internal so the
+/// host test target can exercise the projection without a live WebSocket.
+enum NativeDiffPresentation {
+    static func event(session: String, requestID: String?, result: WorkspaceDiff) -> NativeEvent {
+        NativeEvent(op: "diff", session: session, id: requestID, diff: NativeDiffInfo(result))
+    }
+    static func event(session: String, requestID: String?, error: String) -> NativeEvent {
+        NativeEvent(op: "diff", session: session, id: requestID,
+                    diff: NativeDiffInfo(base: WorkspaceDiffBase.defaultBase.wireValue, error: NativeRequestInfo.label(error)))
+    }
+}
+
+extension NativeDiffInfo {
+    init(_ result: WorkspaceDiff) {
+        self.init(base: result.base, resolvedBase: result.resolvedBase,
+                  files: result.files.map { file in
+                      NativeDiffFile(path: file.path, oldPath: file.oldPath, status: file.status, binary: file.binary,
+                                     additions: file.additions, deletions: file.deletions, truncated: file.truncated,
+                                     hunks: file.hunks.map { NativeDiffHunk(path: $0.path, header: $0.header, oldText: $0.oldText, newText: $0.newText) })
+                  },
+                  truncated: result.truncated, error: result.error.map { NativeRequestInfo.label($0) })
+    }
+}
+
 private actor NativeHostSession {
     let id: String
     let workspace: String
@@ -220,7 +244,7 @@ private actor NativeHostSession {
             throw error
         }
         guard peerID == peer.id else { throw HarnessError.busy }
-        sink.attach(peer, opened: NativeEvent(op: "opened", session: id, model: model, workspace: workspace, ptyID: observation.id, capabilities: [NativeCompactionInfo.capability, NativeQueueInfo.capability]))
+        sink.attach(peer, opened: NativeEvent(op: "opened", session: id, model: model, workspace: workspace, ptyID: observation.id, capabilities: [NativeCompactionInfo.capability, NativeQueueInfo.capability, NativeDiffInfo.capability]))
         for request in await approvals.pending() where peerID == peer.id {
             peer.send(NativeEvent(op: "approval", session: id, approval: NativeApproval(id: request.id, name: request.call.name, arguments: request.call.arguments, workspace: request.workspace)))
         }
@@ -393,6 +417,18 @@ private actor NativeHostSession {
             peer.send(NativeEvent(op: "status", session: id, text: status.errorCode, running: status.running || maintenance != nil,
                 compaction: sink.compactionInfo()))
             try await sendQueueSnapshot(to: peer)
+        case "diff":
+            // Read-only: no session, journal or inbox mutation.
+            guard let base = WorkspaceDiffBase(command.base ?? WorkspaceDiffBase.defaultBase.wireValue) else {
+                peer.send(NativeDiffPresentation.event(session: id, requestID: command.id, error: "Unknown diff base"))
+                return
+            }
+            do {
+                let result = try await WorkspaceDiffEngine.generate(base: base, workspace: workspace)
+                peer.send(NativeDiffPresentation.event(session: id, requestID: command.id, result: result))
+            } catch {
+                peer.send(NativeDiffPresentation.event(session: id, requestID: command.id, error: String(describing: error)))
+            }
         case "cancel": maintenance?.cancel(); await driver.stop()
         case "approval":
             guard let id = command.id, let allow = command.allow else { throw HarnessError.invalid("Missing approval") }

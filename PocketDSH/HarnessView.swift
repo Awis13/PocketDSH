@@ -191,6 +191,7 @@ struct HarnessView: View {
             if let error = store.error { HStack { Text(error).font(.caption).foregroundStyle(.orange); Spacer(); Button { store.error = nil } label: { Image(systemName: "xmark").font(.caption) } }.padding(.horizontal, 20).padding(.vertical, 8) }
             if let interaction = store.currentInteractions.first { InteractionView(item: interaction).id(interaction.id).frame(maxWidth: 560).frame(maxWidth: .infinity).padding(.horizontal, 16).padding(.bottom, 8) }
             if store.usesNativeHarness { QueueDockView().padding(.horizontal, 16).padding(.bottom, 8) }
+            if store.usesNativeHarness { HStack { DiffReviewButton(); Spacer(minLength: 0) }.padding(.horizontal, 16).padding(.bottom, 8) }
             if !store.currentQueue.isEmpty {
                 DisclosureGroup("Queued: \(store.currentQueue.count)") {
                     ForEach(store.currentQueue, id: \.pretty) { item in Text(JSON.text(item["message"]["content"])).font(.caption).frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 4) }
