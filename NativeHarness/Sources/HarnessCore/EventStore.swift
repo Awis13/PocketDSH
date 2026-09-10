@@ -221,13 +221,59 @@ public actor EventStore {
 
     public func removePending(session: String, id: String) throws -> Bool {
         try transaction {
-            let result = try rows("SELECT state FROM commands WHERE session=? AND id=?", [session,id])
-            guard result.first?.first == "pending" else { return false }
+            guard let state = try rows("SELECT state FROM commands WHERE session=? AND id=?", [session,id]).first?.first else { return false }
+            // Already removed is an idempotent success, so a retry after a host
+            // restart does not report a benign "not found".
+            guard state != "cancelled" else { return true }
+            guard state == "pending" else { return false }
             _ = try rows("UPDATE commands SET state='cancelled' WHERE session=? AND id=?", [session,id])
             var event = SessionEvent("inbox.cancelled"); event.commandID = id
             try insertEvents([event], session: session)
             return true
         }
+    }
+
+    /// Replace the prompt of a pending command in place. The stable identity and
+    /// delivery mode are preserved so an edit never reorders or re-steers work.
+    /// Editing commits a new payload for the ID; retrying the old payload with
+    /// the same ID is then a different-payload rejection, exactly like enqueue.
+    public func editPending(session: String, id: String, prompt: String) throws -> Bool {
+        guard !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              prompt.utf8.count <= 262144, !prompt.contains("\0") else {
+            throw HarnessError.invalid("Invalid command prompt (limit 256 KiB)")
+        }
+        return try transaction {
+            let result = try rows("SELECT state,prompt FROM commands WHERE session=? AND id=?", [session,id])
+            guard result.first?.first == "pending" else { return false }
+            guard result.first?.last != prompt else { return true }
+            _ = try rows("UPDATE commands SET prompt=? WHERE session=? AND id=? AND state='pending'", [prompt,session,id])
+            var event = SessionEvent("inbox.edited"); event.commandID = id
+            try insertEvents([event], session: session)
+            return true
+        }
+    }
+
+    /// Convert a still-queued command into steering for the current turn. Only a
+    /// queue → steer transition is meaningful. A command that already steers
+    /// (pending or consumed) is an idempotent success, so a retried steer after
+    /// a host restart does not report a benign "not found" or re-order claimed
+    /// work.
+    public func steerPending(session: String, id: String) throws -> Bool {
+        try transaction {
+            guard let row = try rows("SELECT mode,state FROM commands WHERE session=? AND id=?", [session,id]).first else { return false }
+            if row[0] == DeliveryMode.steer.rawValue { return true }
+            guard row[0] == DeliveryMode.queue.rawValue, row[1] == "pending" else { return false }
+            _ = try rows("UPDATE commands SET mode='steer' WHERE session=? AND id=? AND state='pending'", [session,id])
+            var event = SessionEvent("inbox.steered"); event.commandID = id
+            try insertEvents([event], session: session)
+            return true
+        }
+    }
+
+    /// Current delivery mode for a command, including consumed and cancelled
+    /// rows. Lets the engine keep control retries idempotent across a restart.
+    public func commandMode(session: String, id: String) throws -> DeliveryMode? {
+        try rows("SELECT mode FROM commands WHERE session=? AND id=?", [session,id]).first.flatMap { DeliveryMode(rawValue: $0[0]) }
     }
 
     /// Claim and transcript admission are one transaction; a crash cannot

@@ -165,6 +165,7 @@ struct NativeShellPane: View {
     var body: some View {
         VStack(spacing: 0) {
             ContextStatusView()
+            QueueDockView().padding(.horizontal, 20).padding(.top, 8)
             if !blocks.isEmpty { blockToolbar }
             if findVisible { findBar }
             ScrollViewReader { scroll in

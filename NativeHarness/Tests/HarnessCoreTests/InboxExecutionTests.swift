@@ -166,4 +166,72 @@ private actor InboxProvider: TestModelProvider {
         XCTAssertEqual(claimed.map(\.content), ["keep me"])
         await store.releaseExecution(session: "a", owner: "owner")
     }
+
+    func testSteeringAQueuedItemJoinsTheCurrentTurn() async throws {
+        let root = try directory()
+        let store = try EventStore(path: root.appendingPathComponent("db").path)
+        let provider = InboxProvider()
+        let engine = SessionEngine(id: "a", store: store, provider: provider, tools: try WorkspaceTools(root: root))
+        let task = Task { try await engine.run(prompt: "initial") }
+        try await wait(provider)
+        _ = try await engine.enqueue(prompt: "later task", commandID: "queue")
+        _ = try await engine.enqueue(prompt: "convert me", commandID: "convert")
+        let converted = try await engine.steerPending(commandID: "convert")
+        await provider.release()
+        _ = try await task.value
+        let requests = await provider.requests
+        XCTAssertTrue(converted)
+        XCTAssertEqual(requests.count, 3)
+        XCTAssertEqual(requests[1].last?.content, "convert me")
+        XCTAssertFalse(requests[1].contains { $0.content == "later task" })
+        XCTAssertEqual(requests[2].last?.content, "later task")
+        let events = try await store.load(session: "a")
+        XCTAssertEqual(events.filter { $0.commandID == "convert" && $0.message != nil }.count, 1)
+        XCTAssertEqual(events.filter { $0.kind == "inbox.steered" }.count, 1)
+    }
+
+    func testSteeringAnIdleSessionIsRejectedAndLeavesWorkQueued() async throws {
+        let root = try directory()
+        let store = try EventStore(path: root.appendingPathComponent("db").path)
+        let provider = InboxProvider(hold: false)
+        let engine = SessionEngine(id: "a", store: store, provider: provider, tools: try WorkspaceTools(root: root))
+        _ = try await engine.enqueue(prompt: "queued", commandID: "q")
+        do {
+            _ = try await engine.steerPending(commandID: "q")
+            XCTFail("Idle steering must be rejected")
+        } catch let error as QueueControlError {
+            XCTAssertEqual(error, .steerUnavailable)
+        }
+        let pending = try await engine.pending()
+        XCTAssertEqual(pending.map(\.id), ["q"])
+        XCTAssertEqual(pending.map(\.mode), [.queue])
+    }
+
+    func testConcurrentQueueMutationsAndClaimNeverDoubleConsume() async throws {
+        let root = try directory()
+        let store = try EventStore(path: root.appendingPathComponent("db").path)
+        try await store.acquireExecution(session: "a", owner: "owner")
+        for index in 0..<12 {
+            _ = try await store.enqueue(session: "a", id: "c\(index)", prompt: "p\(index)", mode: .queue)
+        }
+        let context = DiagnosticTrace().identifiers()
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            for index in 0..<12 {
+                group.addTask { _ = try await store.steerPending(session: "a", id: "c\(index)") }
+                group.addTask { _ = try await store.editPending(session: "a", id: "c\(index)", prompt: "p\(index)") }
+                if index % 3 == 0 { group.addTask { _ = try await store.removePending(session: "a", id: "c\(index)") } }
+            }
+            group.addTask { _ = try await store.claim(session: "a", owner: "owner", startsTurn: true, trace: context) }
+            group.addTask { _ = try await store.finishIfUnsteered(session: "a", owner: "owner", trace: context) }
+            try await group.waitForAll()
+        }
+        _ = try await store.claim(session: "a", owner: "owner", startsTurn: false, trace: context)
+        let events = try await store.load(session: "a")
+        let admissions = events.filter { $0.message?.role == "user" }.compactMap(\.commandID)
+        XCTAssertEqual(Set(admissions).count, admissions.count, "An inbox ID must become a user message at most once")
+        XCTAssertLessThanOrEqual(admissions.count, 12)
+        let stillPending = try await store.pending(session: "a")
+        XCTAssertTrue(stillPending.isEmpty, "Claiming must not leave selectable work behind")
+        await store.releaseExecution(session: "a", owner: "owner")
+    }
 }

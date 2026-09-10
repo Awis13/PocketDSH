@@ -190,6 +190,7 @@ struct HarnessView: View {
         VStack(spacing: 0) {
             if let error = store.error { HStack { Text(error).font(.caption).foregroundStyle(.orange); Spacer(); Button { store.error = nil } label: { Image(systemName: "xmark").font(.caption) } }.padding(.horizontal, 20).padding(.vertical, 8) }
             if let interaction = store.currentInteractions.first { InteractionView(item: interaction).id(interaction.id).frame(maxWidth: 560).frame(maxWidth: .infinity).padding(.horizontal, 16).padding(.bottom, 8) }
+            if store.usesNativeHarness { QueueDockView().padding(.horizontal, 16).padding(.bottom, 8) }
             if !store.currentQueue.isEmpty {
                 DisclosureGroup("Queued: \(store.currentQueue.count)") {
                     ForEach(store.currentQueue, id: \.pretty) { item in Text(JSON.text(item["message"]["content"])).font(.caption).frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 4) }
@@ -280,7 +281,7 @@ struct HarnessView: View {
                 } label: { Image(systemName: "arrow.up").font(.system(size: 18, weight: .semibold)).frame(width: 38, height: 38).background(theme.accent, in: Circle()).foregroundStyle(theme.canvas) }
                     .disabled(!canSend)
                     .opacity(store.draft.isEmpty && store.images.isEmpty ? 0.3 : 1).accessibilityLabel("Send").accessibilityIdentifier("sendPrompt")
-                    .contextMenu { if store.running && !store.usesNativeHarness { Button("Steer current turn") { Task { await store.submit(mode: "steer") } } } }
+                    .contextMenu { if store.running && (!store.usesNativeHarness || store.nativeSupportsQueue) { Button("Steer current turn") { Task { await store.submit(mode: "steer") } } } }
             }
             if terminalInput { promptInput }
         }.padding(terminalInput ? 0 : 16)

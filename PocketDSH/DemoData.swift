@@ -32,6 +32,8 @@ extension PocketStore {
             nativeShell = client; rows = transcript.rows
             nativeCompaction = transcript.compaction; nativeSupportsCompaction = transcript.supportsCompaction
             nativeRequests = transcript.requests; nativeProtocolNotices = transcript.protocolNotices
+            nativeQueue = transcript.queue; nativeQueueOmitted = transcript.queueOmitted
+            nativeSupportsQueue = transcript.supportsQueue; nativeReady = true
         } catch { self.error = "Cannot load offline replay: " + error.localizedDescription }
     }
 

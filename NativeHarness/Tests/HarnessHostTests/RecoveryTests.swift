@@ -35,6 +35,36 @@ final class RecoveryTests: XCTestCase {
                        NativeEvent(op: "user", id: "prompt"), NativeEvent(op: "stage", stage: "completed")]
         XCTAssertTrue(NativeRecovery.events(history, session: "s", engineInterrupted: false, pendingCount: 0).isEmpty)
     }
+
+    func testRestartNoticeReportsPreservedPendingWithoutAutoRunning() {
+        let history = [NativeEvent(op: "user", id: "prompt", text: "check")]
+        let preserved = NativeRecovery.events(history, session: "s", engineInterrupted: false, pendingCount: 2)
+        XCTAssertEqual(preserved.count, 1)
+        XCTAssertEqual(preserved.first?.stage, "interrupted")
+        XCTAssertEqual(preserved.first?.text?.contains("2 queued requests preserved"), true)
+        let empty = NativeRecovery.events(history, session: "s", engineInterrupted: false, pendingCount: 0)
+        XCTAssertEqual(empty.first?.text?.contains("Send a new request"), true)
+    }
+
+    func testQueueSnapshotBoundsItemsPreviewsAndPlacement() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try EventStore(path: root.appendingPathComponent("db").path)
+        _ = try await store.enqueue(session: "s", id: "a", prompt: "short", mode: .queue)
+        _ = try await store.enqueue(session: "s", id: "b", prompt: String(repeating: "x", count: 1000), mode: .steer)
+        _ = try await store.enqueue(session: "s", id: "c", prompt: "third", mode: .queue)
+        let snapshot = NativeQueueProjection.snapshot(try await store.pending(session: "s"), limit: 2, previewBytes: 8)
+        XCTAssertEqual(snapshot.items.map { $0.id }, ["a", "b"])
+        XCTAssertEqual(snapshot.omitted, 1)
+        XCTAssertEqual(snapshot.count, 3)
+        XCTAssertEqual(snapshot.items[0].placement, NativeQueueItem.queued)
+        XCTAssertEqual(snapshot.items[1].placement, NativeQueueItem.steering)
+        XCTAssertFalse(snapshot.items[0].truncated)
+        XCTAssertEqual(snapshot.items[1].preview, "xxxxxxxx")
+        XCTAssertTrue(snapshot.items[1].truncated)
+        XCTAssertTrue(NativeQueueProjection.snapshot([]).items.isEmpty)
+    }
     func testJournalReopensWithByteExactOutputAndFrozenRequestIdentity() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)

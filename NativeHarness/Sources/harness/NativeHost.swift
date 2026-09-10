@@ -106,6 +106,28 @@ final class NativeSink: @unchecked Sendable {
     }
 }
 
+/// Pure queue-edit decisions, kept out of the session actor so the wire
+/// invariants are executable from tests.
+enum NativeQueueEditing {
+    /// A re-emitted `user` row tells the transcript which text was edited. Only a
+    /// request that was actually shown to the user owns such a row: agent/`watch`
+    /// items are enqueued straight into the inbox and never emitted one, so
+    /// editing them must not fabricate a phantom user message.
+    static func reemitsUser(admitted: Set<String>, itemID: String, edited: Bool, previousPrompt: String?, updatedPrompt: String) -> Bool {
+        edited && admitted.contains(itemID) && previousPrompt != updatedPrompt
+    }
+
+    /// The full-text fetch and its rejection are both keyed by the queue item id
+    /// so the client can retire the matching editor handler, even on failure.
+    static func textResult(session: String, itemID: String, prompt: String?) -> NativeEvent {
+        guard let prompt else { return NativeEvent(op: "queueRejected", session: session, id: itemID, text: "queue-item-not-found") }
+        return NativeEvent(op: "queueText", session: session, id: itemID, text: prompt)
+    }
+    static func textFailure(session: String, itemID: String) -> NativeEvent {
+        NativeEvent(op: "queueRejected", session: session, id: itemID, text: "queue-unavailable")
+    }
+}
+
 private actor NativeHostSession {
     let id: String
     let workspace: String
@@ -119,6 +141,8 @@ private actor NativeHostSession {
     let store: EventStore
     private var peerID: UUID?
     private var admitted = Set<String>()
+    private var queueReceipts: [String: NativeEvent] = [:]
+    private var queueReceiptOrder: [String] = []
     private var maintenance: Task<Void, Never>?
     private var terminalRows = 24
     private var terminalColumns = 80
@@ -186,10 +210,53 @@ private actor NativeHostSession {
         guard peerID == nil || peerID == peer.id else { throw HarnessError.busy }
         // Reserve the attachment before any suspension so another peer cannot win it.
         peerID = peer.id
-        sink.attach(peer, opened: NativeEvent(op: "opened", session: id, model: model, workspace: workspace, ptyID: observation.id, capabilities: [NativeCompactionInfo.capability]))
+        // Read the durable inbox before replaying opened/synced. A failure here
+        // releases the reservation while the client is still silent, instead of
+        // leaving it "ready" on the binding the caller is about to remove.
+        let snapshot: NativeEvent
+        do { snapshot = try await queueSnapshot() }
+        catch {
+            if peerID == peer.id { peerID = nil }
+            throw error
+        }
+        guard peerID == peer.id else { throw HarnessError.busy }
+        sink.attach(peer, opened: NativeEvent(op: "opened", session: id, model: model, workspace: workspace, ptyID: observation.id, capabilities: [NativeCompactionInfo.capability, NativeQueueInfo.capability]))
         for request in await approvals.pending() where peerID == peer.id {
             peer.send(NativeEvent(op: "approval", session: id, approval: NativeApproval(id: request.id, name: request.call.name, arguments: request.call.arguments, workspace: request.workspace)))
         }
+        // Sent after `opened`, which resets the client's queue projection.
+        peer.send(snapshot)
+    }
+
+    /// A failed inbox read must never be published as an empty queue: that would
+    /// clear the client's dock and retire its optimistic echo. Propagate instead
+    /// so the caller emits a real error event and the last-known state survives.
+    private func queueSnapshot() async throws -> NativeEvent {
+        let pending = try await engine.pending()
+        return NativeEvent(op: "queue", session: id, queue: NativeQueueProjection.snapshot(pending))
+    }
+
+    private func sendQueueSnapshot(to peer: NativePeer) async throws {
+        peer.send(try await queueSnapshot())
+    }
+
+    /// Control identifiers are bounded exactly like `EventStore.enqueue`'s IDs so
+    /// one client cannot grow the receipt map without limit.
+    private static func validIdentifier(_ value: String) -> Bool {
+        !value.isEmpty && value.utf8.count <= 128 && !value.contains("\0")
+    }
+
+    private static let queueActions: Set<String> = ["edit", "remove", "steer", "text"]
+
+    /// Queue acknowledgements are ephemeral and bounded, keyed by the client's
+    /// request ID so a retry after a dropped frame returns the same outcome.
+    private func publishQueueReceipt(_ receipt: NativeEvent, requestID: String, to peer: NativePeer) {
+        if queueReceipts[requestID] == nil {
+            queueReceipts[requestID] = receipt
+            queueReceiptOrder.append(requestID)
+            if queueReceiptOrder.count > 256 { queueReceipts.removeValue(forKey: queueReceiptOrder.removeFirst()) }
+        }
+        peer.send(receipt)
     }
 
     func detach(_ peer: NativePeer) async {
@@ -222,7 +289,12 @@ private actor NativeHostSession {
             }
         case "interrupt": try pty.interrupt()
         case "prompt":
-            guard let text = command.text, let requestID = command.id else { throw HarnessError.invalid("Missing prompt or request ID") }
+            guard let text = command.text, let requestID = command.id, Self.validIdentifier(requestID) else { throw HarnessError.invalid("Missing prompt or invalid request ID") }
+            let mode: DeliveryMode
+            if let raw = command.mode {
+                guard let parsed = DeliveryMode(rawValue: raw) else { throw HarnessError.invalid("Unknown delivery mode") }
+                mode = parsed
+            } else { mode = .queue }
             var prompt = text
             if command.withTerminal == true {
                 let cursor = observation.inspect().latestCursor
@@ -231,13 +303,58 @@ private actor NativeHostSession {
             }
             // Persist admission before publishing it; only then wake the driver.
             prompt = try sink.journal.prepareRequest(session: id, id: requestID, original: text, terminal: command.withTerminal == true, expanded: prompt)
-            let receipt = try await engine.enqueue(prompt: prompt, commandID: requestID)
+            let receipt = try await engine.enqueue(prompt: prompt, mode: mode, commandID: requestID)
             if admitted.insert(requestID).inserted {
                 sink.send(NativeEvent(op: "user", session: id, id: requestID, text: text))
             }
             try sink.checkStorage()
             if receipt.state == .pending { await driver.resume() }
             sink.send(NativeEvent(op: "accepted", session: id, id: requestID, text: text))
+            try await sendQueueSnapshot(to: peer)
+        case "queue":
+            guard let requestID = command.id, Self.validIdentifier(requestID) else { throw HarnessError.invalid("Missing or invalid queue request ID") }
+            if let previous = queueReceipts[requestID] { peer.send(previous); return }
+            guard let action = command.action, Self.queueActions.contains(action) else { throw HarnessError.invalid("Unknown queue action") }
+            guard let itemID = command.itemID, Self.validIdentifier(itemID) else { throw HarnessError.invalid("Missing or invalid queue item ID") }
+            if action == "text" {
+                // Bounded on-demand full text for the single item being edited;
+                // the list preview stays clipped. Fetch and rejection both carry
+                // the item id, which is what the client keys its editor on.
+                do {
+                    let target = try await engine.pending().first(where: { $0.id == itemID })
+                    peer.send(NativeQueueEditing.textResult(session: id, itemID: itemID, prompt: target?.prompt))
+                } catch {
+                    peer.send(NativeQueueEditing.textFailure(session: id, itemID: itemID))
+                }
+                return
+            }
+            let rejected: String?
+            switch action {
+            case "edit":
+                guard let text = command.text else { throw HarnessError.invalid("Missing prompt for queue edit") }
+                let previous = try await engine.pending().first(where: { $0.id == itemID })
+                // Only a false RETURN is "not found"; storage/invalid faults
+                // propagate as their own error event instead of hiding as benign.
+                let edited = try await engine.editPending(commandID: itemID, prompt: text)
+                rejected = edited ? nil : "queue-item-not-found"
+                // Re-publish the prompt under the same request identity so the chat
+                // row and replayed transcript show the edited text, not the stale
+                // one. Only do so for a request that was admitted as a user turn.
+                if NativeQueueEditing.reemitsUser(admitted: admitted, itemID: itemID, edited: edited, previousPrompt: previous?.prompt, updatedPrompt: text) {
+                    sink.send(NativeEvent(op: "user", session: id, id: itemID, text: text))
+                }
+            case "remove":
+                rejected = try await engine.removePending(commandID: itemID) ? nil : "queue-item-not-found"
+            case "steer":
+                do { rejected = try await engine.steerPending(commandID: itemID) ? nil : "queue-item-not-found" }
+                catch is QueueControlError { rejected = "steer-unavailable" }
+            default:
+                throw HarnessError.invalid("Unknown queue action")
+            }
+            let receipt = rejected.map { NativeEvent(op: "queueRejected", session: id, id: requestID, text: $0) }
+                ?? NativeEvent(op: "queueAccepted", session: id, id: requestID)
+            publishQueueReceipt(receipt, requestID: requestID, to: peer)
+            try await sendQueueSnapshot(to: peer)
         case "watch":
             guard let requestID = command.id else { throw HarnessError.invalid("Missing request ID") }
             _ = try await driver.submit(prompt: "Observe terminal \(observation.id) using terminal_inspect/read/wait. Read the current output, then wait for new output. Report what actually changes. Do not type into the terminal or run shell commands. Distinguish whole-PTY exit from completion of a command. Ask the user if a decision is needed.", commandID: requestID)
@@ -275,6 +392,7 @@ private actor NativeHostSession {
             let status = try await driver.status()
             peer.send(NativeEvent(op: "status", session: id, text: status.errorCode, running: status.running || maintenance != nil,
                 compaction: sink.compactionInfo()))
+            try await sendQueueSnapshot(to: peer)
         case "cancel": maintenance?.cancel(); await driver.stop()
         case "approval":
             guard let id = command.id, let allow = command.allow else { throw HarnessError.invalid("Missing approval") }
@@ -299,6 +417,12 @@ private actor NativeHostSession {
 }
 
 actor NativeHost {
+    /// Inbound frame budget. Prompts and queue edits are capped at 256 KiB of
+    /// UTF-8 by `EventStore`; JSON escapes control characters up to 6 bytes each,
+    /// so 2 MiB covers the worst-case 256 KiB prompt envelope plus headers. A
+    /// smaller cap silently dropped an edit of a near-limit prompt even though
+    /// the edit itself was valid.
+    static let maximumInboundFrameBytes = 2_097_152
     private let listener: NWListener
     private let workspace: String
     private let model: String
@@ -318,7 +442,7 @@ actor NativeHost {
         let parameters = NWParameters.tcp
         parameters.requiredLocalEndpoint = .hostPort(host: .ipv4(.loopback), port: port)
         let websocket = NWProtocolWebSocket.Options()
-        websocket.autoReplyPing = true; websocket.maximumMessageSize = 262144
+        websocket.autoReplyPing = true; websocket.maximumMessageSize = NativeHost.maximumInboundFrameBytes
         websocket.setClientRequestHandler(DispatchQueue(label: "native.harness.auth")) { _, headers in
             let auth = headers.first { $0.name.lowercased() == "authorization" }?.value
             let origin = headers.first { $0.name.lowercased() == "origin" }?.value
@@ -336,8 +460,10 @@ actor NativeHost {
             let engineEvents = try await store.load(session: id)
             let repairs = SessionEngine.recovery(engineEvents)
             if !repairs.isEmpty { try await store.append(repairs, session: id) }
+            // Pending commands are durable. Preserve them across a restart and
+            // surface them on reconnect; they never run without an explicit
+            // resume or a new submit.
             let pending = try await store.pending(session: id)
-            for command in pending { _ = try await store.removePending(session: id, id: command.id) }
             let history = try sink.history()
             let shown = Set(history.filter { $0.op == "user" }.compactMap(\.id))
             for event in engineEvents where event.kind == "inbox.accepted" {

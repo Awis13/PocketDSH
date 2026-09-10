@@ -34,7 +34,7 @@ final class PocketStore: ObservableObject {
     var openDefaultTaskWhenConnected = false
     @Published var voiceRecording = false
     @Published var selectedID: String? { didSet {
-        if selectedID != oldValue { nativeRequests = []; nativeProtocolNotices = []; nativeCompaction = nil; nativeSupportsCompaction = false; nativeCompactionPending = false }
+        if selectedID != oldValue { nativeRequests = []; nativeProtocolNotices = []; nativeCompaction = nil; nativeSupportsCompaction = false; nativeCompactionPending = false; nativeQueue = []; nativeQueueOmitted = 0; nativeSupportsQueue = false; queueTextHandlers.removeAll() }
         persistPane()
     } }
     @Published var composerFocusRequest: UUID?
@@ -47,8 +47,12 @@ final class PocketStore: ObservableObject {
     @Published var nativeCompaction: NativeCompactionInfo?
     @Published var nativeCompactionPending = false
     @Published var nativeSupportsCompaction = false
+    @Published var nativeQueue: [NativeQueueItem] = []
+    @Published var nativeQueueOmitted = 0
+    @Published var nativeSupportsQueue = false
     var compactingContext: Bool { nativeCompactionPending || nativeCompaction?.isRunning == true }
     var canCompactContext: Bool { usesNativeHarness && nativeSupportsCompaction && connected && nativeReady && !running && !compactingContext && nativeSubmission == nil }
+    var canControlQueue: Bool { usesNativeHarness && nativeSupportsQueue && connected && nativeReady }
     private func compactionKey(_ session: String) -> String { "harness.compaction." + endpoint + "|" + session }
     @Published var nativeRequests: [NativeRequestInfo] = []
     @Published var nativeProtocolNotices: [String] = []
@@ -114,8 +118,9 @@ final class PocketStore: ObservableObject {
         return true
     }
     private var nativeTranscript = NativeTranscript()
-    private var nativeReady = false
+    var nativeReady = false
     private var nativeSubmission: (id: String, text: String, session: String, draft: String, attachmentIDs: [String])?
+    private var queueTextHandlers: [String: (String?) -> Void] = [:]
     private var nativeReconnect: Task<Void, Never>?
     private var nativeRetry = 0
     private struct SavedNativeRequest: Codable {
@@ -210,7 +215,7 @@ final class PocketStore: ObservableObject {
         nativeReconnect?.cancel(); nativeReconnect = nil
         generation = UUID(); connectionTask?.cancel(); connectionTask = nil
         nativeShell?.disconnect(); nativeShell = nil
-        native?.disconnect(); native = nil; nativeRequests = []; nativeProtocolNotices = []; nativeCompaction = nil; nativeSupportsCompaction = false; nativeCompactionPending = false; nativeReady = false; nativeSubmission = nil; api = nil
+        native?.disconnect(); native = nil; nativeRequests = []; nativeProtocolNotices = []; nativeCompaction = nil; nativeSupportsCompaction = false; nativeCompactionPending = false; nativeQueue = []; nativeQueueOmitted = 0; nativeSupportsQueue = false; nativeReady = false; nativeSubmission = nil; queueTextHandlers.removeAll(); api = nil
         socket?.cancel(with: .goingAway, reason: nil); socket = nil
         connected = false; connecting = false; loadingHistory = false; interactions = []; clientID = ""
     }
@@ -384,7 +389,7 @@ final class PocketStore: ObservableObject {
         if model == .null { model = catalog["default"] }
         guard connected else { return }
         if let native {
-            nativeReady = false; nativeTranscript = NativeTranscript(); nativeRequests = []; nativeProtocolNotices = []; nativeCompaction = nil; nativeSupportsCompaction = false; nativeCompactionPending = false; interactions = []
+            nativeReady = false; nativeTranscript = NativeTranscript(); nativeRequests = []; nativeProtocolNotices = []; nativeCompaction = nil; nativeSupportsCompaction = false; nativeCompactionPending = false; nativeQueue = []; nativeQueueOmitted = 0; nativeSupportsQueue = false; interactions = []
             guard let id else { native.selectedID = nil; return }
             loadingHistory = true; native.selectedID = id
             do { try await native.send(NativeCommand(op: "open", session: id)) }
@@ -431,7 +436,7 @@ final class PocketStore: ObservableObject {
         } catch { self.error = error.localizedDescription }
     }
     func submit(mode: String = "queue") async {
-        if native != nil { await submitNative(); return }
+        if native != nil { await submitNative(mode: mode); return }
         guard let api, connected, let id = selectedID, !submitting else { return }
         guard !preparingImages, !selectingModel else { return }
         let sendingEndpoint = endpoint
@@ -524,6 +529,35 @@ final class PocketStore: ObservableObject {
             return
         }
         await command("session/cancel", request: ["sessionId": .string(selectedID ?? "")])
+    }
+    func editQueued(_ id: String, prompt: String) async {
+        let text = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { error = "Enter the replacement request text."; return }
+        await queueAction("edit", itemID: id, text: text)
+    }
+    func removeQueued(_ id: String) async { await queueAction("remove", itemID: id) }
+    func steerQueued(_ id: String) async { await queueAction("steer", itemID: id) }
+    /// Fetches the full stored prompt for one queued item on demand. The dock's
+    /// list preview stays clipped, so editing a long request never needs retyping.
+    func loadQueuedText(_ id: String, completion: @escaping (String?) -> Void) {
+        guard canControlQueue, let native, let session = selectedID else { completion(nil); return }
+        queueTextHandlers[id] = completion
+        Task {
+            do { try await native.send(NativeCommand(op: "queue", session: session, id: UUID().uuidString, action: "text", itemID: id)) }
+            catch {
+                queueTextHandlers.removeValue(forKey: id)?(nil)
+                self.error = error.localizedDescription
+            }
+        }
+    }
+    private func queueAction(_ action: String, itemID: String, text: String? = nil) async {
+        guard canControlQueue, let native, let session = selectedID else {
+            error = "Reconnect to the native host before changing the queue."; return
+        }
+        do {
+            try await native.send(NativeCommand(op: "queue", session: session, id: UUID().uuidString, text: text, action: action, itemID: itemID))
+            error = nil
+        } catch { self.error = error.localizedDescription }
     }
     func selectModel(provider: String, model: String) async {
         if usesNativeHarness { error = "Native Harness currently uses the model configured on its host: " + modelLabel; return }
@@ -633,6 +667,10 @@ extension PocketStore {
             }
             return
         }
+        // `accepted` applies regardless of the current selection so switching
+        // sessions mid-send cannot strand a submission; `error`/`queueRejected`
+        // and the transcript events below stay scoped to the selected session.
+        guard event.deliversToSelection(selectedID) else { return }
         if event.op == "error" { error = event.text ?? "Native Harness error"; nativeSubmission = nil; loadingHistory = false; return }
         if event.op == "accepted", let submission = nativeSubmission, submission.id == event.id {
             if selectedID == submission.session, draft.trimmingCharacters(in: .whitespacesAndNewlines) == submission.draft { draft = "" }
@@ -648,8 +686,17 @@ extension PocketStore {
             pendingRequest = nil; pendingText = nil; nativeSubmission = nil
             UserDefaults.standard.removeObject(forKey: nativeRequestKey(submission.session))
         }
-        guard event.session == nil || event.session == selectedID else { return }
         if event.op == "completion" { nativeShell?.receive(event); return }
+        if event.op == "queueRejected" {
+            // Clear the pending full-text fetch for this item (if any) before
+            // surfacing the failure so the editor never keeps spinning.
+            queueTextHandlers.removeValue(forKey: event.id ?? "")?(nil)
+            error = NativeQueueInfo.rejectionDetail(event.text ?? ""); return
+        }
+        if event.op == "queueText", let itemID = event.id, let text = event.text {
+            queueTextHandlers.removeValue(forKey: itemID)?(text)
+            return
+        }
         if event.op == "opened", let id = event.session {
             if nativeShell?.id != id {
                 let shell = NativeClient(id: id, endpoint: endpoint, token: "")
@@ -671,7 +718,15 @@ extension PocketStore {
         if event.op == "workspaceAction" || event.op == "pty" { return }
         nativeTranscript.apply(event)
         nativeSupportsCompaction = nativeTranscript.supportsCompaction
+        nativeSupportsQueue = nativeTranscript.supportsQueue
         if nativeCompaction != nativeTranscript.compaction { nativeCompaction = nativeTranscript.compaction }
+        if nativeQueue != nativeTranscript.queue { nativeQueue = nativeTranscript.queue }
+        if nativeQueueOmitted != nativeTranscript.queueOmitted { nativeQueueOmitted = nativeTranscript.queueOmitted }
+        // A queue snapshot retires the optimistic echo only once the host has
+        // admitted the exact request, matching the DSH reconciliation.
+        if let pending = pendingRequest, nativeQueue.contains(where: { $0.id == pending.id }) {
+            pendingRequest = nil; pendingText = nil
+        }
         if let session = selectedID {
             let key = compactionKey(session)
             let pending = UserDefaults.standard.string(forKey: key)
@@ -741,7 +796,7 @@ extension PocketStore {
         nativeShell?.shellDraft = ""
         await submitNative(withTerminal: true)
     }
-    private func submitNative(withTerminal: Bool = false) async {
+    private func submitNative(withTerminal: Bool = false, mode: String = "queue") async {
         guard let native, connected, nativeReady, let id = selectedID, !submitting, nativeSubmission == nil else { return }
         guard images.isEmpty else { error = "Native Harness image input is not yet supported."; return }
         let submittedDraft = draft.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -762,7 +817,7 @@ extension PocketStore {
         nativeSubmission = (request.id, text, id, submittedDraft, attachmentIDs)
         defer { submitting = false }
         do {
-            try await native.send(NativeCommand(op: "prompt", session: id, id: request.id, text: text, withTerminal: terminal))
+            try await native.send(NativeCommand(op: "prompt", session: id, id: request.id, text: text, withTerminal: terminal, mode: mode))
             error = nil
         } catch { nativeSubmission = nil; self.error = "Send not confirmed. Reconnect and check the conversation before retrying: " + error.localizedDescription }
     }

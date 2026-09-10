@@ -82,6 +82,9 @@ struct NativeTranscript {
     private(set) var protocolNotices: [String] = []
     private(set) var supportsCompaction = false
     private(set) var compactions: [NativeCompactionInfo] = []
+    private(set) var supportsQueue = false
+    private(set) var queue: [NativeQueueItem] = []
+    private(set) var queueOmitted = 0
     var compaction: NativeCompactionInfo? { compactions.last }
     private var sessionID: String?
     private var sequence = 0
@@ -90,7 +93,9 @@ struct NativeTranscript {
     mutating func apply(_ event: NativeEvent) {
         if event.op == "opened" {
             self = NativeTranscript(); sessionID = event.session
-            supportsCompaction = event.capabilities?.contains(NativeCompactionInfo.capability) == true; return
+            supportsCompaction = event.capabilities?.contains(NativeCompactionInfo.capability) == true
+            supportsQueue = event.capabilities?.contains(NativeQueueInfo.capability) == true
+            return
         }
         if let sessionID, let incoming = event.session, sessionID != incoming { return }
         if let next = event.sequence {
@@ -127,10 +132,16 @@ struct NativeTranscript {
                 rows[i].shell?.interrupted = event.failed == true || event.op == "ptyExit"
             }
         case "user":
+            // A re-emitted user event with the same id reconciles an edited queued
+            // request in place; it must update the row, never append a duplicate.
             let id = "native-user-" + (event.id ?? String(sequence))
-            guard !rows.contains(where: { $0.id == id }) else { return }
             let prompt = ShellPromptContent.parse(event.text ?? "")
-            rows.append(TranscriptRow(id: id, kind: .user, text: prompt.question, detail: prompt.readableContext))
+            if let index = rows.firstIndex(where: { $0.id == id }) {
+                rows[index].text = prompt.question
+                rows[index].detail = prompt.readableContext
+            } else {
+                rows.append(TranscriptRow(id: id, kind: .user, text: prompt.question, detail: prompt.readableContext))
+            }
         case "text", "reasoning":
             let kind: TranscriptRow.Kind = event.op == "text" ? .assistant : .reasoning
             if let i = rows.lastIndex(where: { $0.kind != .shell }), rows[i].kind == kind, !rows[i].complete { rows[i].text += event.text ?? "" }
@@ -166,8 +177,17 @@ struct NativeTranscript {
                                           text: event.stage == "cancelled" ? "Response stopped" : event.text == "CONTEXT_LIMIT" ? "Model context limit exceeded. Terminal and conversation are preserved." : "Native Harness turn failed", failed: event.stage == "failed"))
             }
         case "shellReset": rows.append(TranscriptRow(id: "native-shell-reset-\(sequence)", kind: .notice, text: event.text ?? "New shell; previous commands were not rerun."))
+        case "queue":
+            // A malformed/absent queue block is preserved as an extension, so keep
+            // the last good snapshot instead of wiping the dock to empty.
+            guard let info = event.queue else { return }
+            let valid = info.items.filter(\.valid)
+            queue = valid
+            // Invalid items are dropped from the list, so fold them into omitted
+            // to keep items + omitted equal to the host's reported count.
+            queueOmitted = info.omitted + (info.items.count - valid.count)
         // These events belong to session controls, PTY or workspace state.
-        case "request", "compaction", "compactionRejected", "pty", "terminalSize", "workspaceAction", "sessions", "status", "synced", "accepted", "approval", "completion", "error": break
+        case "request", "compaction", "compactionRejected", "queueAccepted", "queueRejected", "queueText", "pty", "terminalSize", "workspaceAction", "sessions", "status", "synced", "accepted", "approval", "completion", "error": break
         default: notice("Unrecognized event: " + NativeRequestInfo.label(event.op))
         }
     }

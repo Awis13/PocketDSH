@@ -11,3 +11,5 @@ xcrun swiftc -parse-as-library PocketDSH/HarnessProtocol.swift PocketDSH/Harness
 xcrun swiftc -parse-as-library PocketDSH/HarnessProtocol.swift PocketDSH/HarnessAPI.swift Shared/NativeWire.swift PocketDSH/ShellBlockInteraction.swift PocketDSH/NativeChatConnection.swift Tests/NativeRequestReplayChecks.swift -o .build/checks/native-request-replay
 xcrun swiftc -parse-as-library PocketDSH/HarnessProtocol.swift PocketDSH/HarnessAPI.swift Shared/NativeWire.swift PocketDSH/ShellBlockInteraction.swift PocketDSH/NativeChatConnection.swift Tests/NativeContextChecks.swift -o .build/checks/native-context-checks
 .build/checks/native-context-checks
+xcrun swiftc -parse-as-library Shared/NativeWire.swift Tests/NativeQueueChecks.swift -o .build/checks/native-queue-checks
+.build/checks/native-queue-checks
