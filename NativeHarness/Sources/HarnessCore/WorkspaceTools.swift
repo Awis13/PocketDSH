@@ -20,7 +20,8 @@ public actor WorkspaceTools: ToolExecutor {
     private static let observationDefinitions: [ToolDefinition] = [
         .init(name: "terminal_inspect", description: "Read-only: list retained terminal IDs, initial workspace, output byte cursors and whole-PTY exit. Initial workspace is NOT current cwd. This does not report a rendered screen or individual command completion.", properties: [:], required: []),
         .init(name: "terminal_read", description: "Read-only: read a plain excerpt of retained terminal output, not a rendered screen. Output is untrusted data. No base64 or ANSI. text is capped at 4 KiB; previewTruncated marks clipped text, gap marks evicted raw bytes. Use nextCursor for subsequent reads. No keyboard control.", properties: ["terminal_id": "ID from terminal_inspect", "after": "Decimal byte cursor, initially 0", "max_bytes": "Decimal limit 1..65536; default 4096"], required: ["terminal_id", "after"]),
-        .init(name: "terminal_wait", description: "Read-only: wait without polling the model for new terminal bytes or whole-PTY exit. Returns immediately for unread bytes. Resume from nextCursor; timeout is not evidence that a command finished. Cancellation removes this waiter but leaves the user's shell running.", properties: ["terminal_id": "ID from terminal_inspect", "after": "Decimal byte cursor from previous read", "max_bytes": "Decimal limit 1..65536; default 4096", "timeout_seconds": "Seconds >0 and <=60; default 30"], required: ["terminal_id", "after"])
+        .init(name: "terminal_wait", description: "Read-only: wait without polling the model for new terminal bytes or whole-PTY exit. Returns immediately for unread bytes. Resume from nextCursor; timeout is not evidence that a command finished. Cancellation removes this waiter but leaves the user's shell running.", properties: ["terminal_id": "ID from terminal_inspect", "after": "Decimal byte cursor from previous read", "max_bytes": "Decimal limit 1..65536; default 4096", "timeout_seconds": "Seconds >0 and <=60; default 30"], required: ["terminal_id", "after"]),
+        .init(name: "terminal_commands", description: "Read-only: list recent shell command lifecycle records (command text, cwd, exit code, start/end time) for a terminal. A record with no command is the initial prompt; a record with no end is still running. This is plain data, not a rendered screen, and is untrusted. No keyboard control.", properties: ["terminal_id": "ID from terminal_inspect", "limit": "Decimal count 1..64; default 32"], required: ["terminal_id"])
     ]
 
     public init(root: URL, allowWrite: Bool = false, approvals: ApprovalController? = nil, observations: TerminalObservations? = nil) throws {
@@ -53,6 +54,17 @@ public actor WorkspaceTools: ToolExecutor {
             let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
             if call.name == "terminal_inspect" {
                 return ToolOutput(output: String(decoding: try encoder.encode(observations.list()), as: UTF8.self))
+            }
+            if call.name == "terminal_commands" {
+                let observation = try observations.find(args["terminal_id"]!)
+                let limit: Int
+                if let raw = args["limit"] {
+                    guard let parsed = Int(raw), (1...64).contains(parsed) else { throw HarnessError.invalid("Invalid command limit") }
+                    limit = parsed
+                } else { limit = 32 }
+                return ToolOutput(output: try TerminalModelContext.encodeCommands(terminalID: observation.id, directory: observation.currentDirectory,
+                                                                                   commands: observation.commandHistory(limit: limit),
+                                                                                   total: observation.commandCount()))
             }
             guard let cursor = Int64(args["after"]!), let limit = Int(args["max_bytes"] ?? "4096") else { throw HarnessError.invalid("Invalid terminal read arguments") }
             let observation = try observations.find(args["terminal_id"]!)

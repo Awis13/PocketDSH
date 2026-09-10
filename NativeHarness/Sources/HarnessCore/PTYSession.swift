@@ -59,8 +59,14 @@ public final class PTYSession: @unchecked Sendable {
                 if case .completion(let id, let values, let limited) = frame {
                     integration?.resolve(id: id, values: values, limited: limited); return
                 }
-                if case .ready = frame { state.lock.withLock { state.promptReady = true } }
-                if case .start = frame { state.lock.withLock { state.promptReady = false } }
+                if case .ready(let code, let directory) = frame {
+                    state.lock.withLock { state.promptReady = true }
+                    observation?.recordReady(code: code, directory: directory)
+                }
+                if case .start(let command, let directory) = frame {
+                    state.lock.withLock { state.promptReady = false }
+                    observation?.recordStart(command: command, directory: directory)
+                }
                 if case .output(let bytes) = frame { observation?.append(bytes); onOutput(bytes) }
                 onFrame(frame)
             }

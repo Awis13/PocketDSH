@@ -115,6 +115,25 @@ final class ShellIntegrationTests: XCTestCase {
         try pty.interrupt()
         pty.close(); _ = await pty.wait()
     }
+    func testSegmentedShellRecordsCommandLifecycleInObservation() async throws {
+        let history = try TerminalObservation(id: "lifecycle", initialWorkspace: "/tmp")
+        let pty = try PTYSession(workspace: FileManager.default.temporaryDirectory, observation: history, segmented: true, onOutput: { _ in })
+        defer { pty.close() }
+        try pty.write(Data("cd /; printf 'LIFECYCLE\\n'; false\r".utf8))
+        var record: TerminalCommand?
+        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+        while ContinuousClock.now < deadline {
+            record = history.commandHistory(limit: 16).last { $0.command?.contains("LIFECYCLE") == true && $0.endedAt != nil }
+            if record != nil { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        let finished = try XCTUnwrap(record)
+        XCTAssertEqual(finished.exitCode, 1)
+        XCTAssertEqual(finished.directory, "/")
+        XCTAssertNotNil(finished.startedAt); XCTAssertNotNil(finished.endedAt)
+        XCTAssertTrue(history.commandHistory(limit: 16).contains { $0.command == nil && $0.exitCode == 0 })
+        pty.close(); _ = await pty.wait()
+    }
 }
 private final class FrameCapture: @unchecked Sendable {
     let lock = NSLock()

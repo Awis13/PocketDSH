@@ -1,5 +1,22 @@
 import Foundation
 
+/// One shell command lifecycle record. `endedAt == nil` means the command
+/// started but has not reported a prompt/exit status yet, so it is still open.
+/// A record with `command == nil` is the standalone initial prompt that arrives
+/// before any command has run; it has no measured duration.
+public struct TerminalCommand: Codable, Sendable, Equatable {
+    public let seq: Int64
+    public let command: String?
+    public let directory: String?
+    public let exitCode: Int?
+    public let startedAt: Date?
+    public let endedAt: Date?
+    public init(seq: Int64, command: String?, directory: String?, exitCode: Int?, startedAt: Date?, endedAt: Date?) {
+        self.seq = seq; self.command = command; self.directory = directory
+        self.exitCode = exitCode; self.startedAt = startedAt; self.endedAt = endedAt
+    }
+}
+
 public struct TerminalInfo: Codable, Sendable {
     public let id: String
     public let initialWorkspace: String
@@ -29,10 +46,16 @@ public final class TerminalObservation: @unchecked Sendable {
     public let id: String
     public let initialWorkspace: String
     private let capacity: Int
+    private static let maxCommands = 64
+    private static let maxCommandBytes = 4096
+    private static let maxDirectoryBytes = 4096
     private let lock = NSLock()
     private var bytes = Data()
     private var end: Int64 = 0
     private var exit: PTYExit?
+    private var commands: [TerminalCommand] = []
+    private var commandSeq: Int64 = 0
+    private var latestDirectory: String
     private struct Waiter {
         let cursor: Int64
         let limit: Int
@@ -44,6 +67,7 @@ public final class TerminalObservation: @unchecked Sendable {
     public init(id: String, initialWorkspace: String, capacity: Int = 1_048_576) throws {
         guard !id.isEmpty, (1...4_194_304).contains(capacity) else { throw HarnessError.invalid("Invalid terminal observation capacity") }
         self.id = id; self.initialWorkspace = initialWorkspace; self.capacity = capacity
+        self.latestDirectory = initialWorkspace
     }
     public func append(_ data: Data) {
         guard !data.isEmpty else { return }
@@ -66,6 +90,56 @@ public final class TerminalObservation: @unchecked Sendable {
         let ready = drainLocked()
         lock.unlock()
         resume(ready)
+    }
+    /// Records a `preexec` marker. The record stays open (`endedAt == nil`)
+    /// until the matching `precmd` arrives. Output bytes never close it.
+    public func recordStart(command: String, directory: String, at date: Date = Date()) {
+        lock.lock()
+        commandSeq += 1
+        commands.append(TerminalCommand(seq: commandSeq, command: Self.clamp(command, to: Self.maxCommandBytes),
+                                         directory: Self.clamp(directory, to: Self.maxDirectoryBytes),
+                                         exitCode: nil, startedAt: date, endedAt: nil))
+        if commands.count > Self.maxCommands { commands.removeFirst(commands.count - Self.maxCommands) }
+        latestDirectory = Self.clamp(directory, to: Self.maxDirectoryBytes)
+        lock.unlock()
+    }
+    /// Records a `precmd` marker. A standalone ready (the initial prompt) is
+    /// stored with `command == nil`; later ready frames close the open start.
+    public func recordReady(code: Int, directory: String, at date: Date = Date()) {
+        lock.lock()
+        if let index = commands.lastIndex(where: { $0.command != nil && $0.endedAt == nil }) {
+            let open = commands[index]
+            commands[index] = TerminalCommand(seq: open.seq, command: open.command,
+                                              directory: Self.clamp(directory, to: Self.maxDirectoryBytes),
+                                              exitCode: code, startedAt: open.startedAt, endedAt: date)
+        } else {
+            commandSeq += 1
+            commands.append(TerminalCommand(seq: commandSeq, command: nil,
+                                            directory: Self.clamp(directory, to: Self.maxDirectoryBytes),
+                                            exitCode: code, startedAt: date, endedAt: date))
+            if commands.count > Self.maxCommands { commands.removeFirst(commands.count - Self.maxCommands) }
+        }
+        latestDirectory = Self.clamp(directory, to: Self.maxDirectoryBytes)
+        lock.unlock()
+    }
+    /// Most recent command records, oldest first, bounded by `limit`.
+    public func commandHistory(limit: Int = 32) -> [TerminalCommand] {
+        lock.lock(); defer { lock.unlock() }
+        return Array(commands.suffix(max(1, min(limit, Self.maxCommands))))
+    }
+    public func commandCount() -> Int {
+        lock.lock(); defer { lock.unlock() }
+        return commands.count
+    }
+    public var currentDirectory: String {
+        lock.lock(); defer { lock.unlock() }
+        return latestDirectory
+    }
+    private static func clamp(_ value: String, to byteLimit: Int) -> String {
+        guard value.utf8.count > byteLimit else { return value }
+        var data = Data(value.utf8.prefix(byteLimit))
+        while !data.isEmpty && String(data: data, encoding: .utf8) == nil { data.removeLast() }
+        return String(decoding: data, as: UTF8.self)
     }
     public func inspect() -> TerminalInfo {
         lock.lock(); defer { lock.unlock() }

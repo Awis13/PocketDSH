@@ -26,3 +26,10 @@ Join after a command has started, read already-emitted bytes, await delayed outp
 ## Implemented evidence (2026-09-08)
 
 The first boundary is implemented locally in `TerminalObservation.swift`, `PTYSession.swift`, `WorkspaceTools.swift` and the CLI control layer. Retention is in memory (1 MiB/terminal, eight catalog entries); model tools are read-only. 54 Swift tests passed; the real CLI fixture and live Home Rig Qwen both joined a running PTY and observed later output. User keyboard control remained separate and responsive. Remaining agreed features above are still planned, not implied by this result.
+
+## Model-visible command lifecycle (2026-09-11)
+
+`TerminalObservation` now keeps a bounded ring of command records (64 per terminal, command and directory clamped to 4 KiB each) built from the private nonce-DCS `preexec`/`precmd` frames. Each record carries `seq`, `command`, `directory`, `exitCode` and `startedAt`/`endedAt`; an open record has no end, and the initial prompt is stored as a standalone record with no command. `terminal_commands` returns the newest records as bounded JSON (default 32, max 64) through `TerminalModelContext`, which strips terminal controls and labels the payload untrusted data. `terminal_inspect`, `terminal_read` and `terminal_wait` are unchanged, and no agent keyboard/write tool is added.
+
+Command boundaries are display lifecycle, not execution authority. A record only proves the shell reported a start and later a prompt with an exit status; it does not prove the command was helpful, that its output was captured, or that the process tree ended.
+

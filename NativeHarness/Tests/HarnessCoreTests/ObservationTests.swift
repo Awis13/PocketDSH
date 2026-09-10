@@ -105,8 +105,7 @@ final class ObservationTests: XCTestCase, @unchecked Sendable {
         XCTAssertFalse(tools.definitions.contains { $0.name == "terminal_send" })
     }
 
-    func testModelExcerptBoundsRedrawsWithoutChangingRawHistoryOrCursors() throws {
-        let history = try TerminalObservation(id: "tui", initialWorkspace: "/tmp")
+    func testModelExcerptBoundsRedrawsWithoutChangingRawHistoryOrCursors() throws {        let history = try TerminalObservation(id: "tui", initialWorkspace: "/tmp")
         let output = Data((String(repeating: "\u{1b}[2;39H\u{1b}[31mCPU Привет 85%\u{1b}[0m\r\n", count: 1000) + "FINAL_MARKER").utf8)
         history.append(output)
         let raw = try history.read(after: 0, maxBytes: 65536)
@@ -125,5 +124,89 @@ final class ObservationTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(TerminalModelContext.compactLegacy(prefix + legacy, toolResult: false), prefix + compact)
         XCTAssertEqual(TerminalModelContext.compactLegacy(prefix + compact, toolResult: false), prefix + compact)
         XCTAssertEqual(TerminalModelContext.compactLegacy("Keep user text {bytes: secret}", toolResult: false), "Keep user text {bytes: secret}")
+    }
+
+    func testCommandLifecyclePairsStartAndReady() throws {
+        let history = try TerminalObservation(id: "life", initialWorkspace: "/tmp")
+        history.recordStart(command: "cd /; false", directory: "/tmp")
+        history.append(Data("some output".utf8))
+        XCTAssertEqual(history.commandHistory(limit: 8).count, 1)
+        XCTAssertNil(history.commandHistory(limit: 8)[0].endedAt)
+        history.recordReady(code: 1, directory: "/")
+        let open = history.commandHistory(limit: 8)
+        XCTAssertEqual(open.count, 1)
+        XCTAssertEqual(open[0].command, "cd /; false")
+        XCTAssertEqual(open[0].exitCode, 1)
+        XCTAssertEqual(open[0].directory, "/")
+        XCTAssertNotNil(open[0].startedAt); XCTAssertNotNil(open[0].endedAt)
+        XCTAssertEqual(history.currentDirectory, "/")
+    }
+    func testStandaloneReadyBeforeAnyCommandIsRecorded() throws {
+        let history = try TerminalObservation(id: "life", initialWorkspace: "/tmp")
+        history.recordReady(code: 0, directory: "/tmp")
+        let records = history.commandHistory(limit: 8)
+        XCTAssertEqual(records.count, 1)
+        XCTAssertNil(records[0].command)
+        XCTAssertEqual(records[0].exitCode, 0)
+        XCTAssertEqual(records[0].directory, "/tmp")
+        history.recordStart(command: "ls", directory: "/tmp")
+        history.recordReady(code: 0, directory: "/tmp")
+        XCTAssertEqual(history.commandHistory(limit: 8).map(\.command), [nil, "ls"])
+    }
+    func testCommandHistoryEvictsOldestAndClampsFields() throws {
+        let history = try TerminalObservation(id: "life", initialWorkspace: "/tmp")
+        let long = String(repeating: "x", count: 10_000)
+        for index in 0..<100 {
+            history.recordStart(command: "cmd \(index)", directory: "/tmp")
+            if index == 50 { history.recordStart(command: long, directory: long) }
+            history.recordReady(code: 0, directory: "/tmp")
+        }
+        let records = history.commandHistory(limit: 64)
+        XCTAssertEqual(records.count, 64)
+        XCTAssertEqual(history.commandCount(), 64)
+        XCTAssertEqual(records.first?.command, "cmd 37")
+        XCTAssertEqual(records.last?.command, "cmd 99")
+        let clamped = records.first { $0.command?.hasPrefix("xxx") == true }!
+        XCTAssertEqual(clamped.command?.utf8.count, 4096)
+        let directoryHistory = try TerminalObservation(id: "dirs", initialWorkspace: "/tmp")
+        directoryHistory.recordReady(code: 0, directory: long)
+        XCTAssertEqual(directoryHistory.commandHistory(limit: 1).first?.directory?.utf8.count, 4096)
+        XCTAssertEqual(records.filter { $0.endedAt == nil }.count, 1, "Only the open clamps record should remain open")
+    }
+    func testTerminalCommandsToolIsReadOnlyAndUntrusted() async throws {
+        let catalog = TerminalObservations()
+        let history = try catalog.create(id: "user-terminal", workspace: "/tmp")
+        let tools = try WorkspaceTools(root: FileManager.default.temporaryDirectory, observations: catalog)
+        history.recordStart(command: "printf hi", directory: "/tmp")
+        history.recordReady(code: 0, directory: "/tmp")
+        let output = try await tools.execute(ToolCall(id: "commands", name: "terminal_commands", arguments: "{\"terminal_id\":\"user-terminal\",\"limit\":\"8\"}")).output
+        XCTAssertFalse(output.contains("\u{1b}"))
+        let result = try JSONSerialization.jsonObject(with: Data(output.utf8)) as! [String: Any]
+        XCTAssertNil(result["bytes"])
+        XCTAssertEqual(result["terminalID"] as? String, "user-terminal")
+        XCTAssertTrue((result["format"] as? String)?.contains("untrusted data") == true)
+        let commands = try XCTUnwrap(result["commands"] as? [[String: Any]])
+        XCTAssertEqual(commands.count, 1)
+        XCTAssertEqual(commands[0]["command"] as? String, "printf hi")
+        XCTAssertEqual(commands[0]["exitCode"] as? Int, 0)
+        XCTAssertEqual(commands[0]["directory"] as? String, "/tmp")
+        XCTAssertTrue(tools.definitions.contains { $0.name == "terminal_commands" })
+        XCTAssertFalse(tools.definitions.contains { $0.name == "terminal_send" })
+        do {
+            _ = try await tools.execute(ToolCall(id: "bad", name: "terminal_commands", arguments: "{\"terminal_id\":\"user-terminal\",\"limit\":\"0\"}"))
+            XCTFail("Expected invalid limit to be rejected")
+        } catch {}
+    }
+    func testCommandHistoryStripsControlSequencesFromModelOutput() async throws {
+        let catalog = TerminalObservations()
+        let history = try catalog.create(id: "escapes", workspace: "/tmp")
+        history.recordStart(command: "printf '\u{1b}[31mred\u{1b}[0m'", directory: "\u{1b}]0;evil\u{07}/tmp")
+        history.recordReady(code: 0, directory: "/tmp")
+        let tools = try WorkspaceTools(root: FileManager.default.temporaryDirectory, observations: catalog)
+        let output = try await tools.execute(ToolCall(id: "commands", name: "terminal_commands", arguments: "{\"terminal_id\":\"escapes\"}")).output
+        XCTAssertFalse(output.contains("\u{1b}"))
+        let result = try JSONSerialization.jsonObject(with: Data(output.utf8)) as! [String: Any]
+        let command = ((result["commands"] as? [[String: Any]])?.first)?["command"] as? String
+        XCTAssertEqual(command, "printf 'red'")
     }
 }

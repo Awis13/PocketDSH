@@ -20,7 +20,7 @@ actor PTYControl {
         let id = UUID().uuidString
         let observation = try observations.create(id: id, workspace: workspace)
         let session: PTYSession
-        do { session = try PTYSession(workspace: URL(fileURLWithPath: workspace), rows: rows, columns: columns, observation: observation) { bytes in
+        do { session = try PTYSession(workspace: URL(fileURLWithPath: workspace), rows: rows, columns: columns, observation: observation, segmented: true) { bytes in
             Self.emit(Event(control: "ptyOutput", ptyID: id, bytes: bytes))
         } } catch { observations.discard(id: id); throw error }
         active = (id, session)
