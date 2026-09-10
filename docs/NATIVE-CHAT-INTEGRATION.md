@@ -1,6 +1,6 @@
 # Native Harness in the existing Pocket DSH chat
 
-The normal `HomeView` / `DesktopHomeView` / `HarnessView` remain the only application entry points. Native Harness is a connection type, not an alternate interface. The earlier `NativeWorkspaceView` experiment is not routed into the application.
+The normal `HomeView` / `DesktopHomeView` / `HarnessView` remain the only application entry points. Native Harness is a connection type, not an alternate interface. The earlier `NativeWorkspaceView` experiment has been removed from source.
 
 ## Connection
 
@@ -31,7 +31,7 @@ Native image input, voice transcription, model switching, full-access policy, st
 
 - `swift test --package-path NativeHarness`: 60 tests passed, including presentation durability and recovery tests.
 - `Tests/NativeChatChecks.swift`: deterministic transcript folding/replay checks, plus optional live host checks for Qwen reasoning, file read, tool results, allow/reject, cancellation and replay.
-- Compile the check with `swiftc -parse-as-library PocketDSH/HarnessProtocol.swift PocketDSH/HarnessAPI.swift Shared/NativeWire.swift PocketDSH/ShellBlockInteraction.swift PocketDSH/NativeChatConnection.swift Tests/NativeChatChecks.swift -o output/native-chat/checks`.
+- Compile the check with `swiftc -parse-as-library PocketDSH/HarnessProtocol.swift PocketDSH/HarnessAPI.swift Shared/NativeWire.swift PocketDSH/ShellBlockInteraction.swift PocketDSH/NativeChatConnection.swift PocketDSH/TerminalPresentation.swift PocketDSH/PaneFocusNavigator.swift Tests/NativeChatChecks.swift -o output/native-chat/checks`.
 - Run without arguments for offline checks, or with a local JSON config path containing `endpoint` and `token` for live checks. The live check executes approved test-only `printf` commands inside the test workspace and consumes one host session slot.
 - Build logs and local runtime evidence are retained under ignored `output/native-chat*` paths; credentials are not committed.
 
@@ -94,6 +94,8 @@ Shell now has an explicit selected command block, a compact action bar, and a co
 
 Search is literal and case-insensitive, including Unicode. It searches the retained output preview (up to 64 KiB), highlights matches, and navigates both vertically and horizontally to the current match. The display caps at 500 matches and shows `500+` when more exist. Ordinary editor selection and copy shortcuts are unchanged. Block shortcuts are intercepted before SwiftTerm can translate modified arrows into PTY input.
 
+When a full-screen program enables the alternate buffer, the one live terminal surface expands to fill the active pane and a "Return to transcript" control appears; the transcript stays mounted behind it. Leaving the program (q, exit, Ctrl+C or DECRST 1047/1049) collapses the surface automatically and scrolls the transcript back to the command block that owned it. The terminal is never reparented between containers — only its height changes — and neighbouring panes are untouched.
+
 The bundled `Vendor/SwiftTerm` package retains upstream 1.5.1 library sources and license, with a shortcut access hook and small symbol-font/dim-style rendering patches. Terminal parsing is unchanged. The library-only manifest omits upstream's CLI products and ArgumentParser dependency. See its README for the exact upstream commit, local changes and upgrade procedure.
 
 An attachment is a fixed snapshot of the command, directory, output and exit status. Up to four blocks can accompany a question. Each captures at most the last 4 KiB of output, 2 KiB of command and 1 KiB of directory, with a clipping notice; UTF-8/graphemes are preserved. Reattaching the same block replaces its snapshot. Preview and remove actions are available in both composers. Text and attachments survive switching Chat/Shell, session changes and client relaunch. Shell Enter still runs a command; ⌘Enter sends the question and consumes only the acknowledged attachments.
@@ -105,7 +107,7 @@ Offline checks:
 ```sh
 xcrun swiftc -parse-as-library PocketDSH/HarnessProtocol.swift PocketDSH/ShellBlockInteraction.swift Tests/ShellBlockChecks.swift -o output/native-chat/block-checks
 output/native-chat/block-checks
-xcrun swiftc -parse-as-library PocketDSH/HarnessProtocol.swift PocketDSH/HarnessAPI.swift Shared/NativeWire.swift PocketDSH/ShellBlockInteraction.swift PocketDSH/NativeChatConnection.swift Tests/NativeChatChecks.swift -o output/native-chat/terminal-fold-checks
+xcrun swiftc -parse-as-library PocketDSH/HarnessProtocol.swift PocketDSH/HarnessAPI.swift Shared/NativeWire.swift PocketDSH/ShellBlockInteraction.swift PocketDSH/NativeChatConnection.swift PocketDSH/TerminalPresentation.swift PocketDSH/PaneFocusNavigator.swift Tests/NativeChatChecks.swift -o output/native-chat/terminal-fold-checks
 output/native-chat/terminal-fold-checks
 ```
 
@@ -160,3 +162,11 @@ The interactive `ls` wrapper translates only the shared `-l`, `-a`, `-A`, `-h`, 
 Colors use `EZA_COLORS` semantic ANSI values. Override that environment variable in the session for custom file colors; `--color=never` / `--icons=never` work with the eza-based helpers. Full CLI and styling details: [eza manual](https://github.com/eza-community/eza/blob/main/man/eza.1.md), [color configuration](https://github.com/eza-community/eza/blob/main/man/eza_colors.5.md). eza remains an optional host executable; it is not redistributed inside the Apple client.
 
 Validation (2026-09-08): all 65 Native Harness tests passed, including a real PTY check for argument preservation, injection-shaped filenames, exit codes, redirection/pipes, unsupported flags and an absent eza binary. Existing completion/history and native transcript helper checks also passed. Live Mac checks covered a Git fixture with modified/untracked/ignored paths and symlinks, tree output, BMP/supplementary icons in live and restored blocks, Ctrl+C returning exit 130 and composer focus, ANSI styles, Find highlighting and Light/Dracula switching. Find's row now reserves its intrinsic height so the transcript cannot compress it away. Generic iOS builds include the symbol font; a physical iPad was not installed or validated in this increment.
+
+## Pane focus and full-screen terminal hardening (September 10)
+
+Pane focus is Control+Option+arrows and maximize/restore is Command+Shift+M, owned solely by the hidden SwiftUI shortcuts so Mac Catalyst and an iPad hardware keyboard register each chord exactly once; the Mac menu keeps only Command+W, which still needs its per-window key-window bridge. Command-block navigation returns to Command+Option+Up/Down; the previous Command+Shift binding collided with the system extend-selection chord. Directional focus walks the split tree with the active pane's row/column hint, so a nested 2×2 grid keeps the active row instead of jumping to the top. A split parallel to the move is a boundary, but the navigator now searches the active path first, so a left-leaning nest such as `V(V(a, d), b)` descends to its adjacent pane before crossing the root split; the same holds for rows and for three-deep nests in both leanings. The dead `NativeWorkspace.swift` experiment was deleted.
+
+Entering the full-screen terminal stops transcript bottom-following and pins the owning block to the top, so asking the agent with Command+Enter cannot push the terminal out of the viewport. The expanded terminal height subtracts the full-screen banner plus the transcript padding and block header, so the bottom of the TUI and its prompt stay visible while transcript scrolling is disabled. Abnormal TUI endings and reconnect clear the expanded presentation: `disconnect()` and `opened` reset it, and `blockEnd`/`ptyExit`/`shellReset` release the alternate buffer. `prepareForCommand` resizes the emulator and PTY once through the frame change instead of twice. The unreachable live-terminal placeholder branch and its obsolete documentation were removed.
+
+Offline checks cover the nested 2×2 focus grid, left- and right-leaning columns and rows two and three deep, ties, the stacked-to-axis mapping, single layouts and duplicate ids, and the Mac Catalyst build succeeds. Physical iPad keyboard verification is still pending.

@@ -152,6 +152,210 @@ import Foundation
         metrics.apply(NativeEvent(op: "stage", session: "other", stage: "requesting", sequence: 1))
         precondition(metrics.requests.isEmpty, "Old hosts without metadata must show unknown, not invented zeroes")
         print("PASS request metadata: lossless future fields, safe export, validated counts, session isolation, bounded protocol notes and replay")
+
+        var presentation = TerminalPresentation()
+        precondition(!presentation.isExpanded && !presentation.showsReturnControl && presentation.anchor == nil,
+                     "The terminal starts inline without a return anchor")
+        presentation.alternateBufferActivated(anchor: "block-1")
+        precondition(presentation.isExpanded && presentation.alternateBufferActive)
+        precondition(presentation.showsReturnControl && presentation.anchor == "block-1")
+        presentation.alternateBufferActivated(anchor: "block-2")
+        precondition(presentation.anchor == "block-2", "The newest TUI owns the return anchor")
+        presentation.returnToTranscript()
+        precondition(!presentation.isExpanded && presentation.alternateBufferActive,
+                     "A manual return collapses the surface while the TUI still owns the alternate buffer")
+        precondition(presentation.alternateBufferDeactivated() == false,
+                     "Exiting after a manual return must not trigger a second collapse")
+        precondition(!presentation.alternateBufferActive)
+        var tui = TerminalPresentation()
+        tui.alternateBufferActivated(anchor: "block-3")
+        precondition(tui.alternateBufferDeactivated() == true,
+                     "Leaving a TUI collapses the expanded surface")
+        precondition(tui.mode == .inline && !tui.alternateBufferActive)
+        precondition(tui.consumeAnchor() == "block-3" && tui.anchor == nil, "The return anchor is one-shot")
+        precondition(tui.consumeAnchor() == nil && tui.alternateBufferDeactivated() == false,
+                     "A deactivation without an active TUI is inert")
+        var reset = TerminalPresentation()
+        reset.alternateBufferActivated(anchor: "block-4")
+        reset.reset()
+        precondition(reset == TerminalPresentation(), "Reset clears every presentation field")
+        print("PASS terminal presentation: alternate-buffer transitions, one-shot return anchor and reset")
+
+        let single = PaneFocusNavigator.Node.pane("a")
+        precondition(PaneFocusNavigator.next(from: "a", direction: .left, in: single) == nil)
+        precondition(PaneFocusNavigator.next(from: "missing", direction: .right, in: single) == nil)
+        let horizontal = PaneFocusNavigator.Node.split(.horizontal, .pane("a"), .pane("b"))
+        precondition(PaneFocusNavigator.next(from: "a", direction: .right, in: horizontal) == "b")
+        precondition(PaneFocusNavigator.next(from: "b", direction: .left, in: horizontal) == "a")
+        precondition(PaneFocusNavigator.next(from: "a", direction: .left, in: horizontal) == nil)
+        precondition(PaneFocusNavigator.next(from: "b", direction: .right, in: horizontal) == nil)
+        precondition(PaneFocusNavigator.next(from: "a", direction: .up, in: horizontal) == nil,
+                     "A perpendicular direction inside a lone split has no target")
+        let vertical = PaneFocusNavigator.Node.split(.vertical, .pane("a"), .pane("b"))
+        precondition(PaneFocusNavigator.next(from: "a", direction: .down, in: vertical) == "b")
+        precondition(PaneFocusNavigator.next(from: "b", direction: .up, in: vertical) == "a")
+        precondition(PaneFocusNavigator.next(from: "a", direction: .up, in: vertical) == nil)
+        let row = PaneFocusNavigator.Node.split(.horizontal, .pane("a"), .split(.horizontal, .pane("b"), .pane("c")))
+        precondition(row.panes == ["a", "b", "c"] && row.contains("c"))
+        precondition(PaneFocusNavigator.next(from: "a", direction: .right, in: row) == "b")
+        precondition(PaneFocusNavigator.next(from: "b", direction: .left, in: row) == "a")
+        precondition(PaneFocusNavigator.next(from: "b", direction: .right, in: row) == "c")
+        precondition(PaneFocusNavigator.next(from: "c", direction: .right, in: row) == nil)
+        let grid = PaneFocusNavigator.Node.split(.horizontal, .pane("left"), .split(.vertical, .pane("top"), .pane("bottom")))
+        precondition(PaneFocusNavigator.next(from: "top", direction: .left, in: grid) == "left")
+        precondition(PaneFocusNavigator.next(from: "bottom", direction: .left, in: grid) == "left")
+        precondition(PaneFocusNavigator.next(from: "left", direction: .right, in: grid) == "top",
+                     "Returning into a column prefers its first pane")
+        precondition(PaneFocusNavigator.next(from: "top", direction: .down, in: grid) == "bottom")
+        precondition(PaneFocusNavigator.next(from: "top", direction: .up, in: grid) == nil)
+        let stackedRow = PaneFocusNavigator.Node.split(.vertical, .split(.horizontal, .pane("a"), .pane("b")), .pane("c"))
+        precondition(PaneFocusNavigator.next(from: "c", direction: .up, in: stackedRow) == "b",
+                     "Moving into a row prefers the pane nearest the positive edge")
+        let quad = PaneFocusNavigator.Node.split(.horizontal,
+            .split(.vertical, .pane("tl"), .pane("bl")),
+            .split(.vertical, .pane("tr"), .pane("br")))
+        precondition(PaneFocusNavigator.next(from: "bl", direction: .right, in: quad) == "br",
+                     "A nested 2x2 move keeps the active pane's row instead of jumping to the top")
+        precondition(PaneFocusNavigator.next(from: "tl", direction: .right, in: quad) == "tr")
+        precondition(PaneFocusNavigator.next(from: "br", direction: .left, in: quad) == "bl")
+        precondition(PaneFocusNavigator.next(from: "tr", direction: .left, in: quad) == "tl")
+        precondition(PaneFocusNavigator.next(from: "bl", direction: .up, in: quad) == "tl")
+        precondition(PaneFocusNavigator.next(from: "br", direction: .up, in: quad) == "tr")
+        precondition(PaneFocusNavigator.next(from: "tl", direction: .down, in: quad) == "bl")
+        precondition(PaneFocusNavigator.next(from: "tr", direction: .down, in: quad) == "br")
+        precondition(PaneFocusNavigator.next(from: "tl", direction: .left, in: quad) == nil,
+                     "The leftmost nested pane has no neighbour to its left")
+        precondition(PaneFocusNavigator.next(from: "tr", direction: .right, in: quad) == nil)
+        let empty = PaneFocusNavigator.Node.pane("only")
+        precondition(PaneFocusNavigator.next(from: "only", direction: .right, in: empty) == nil)
+        precondition(PaneFocusNavigator.next(from: "missing", direction: .up, in: empty) == nil)
+        let duplicate = PaneFocusNavigator.Node.split(.horizontal, .pane("dup"), .pane("dup"))
+        precondition(PaneFocusNavigator.next(from: "dup", direction: .right, in: duplicate) == "dup",
+                     "Duplicate ids are resolved deterministically instead of crashing")
+        precondition(PaneFocusNavigator.node(stacked: false, first: .pane("l"), second: .pane("r")) == .split(.horizontal, .pane("l"), .pane("r")),
+                     "The layout's stacked flag maps to the navigator axis")
+        precondition(PaneFocusNavigator.node(stacked: true, first: .pane("t"), second: .pane("b")) == .split(.vertical, .pane("t"), .pane("b")))
+        print("PASS pane focus navigator: single, horizontal, vertical, nested row, grid, nested 2x2 and edge tie-breaks")
+
+        // A split parallel to the move is a boundary, but a nearer boundary on
+        // the active path must win first. Left-leaning nests used to jump past
+        // the adjacent pane straight to the root sibling.
+        let leftColumn2 = PaneFocusNavigator.Node.split(.vertical,
+            .split(.vertical, .pane("a"), .pane("b")), .pane("c"))
+        precondition(PaneFocusNavigator.next(from: "a", direction: .down, in: leftColumn2) == "b",
+                     "A left-leaning column must descend to its adjacent pane before crossing the root split")
+        precondition(PaneFocusNavigator.next(from: "b", direction: .down, in: leftColumn2) == "c")
+        precondition(PaneFocusNavigator.next(from: "c", direction: .down, in: leftColumn2) == nil)
+        precondition(PaneFocusNavigator.next(from: "a", direction: .up, in: leftColumn2) == nil)
+        precondition(PaneFocusNavigator.next(from: "b", direction: .up, in: leftColumn2) == "a")
+        precondition(PaneFocusNavigator.next(from: "c", direction: .up, in: leftColumn2) == "b")
+        precondition(PaneFocusNavigator.next(from: "a", direction: .left, in: leftColumn2) == nil,
+                     "A pure column has no horizontal neighbour")
+        precondition(PaneFocusNavigator.next(from: "a", direction: .right, in: leftColumn2) == nil)
+        let leftColumn3 = PaneFocusNavigator.Node.split(.vertical,
+            .split(.vertical, .split(.vertical, .pane("x"), .pane("y")), .pane("z")), .pane("w"))
+        precondition(PaneFocusNavigator.next(from: "x", direction: .down, in: leftColumn3) == "y",
+                     "A 3-deep left-leaning column must not skip to the root sibling")
+        precondition(PaneFocusNavigator.next(from: "y", direction: .down, in: leftColumn3) == "z")
+        precondition(PaneFocusNavigator.next(from: "z", direction: .down, in: leftColumn3) == "w")
+        precondition(PaneFocusNavigator.next(from: "w", direction: .down, in: leftColumn3) == nil)
+        precondition(PaneFocusNavigator.next(from: "w", direction: .up, in: leftColumn3) == "z")
+        precondition(PaneFocusNavigator.next(from: "z", direction: .up, in: leftColumn3) == "y")
+        precondition(PaneFocusNavigator.next(from: "x", direction: .up, in: leftColumn3) == nil)
+        let rightColumn2 = PaneFocusNavigator.Node.split(.vertical, .pane("a"),
+            .split(.vertical, .pane("b"), .pane("c")))
+        precondition(PaneFocusNavigator.next(from: "a", direction: .down, in: rightColumn2) == "b")
+        precondition(PaneFocusNavigator.next(from: "b", direction: .down, in: rightColumn2) == "c")
+        precondition(PaneFocusNavigator.next(from: "b", direction: .up, in: rightColumn2) == "a")
+        precondition(PaneFocusNavigator.next(from: "c", direction: .up, in: rightColumn2) == "b")
+        let rightColumn3 = PaneFocusNavigator.Node.split(.vertical, .pane("x"),
+            .split(.vertical, .pane("y"), .split(.vertical, .pane("z"), .pane("w"))))
+        precondition(PaneFocusNavigator.next(from: "x", direction: .down, in: rightColumn3) == "y")
+        precondition(PaneFocusNavigator.next(from: "y", direction: .down, in: rightColumn3) == "z")
+        precondition(PaneFocusNavigator.next(from: "z", direction: .down, in: rightColumn3) == "w")
+        precondition(PaneFocusNavigator.next(from: "z", direction: .up, in: rightColumn3) == "y")
+        precondition(PaneFocusNavigator.next(from: "w", direction: .up, in: rightColumn3) == "z")
+        precondition(PaneFocusNavigator.next(from: "w", direction: .down, in: rightColumn3) == nil)
+
+        let leftRow2 = PaneFocusNavigator.Node.split(.horizontal,
+            .split(.horizontal, .pane("a"), .pane("b")), .pane("c"))
+        precondition(PaneFocusNavigator.next(from: "a", direction: .right, in: leftRow2) == "b",
+                     "A left-leaning row must descend to its adjacent pane before crossing the root split")
+        precondition(PaneFocusNavigator.next(from: "b", direction: .right, in: leftRow2) == "c")
+        precondition(PaneFocusNavigator.next(from: "c", direction: .right, in: leftRow2) == nil)
+        precondition(PaneFocusNavigator.next(from: "a", direction: .left, in: leftRow2) == nil)
+        precondition(PaneFocusNavigator.next(from: "b", direction: .left, in: leftRow2) == "a")
+        precondition(PaneFocusNavigator.next(from: "c", direction: .left, in: leftRow2) == "b")
+        precondition(PaneFocusNavigator.next(from: "a", direction: .up, in: leftRow2) == nil)
+        precondition(PaneFocusNavigator.next(from: "a", direction: .down, in: leftRow2) == nil)
+        let leftRow3 = PaneFocusNavigator.Node.split(.horizontal,
+            .split(.horizontal, .split(.horizontal, .pane("x"), .pane("y")), .pane("z")), .pane("w"))
+        precondition(PaneFocusNavigator.next(from: "x", direction: .right, in: leftRow3) == "y",
+                     "A 3-deep left-leaning row must not skip to the root sibling")
+        precondition(PaneFocusNavigator.next(from: "y", direction: .right, in: leftRow3) == "z")
+        precondition(PaneFocusNavigator.next(from: "z", direction: .right, in: leftRow3) == "w")
+        precondition(PaneFocusNavigator.next(from: "w", direction: .right, in: leftRow3) == nil)
+        precondition(PaneFocusNavigator.next(from: "w", direction: .left, in: leftRow3) == "z")
+        precondition(PaneFocusNavigator.next(from: "x", direction: .left, in: leftRow3) == nil)
+        let rightRow2 = PaneFocusNavigator.Node.split(.horizontal, .pane("a"),
+            .split(.horizontal, .pane("b"), .pane("c")))
+        precondition(PaneFocusNavigator.next(from: "a", direction: .right, in: rightRow2) == "b")
+        precondition(PaneFocusNavigator.next(from: "b", direction: .right, in: rightRow2) == "c")
+        precondition(PaneFocusNavigator.next(from: "c", direction: .left, in: rightRow2) == "b")
+        precondition(PaneFocusNavigator.next(from: "c", direction: .right, in: rightRow2) == nil)
+        let rightRow3 = PaneFocusNavigator.Node.split(.horizontal, .pane("x"),
+            .split(.horizontal, .pane("y"), .split(.horizontal, .pane("z"), .pane("w"))))
+        precondition(PaneFocusNavigator.next(from: "x", direction: .right, in: rightRow3) == "y")
+        precondition(PaneFocusNavigator.next(from: "y", direction: .right, in: rightRow3) == "z")
+        precondition(PaneFocusNavigator.next(from: "z", direction: .right, in: rightRow3) == "w")
+        precondition(PaneFocusNavigator.next(from: "z", direction: .left, in: rightRow3) == "y")
+        precondition(PaneFocusNavigator.next(from: "w", direction: .left, in: rightRow3) == "z")
+
+        // Mixed leaning: the active child is a ridge of the other axis, so the
+        // move has to descend through it before crossing.
+        let mixedColumn = PaneFocusNavigator.Node.split(.vertical,
+            .split(.horizontal, .pane("a"), .pane("b")), .pane("c"))
+        precondition(PaneFocusNavigator.next(from: "a", direction: .down, in: mixedColumn) == "c")
+        precondition(PaneFocusNavigator.next(from: "b", direction: .down, in: mixedColumn) == "c")
+        precondition(PaneFocusNavigator.next(from: "a", direction: .right, in: mixedColumn) == "b")
+        precondition(PaneFocusNavigator.next(from: "b", direction: .up, in: mixedColumn) == nil)
+        let mixedRow = PaneFocusNavigator.Node.split(.horizontal,
+            .split(.vertical, .pane("a"), .pane("b")), .pane("c"))
+        precondition(PaneFocusNavigator.next(from: "a", direction: .right, in: mixedRow) == "c")
+        precondition(PaneFocusNavigator.next(from: "b", direction: .right, in: mixedRow) == "c")
+        precondition(PaneFocusNavigator.next(from: "a", direction: .down, in: mixedRow) == "b")
+        precondition(PaneFocusNavigator.next(from: "b", direction: .up, in: mixedRow) == "a")
+
+        // A perpendicular tie (the active pane's center is exactly on the
+        // boundary) resolves deterministically to the first child.
+        let perpendicularTie = PaneFocusNavigator.Node.split(.horizontal, .pane("solo"),
+            .split(.vertical, .pane("first"), .pane("second")))
+        precondition(PaneFocusNavigator.next(from: "solo", direction: .right, in: perpendicularTie) == "first",
+                     "A perpendicular boundary tie resolves to the first pane")
+        precondition(PaneFocusNavigator.next(from: "first", direction: .left, in: perpendicularTie) == "solo")
+        precondition(PaneFocusNavigator.next(from: "second", direction: .left, in: perpendicularTie) == "solo")
+
+        // Single pane behaves as a workspace with nowhere to go in any direction.
+        let singlePane = PaneFocusNavigator.Node.pane("only")
+        for direction in PaneFocusDirection.allCases {
+            precondition(PaneFocusNavigator.next(from: "only", direction: direction, in: singlePane) == nil,
+                         "A single pane has no neighbour in any direction")
+            precondition(PaneFocusNavigator.next(from: "missing", direction: direction, in: singlePane) == nil,
+                         "An absent pane never resolves")
+        }
+
+        // Duplicate ids stay deterministic rather than crashing or looping: the
+        // active path resolves through the first matching subtree.
+        let duplicateColumn = PaneFocusNavigator.Node.split(.vertical,
+            .split(.vertical, .pane("dup"), .pane("mid")), .pane("dup"))
+        precondition(PaneFocusNavigator.next(from: "dup", direction: .down, in: duplicateColumn) == "mid",
+                     "Duplicate ids must resolve deterministically along the active path")
+        let duplicateRow = PaneFocusNavigator.Node.split(.horizontal,
+            .split(.horizontal, .pane("dup"), .pane("mid")), .pane("dup"))
+        precondition(PaneFocusNavigator.next(from: "dup", direction: .right, in: duplicateRow) == "mid",
+                     "Duplicate ids in a row resolve deterministically")
+        print("PASS pane focus left-leaning nesting: 2/3-deep columns and rows, both leanings, ties, single and duplicate ids")
+
         guard CommandLine.arguments.count > 1 else { return }
         let config = try JSONDecoder().decode([String:String].self, from: Data(contentsOf: URL(fileURLWithPath: CommandLine.arguments[1])))
         let id = UUID().uuidString

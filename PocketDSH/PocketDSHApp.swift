@@ -77,11 +77,13 @@ struct PocketDSHApp: App {
 import UIKit
 
 @MainActor
-private enum PaneCloseCommands {
+private enum PaneCommands {
     static var handlers: [ObjectIdentifier: () -> Void] = [:]
+    private static func keyWindow() -> UIWindow? {
+        UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.flatMap(\.windows).first(where: \.isKeyWindow)
+    }
     static func closeActivePane() {
-        let windows = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.flatMap(\.windows)
-        guard let window = windows.first(where: \.isKeyWindow) else { return }
+        guard let window = keyWindow() else { return }
         handlers[ObjectIdentifier(window)]?()
     }
 }
@@ -91,30 +93,40 @@ final class PocketMacAppDelegate: UIResponder, UIApplicationDelegate {
         guard builder.system == .main else { return }
         // Remove the system Close Window command instead of competing with it.
         builder.remove(menu: .close)
+        // `⌘W` needs the per-window key-window bridge because the focused pane
+        // lives in a scene-specific view tree. Directional focus and maximize
+        // are owned solely by the hidden SwiftUI shortcuts in `NativeShellPane`
+        // so Mac Catalyst and iPad register each chord exactly once.
         let close = UIKeyCommand(title: "Close Active Pane", action: #selector(closePane), input: "w", modifierFlags: .command)
         close.wantsPriorityOverSystemBehavior = true
         builder.insertChild(UIMenu(title: "", identifier: UIMenu.Identifier("dev.awis.close-pane"), options: .displayInline, children: [close]), atStartOfMenu: .file)
     }
-    @objc private func closePane(_ sender: UIKeyCommand) { PaneCloseCommands.closeActivePane() }
+    @objc private func closePane(_ sender: UIKeyCommand) { PaneCommands.closeActivePane() }
 }
-struct PaneCloseCommandBridge: UIViewRepresentable {
+/// Registers the per-window close handler for the `⌘W` menu command. Pane
+/// focus and maximize use the SwiftUI shortcuts in `NativeShellPane`; the Mac
+/// menu does not duplicate them.
+struct PaneCommandBridge: UIViewRepresentable {
     let onClose: () -> Void
-    func makeUIView(context: Context) -> PaneCloseCommandView { PaneCloseCommandView() }
-    func updateUIView(_ view: PaneCloseCommandView, context: Context) { view.onClose = onClose; view.registerWindow() }
-    static func dismantleUIView(_ view: PaneCloseCommandView, coordinator: ()) { view.unregisterWindow() }
+    func makeUIView(context: Context) -> PaneCommandView { PaneCommandView() }
+    func updateUIView(_ view: PaneCommandView, context: Context) {
+        view.onClose = onClose; view.registerWindow()
+    }
+    static func dismantleUIView(_ view: PaneCommandView, coordinator: ()) { view.unregisterWindow() }
 }
-final class PaneCloseCommandView: UIView {
+final class PaneCommandView: UIView {
     var onClose: (() -> Void)?
     private var registeredWindow: ObjectIdentifier?
     override func didMoveToWindow() { super.didMoveToWindow(); registerWindow() }
     func unregisterWindow() {
-        if let registeredWindow { PaneCloseCommands.handlers.removeValue(forKey: registeredWindow) }
+        if let registeredWindow { PaneCommands.handlers.removeValue(forKey: registeredWindow) }
         registeredWindow = nil
     }
     func registerWindow() {
         unregisterWindow()
         guard let window, let onClose else { return }
         let key = ObjectIdentifier(window)
-        registeredWindow = key; PaneCloseCommands.handlers[key] = onClose
+        registeredWindow = key
+        PaneCommands.handlers[key] = onClose
     }
 }

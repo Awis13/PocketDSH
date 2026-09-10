@@ -13,6 +13,7 @@
 		345F4C2A79471DA5B8166E63 /* NativeWire.swift in Sources */ = {isa = PBXBuildFile; fileRef = D076E5E178FC4C8000A2C6BC /* NativeWire.swift */; };
 		391D0771BA57659D7EADCA65 /* NativeTerminalView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2E6534119C5B17C6485507CB /* NativeTerminalView.swift */; };
 		40BBF01895004C9E8FAC5FE0 /* HarnessAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = 213F6D56A815333905F5F393 /* HarnessAPI.swift */; };
+		41DC089DC163D7BB48F5FAD8 /* PaneFocusNavigator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A005021572717D11BE5AED6 /* PaneFocusNavigator.swift */; };
 		458A27CD42CD88D6A09A2852 /* NativeClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 990F411D48619BD1EAC856DE /* NativeClient.swift */; };
 		482A92E75B9971A16249ED4D /* MarkdownBlocks.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9D6E11C03392FD115F72A46C /* MarkdownBlocks.swift */; };
 		4A02EBFCFE7F078CC03880F1 /* Appearance.swift in Sources */ = {isa = PBXBuildFile; fileRef = E44CCE33FA506477977F2202 /* Appearance.swift */; };
@@ -25,7 +26,6 @@
 		80C50DEC3D296393371771EE /* HarnessView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 19B8B07078D82DC7A7EE6EC4 /* HarnessView.swift */; };
 		873DD0232F9741F599714544 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 07CDD0CC0057F5866D24FF20 /* Assets.xcassets */; };
 		8A3284A72DB675093B2EB8B1 /* ShellBlockInteraction.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51A0DE6E9EE1DD8033673D14 /* ShellBlockInteraction.swift */; };
-		958504A85B823EF29E80CCF4 /* NativeWorkspace.swift in Sources */ = {isa = PBXBuildFile; fileRef = 997B7365DE1C0EC9385B47BB /* NativeWorkspace.swift */; };
 		98E7F7066873BE67CFC6E093 /* THIRD-PARTY-NOTICES.txt in Resources */ = {isa = PBXBuildFile; fileRef = 304C17A2D92890DDB8FA098C /* THIRD-PARTY-NOTICES.txt */; };
 		A0477B78FD9FE05CF698F036 /* NativeChatConnection.swift in Sources */ = {isa = PBXBuildFile; fileRef = B468EDB80C53D5E6DC92860E /* NativeChatConnection.swift */; };
 		A52477BEDBE0E382C6C2C105 /* LiveReasoningView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1DB1F53D3DE276524D2EFC7 /* LiveReasoningView.swift */; };
@@ -34,6 +34,7 @@
 		AEE9CF4748B05A40537309B6 /* SavedConnections.swift in Sources */ = {isa = PBXBuildFile; fileRef = 06C35CF3F2E4B245A4F9BB28 /* SavedConnections.swift */; };
 		B3E5A6229657B8C03CA87DEB /* ContextStatusView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4536C46B3F5C4076165E8409 /* ContextStatusView.swift */; };
 		C103524CD83608A91CE30F86 /* ConnectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F88F3CD3883D2F6BFE7D5AE7 /* ConnectionView.swift */; };
+		C519777D60BB3FCC4A067C08 /* TerminalPresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 69A98018D6A145FAF016AB93 /* TerminalPresentation.swift */; };
 		C9D4CACAFC991269FE6A7BCB /* PocketDSHApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = F816DAE6C96C8E45D149EEF5 /* PocketDSHApp.swift */; };
 		D82FC2E56324E4886177E337 /* PocketStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = C49C2AC1DB6173218484FA24 /* PocketStore.swift */; };
 		DEC528524D504A3BD961D8F2 /* SwiftTerm in Frameworks */ = {isa = PBXBuildFile; productRef = AD6686A33E1C422500B47929 /* SwiftTerm */; };
@@ -61,6 +62,7 @@
 		0C0F59F2281C005DD28D2339 /* SymbolsNerdFontMono-Regular.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "SymbolsNerdFontMono-Regular.ttf"; sourceTree = "<group>"; };
 		10B1E247125D45F27D6465B8 /* SwiftTerm */ = {isa = PBXFileReference; lastKnownFileType = folder; name = SwiftTerm; path = Vendor/SwiftTerm; sourceTree = SOURCE_ROOT; };
 		19B8B07078D82DC7A7EE6EC4 /* HarnessView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HarnessView.swift; sourceTree = "<group>"; };
+		1A005021572717D11BE5AED6 /* PaneFocusNavigator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneFocusNavigator.swift; sourceTree = "<group>"; };
 		212067D3F85E4C892F86FBAD /* TurnNotifications.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TurnNotifications.swift; sourceTree = "<group>"; };
 		213F6D56A815333905F5F393 /* HarnessAPI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HarnessAPI.swift; sourceTree = "<group>"; };
 		2857133C101D3C58E9BF2E69 /* PocketDSHUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PocketDSHUITests.swift; sourceTree = "<group>"; };
@@ -74,11 +76,11 @@
 		51A0DE6E9EE1DD8033673D14 /* ShellBlockInteraction.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShellBlockInteraction.swift; sourceTree = "<group>"; };
 		56106B6E42C165653F7CEDA4 /* QueueDockView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QueueDockView.swift; sourceTree = "<group>"; };
 		5BA7754331250B9CF01F8A4F /* TurnNotificationState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TurnNotificationState.swift; sourceTree = "<group>"; };
+		69A98018D6A145FAF016AB93 /* TerminalPresentation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalPresentation.swift; sourceTree = "<group>"; };
 		6DA2E6D500176C6992989EE1 /* HomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeView.swift; sourceTree = "<group>"; };
 		8742D0DC00E6185285EF6EC5 /* ImageAttachments.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImageAttachments.swift; sourceTree = "<group>"; };
 		8F45255EB3E729C10CE13B85 /* VoiceRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceRecorder.swift; sourceTree = "<group>"; };
 		990F411D48619BD1EAC856DE /* NativeClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeClient.swift; sourceTree = "<group>"; };
-		997B7365DE1C0EC9385B47BB /* NativeWorkspace.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeWorkspace.swift; sourceTree = "<group>"; };
 		9A23CDF070AEDF1D7FEED50A /* DemoData.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DemoData.swift; sourceTree = "<group>"; };
 		9D6E11C03392FD115F72A46C /* MarkdownBlocks.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownBlocks.swift; sourceTree = "<group>"; };
 		A786C1D5582F6223B62081F3 /* ImageViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImageViews.swift; sourceTree = "<group>"; };
@@ -160,7 +162,7 @@
 				B468EDB80C53D5E6DC92860E /* NativeChatConnection.swift */,
 				990F411D48619BD1EAC856DE /* NativeClient.swift */,
 				2E6534119C5B17C6485507CB /* NativeTerminalView.swift */,
-				997B7365DE1C0EC9385B47BB /* NativeWorkspace.swift */,
+				1A005021572717D11BE5AED6 /* PaneFocusNavigator.swift */,
 				F816DAE6C96C8E45D149EEF5 /* PocketDSHApp.swift */,
 				C49C2AC1DB6173218484FA24 /* PocketStore.swift */,
 				56106B6E42C165653F7CEDA4 /* QueueDockView.swift */,
@@ -169,6 +171,7 @@
 				44B25DCB6141C9DBACE0EE9B /* ShellBlockViews.swift */,
 				3F19FB2A62A2A1ADAA7337ED /* Simulator.entitlements */,
 				BA1BA7A9B1DC97856095C0CB /* TerminalAppearance.swift */,
+				69A98018D6A145FAF016AB93 /* TerminalPresentation.swift */,
 				212067D3F85E4C892F86FBAD /* TurnNotifications.swift */,
 				5BA7754331250B9CF01F8A4F /* TurnNotificationState.swift */,
 				8F45255EB3E729C10CE13B85 /* VoiceRecorder.swift */,
@@ -340,7 +343,7 @@
 				458A27CD42CD88D6A09A2852 /* NativeClient.swift in Sources */,
 				391D0771BA57659D7EADCA65 /* NativeTerminalView.swift in Sources */,
 				345F4C2A79471DA5B8166E63 /* NativeWire.swift in Sources */,
-				958504A85B823EF29E80CCF4 /* NativeWorkspace.swift in Sources */,
+				41DC089DC163D7BB48F5FAD8 /* PaneFocusNavigator.swift in Sources */,
 				C9D4CACAFC991269FE6A7BCB /* PocketDSHApp.swift in Sources */,
 				D82FC2E56324E4886177E337 /* PocketStore.swift in Sources */,
 				64C85387583C6D477097EE7A /* QueueDockView.swift in Sources */,
@@ -348,6 +351,7 @@
 				8A3284A72DB675093B2EB8B1 /* ShellBlockInteraction.swift in Sources */,
 				4B32DCC7FD423731DE545A37 /* ShellBlockViews.swift in Sources */,
 				A8F3CECEBAD3E60B962CBAB9 /* TerminalAppearance.swift in Sources */,
+				C519777D60BB3FCC4A067C08 /* TerminalPresentation.swift in Sources */,
 				6B1B4FB32A1AC9BFB4B73BEA /* TurnNotificationState.swift in Sources */,
 				EA878C65D62F5F5C13C46150 /* TurnNotifications.swift in Sources */,
 				6AA8B323AAB5F1859C0355FF /* VoiceRecorder.swift in Sources */,
