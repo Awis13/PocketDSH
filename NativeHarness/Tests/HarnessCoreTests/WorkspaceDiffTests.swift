@@ -165,6 +165,25 @@ final class WorkspaceDiffTests: XCTestCase, @unchecked Sendable {
                                  WorkspaceDiffLimits.maximumLines)
     }
 
+    func testCountsMatchRenderedExcerptAfterClamp() async throws {
+        let root = try await makeRepo(); defer { try? FileManager.default.removeItem(at: root) }
+        try write((0..<500).map(String.init).joined(separator: "\n") + "\n", to: root, "big.txt")
+        _ = try await git(["add", "big.txt"], at: root)
+        _ = try await git(["commit", "-qm", "init"], at: root)
+        try write((0..<900).map(String.init).joined(separator: "\n") + "\n", to: root, "big.txt")
+        let diff = try await WorkspaceDiffEngine.generate(base: .worktree, workspace: root.path)
+        let file = try XCTUnwrap(diff.files.first)
+        func lines(_ text: String) -> Int {
+            guard !text.isEmpty else { return 0 }
+            return text.split(separator: "\n", omittingEmptySubsequences: false).count - (text.hasSuffix("\n") ? 1 : 0)
+        }
+        XCTAssertTrue(file.truncated)
+        XCTAssertEqual(file.additions, file.hunks.reduce(0) { $0 + lines($1.newText) },
+                       "Header additions must describe the rendered excerpt, not the dropped lines")
+        XCTAssertEqual(file.deletions, file.hunks.reduce(0) { $0 + lines($1.oldText) })
+        XCTAssertLessThanOrEqual(file.additions, WorkspaceDiffLimits.maximumLines)
+    }
+
     func testClampKeepsUTF8Boundary() {
         let text = String(repeating: "😀", count: 100)
         let (clamped, trimmed) = WorkspaceDiffEngine.clamp(text, maxBytes: 16, maxLines: 300)
@@ -189,5 +208,141 @@ final class WorkspaceDiffTests: XCTestCase, @unchecked Sendable {
         XCTAssertNil(WorkspaceDiffBase("foo\0bar"))
         XCTAssertNil(WorkspaceDiffBase(String(repeating: "a", count: WorkspaceDiffLimits.maximumRefBytes + 1)))
         XCTAssertNil(WorkspaceDiffBase("HEAD~1..HEAD"))
+    }
+
+    // MARK: - Content lines that look like file headers (Critical)
+
+    func testRemovedLineStartingWithDashesStaysContent() async throws {
+        let root = try await makeRepo(); defer { try? FileManager.default.removeItem(at: root) }
+        try write("alpha\n-- old comment\nomega\n", to: root, "f.txt")
+        _ = try await git(["add", "f.txt"], at: root)
+        _ = try await git(["commit", "-qm", "init"], at: root)
+        try write("alpha\nomega\n", to: root, "f.txt")
+        let diff = try await WorkspaceDiffEngine.generate(base: .worktree, workspace: root.path)
+        let file = try XCTUnwrap(diff.files.first)
+        XCTAssertEqual(file.path, "f.txt", "`--- old comment` must not become the old-file header")
+        XCTAssertEqual(file.status, "modified")
+        XCTAssertEqual(file.additions, 0)
+        XCTAssertEqual(file.deletions, 1, "The removed line must be counted, not eaten as a header")
+        XCTAssertEqual(file.hunks.flatMap { $0.oldText.split(separator: "\n") }.map(String.init), ["-- old comment"])
+    }
+
+    func testAddedLineStartingWithPlusesStaysContent() async throws {
+        let root = try await makeRepo(); defer { try? FileManager.default.removeItem(at: root) }
+        try write("alpha\n", to: root, "g.txt")
+        _ = try await git(["add", "g.txt"], at: root)
+        _ = try await git(["commit", "-qm", "init"], at: root)
+        try write("alpha\n++ plus comment\n", to: root, "g.txt")
+        let diff = try await WorkspaceDiffEngine.generate(base: .worktree, workspace: root.path)
+        let file = try XCTUnwrap(diff.files.first)
+        XCTAssertEqual(file.path, "g.txt", "`+++ plus comment` must not corrupt the new-file header")
+        XCTAssertEqual(file.additions, 1, "The added line must be counted, not eaten as a header")
+        XCTAssertEqual(file.deletions, 0)
+        XCTAssertEqual(file.hunks.flatMap { $0.newText.split(separator: "\n") }.map(String.init), ["++ plus comment"])
+    }
+
+    func testDeletedFileContainingDashLineKeepsPath() async throws {
+        let root = try await makeRepo(); defer { try? FileManager.default.removeItem(at: root) }
+        try write("-- old comment\ntail\n", to: root, "gone.txt")
+        _ = try await git(["add", "gone.txt"], at: root)
+        _ = try await git(["commit", "-qm", "init"], at: root)
+        try FileManager.default.removeItem(at: root.appendingPathComponent("gone.txt"))
+        _ = try await git(["add", "-A"], at: root)
+        let diff = try await WorkspaceDiffEngine.generate(base: .staged, workspace: root.path)
+        let file = try XCTUnwrap(diff.files.first { $0.status == "deleted" })
+        XCTAssertEqual(file.path, "gone.txt", "A deleted file must not be renamed to its own content")
+        XCTAssertEqual(file.deletions, 2)
+        XCTAssertEqual(file.hunks.first?.oldText, "-- old comment\ntail")
+    }
+
+    func testMultiFileHunksStayDelimitedWithHeaderLikeContent() async throws {
+        let root = try await makeRepo(); defer { try? FileManager.default.removeItem(at: root) }
+        try write("keep\n-- old a\n", to: root, "a.txt")
+        try write("keep\n-- old b\n", to: root, "b.txt")
+        _ = try await git(["add", "."], at: root)
+        _ = try await git(["commit", "-qm", "init"], at: root)
+        try write("keep\n", to: root, "a.txt")
+        try write("keep\n", to: root, "b.txt")
+        let diff = try await WorkspaceDiffEngine.generate(base: .worktree, workspace: root.path)
+        XCTAssertEqual(Set(diff.files.map(\.path)), ["a.txt", "b.txt"])
+        for file in diff.files { XCTAssertEqual(file.deletions, 1) }
+    }
+
+    func testNoNewlineAtEndOfFileMarkerIsIgnored() async throws {
+        let root = try await makeRepo(); defer { try? FileManager.default.removeItem(at: root) }
+        try write("one\n", to: root, "n.txt")
+        _ = try await git(["add", "n.txt"], at: root)
+        _ = try await git(["commit", "-qm", "init"], at: root)
+        try write("one", to: root, "n.txt")
+        let diff = try await WorkspaceDiffEngine.generate(base: .worktree, workspace: root.path)
+        let file = try XCTUnwrap(diff.files.first)
+        XCTAssertEqual(file.path, "n.txt")
+        XCTAssertEqual(file.additions, 1)
+        XCTAssertEqual(file.deletions, 1)
+        XCTAssertEqual(file.hunks.first?.oldText, "one")
+        XCTAssertEqual(file.hunks.first?.newText, "one")
+    }
+
+    // MARK: - Unborn HEAD
+
+    func testUnbornHeadShowsStagedAndUntracked() async throws {
+        let root = try await makeRepo(); defer { try? FileManager.default.removeItem(at: root) }
+        try write("staged\n", to: root, "staged.txt")
+        _ = try await git(["add", "staged.txt"], at: root)
+        try write("untracked\n", to: root, "untracked.txt")
+        let diff = try await WorkspaceDiffEngine.generate(base: .head, workspace: root.path)
+        XCTAssertNil(diff.error, "A repository with no commits must not error")
+        let byPath = Dictionary(uniqueKeysWithValues: diff.files.map { ($0.path, $0) })
+        XCTAssertEqual(byPath["staged.txt"]?.status, "added")
+        XCTAssertEqual(byPath["staged.txt"]?.additions, 1)
+        XCTAssertEqual(byPath["untracked.txt"]?.status, "untracked")
+        XCTAssertEqual(byPath["untracked.txt"]?.additions, 1)
+    }
+
+    // MARK: - Path base / scoping
+
+    func testSubdirectoryWorkspaceUsesWorkspaceRelativePaths() async throws {
+        let root = try await makeRepo(); defer { try? FileManager.default.removeItem(at: root) }
+        let sub = root.appendingPathComponent("sub")
+        try FileManager.default.createDirectory(at: sub, withIntermediateDirectories: true)
+        try write("one\n", to: sub, "a.txt")
+        try write("outside\n", to: root, "outside.txt")
+        _ = try await git(["add", "."], at: root)
+        _ = try await git(["commit", "-qm", "init"], at: root)
+        try write("two\n", to: sub, "a.txt")
+        try write("changed\n", to: root, "outside.txt")
+        try write("fresh\n", to: sub, "new.txt")
+        let diff = try await WorkspaceDiffEngine.generate(base: .head, workspace: sub.path)
+        XCTAssertEqual(Set(diff.files.map(\.path)), ["a.txt", "new.txt"],
+                       "Paths resolve within the workspace; files outside it are excluded")
+        XCTAssertEqual(diff.files.first { $0.path == "a.txt" }?.additions, 1)
+        XCTAssertEqual(diff.files.first { $0.path == "new.txt" }?.status, "untracked")
+    }
+
+    func testRenameUnderDirectoryKeepsFullPath() async throws {
+        let root = try await makeRepo(); defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("a"), withIntermediateDirectories: true)
+        try write("x\n", to: root, "a/old.txt")
+        _ = try await git(["add", "."], at: root)
+        _ = try await git(["commit", "-qm", "init"], at: root)
+        _ = try await git(["mv", "a/old.txt", "a/new.txt"], at: root)
+        let diff = try await WorkspaceDiffEngine.generate(base: .staged, workspace: root.path)
+        let file = try XCTUnwrap(diff.files.first { $0.status == "renamed" })
+        XCTAssertEqual(file.path, "a/new.txt", "A rename keeps the full path, not a stripped one")
+        XCTAssertEqual(file.oldPath, "a/old.txt")
+    }
+
+    func testSpacedAndQuotedPathsResolve() async throws {
+        let root = try await makeRepo(); defer { try? FileManager.default.removeItem(at: root) }
+        let weird = "tab\tname.txt"
+        try write("one\n", to: root, "my file.txt")
+        try write("one\n", to: root, weird)
+        _ = try await git(["add", "."], at: root)
+        _ = try await git(["commit", "-qm", "init"], at: root)
+        try write("two\n", to: root, "my file.txt")
+        try write("two\n", to: root, weird)
+        let diff = try await WorkspaceDiffEngine.generate(base: .worktree, workspace: root.path)
+        XCTAssertEqual(Set(diff.files.map(\.path)), ["my file.txt", weird])
+        for file in diff.files { XCTAssertEqual(file.additions, 1) }
     }
 }

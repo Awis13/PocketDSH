@@ -48,6 +48,29 @@ final class DiffPresentationTests: XCTestCase {
         XCTAssertEqual(round.extraFields["futureDiffField"], event.extraFields["futureDiffField"])
     }
 
+    func testHostOutputToClientSanitizeBoundaryRoundTrip() throws {
+        let longText = (0..<400).map { "line \($0)" }.joined(separator: "\n")
+        let host = WorkspaceDiff(base: "worktree", resolvedBase: nil, files: [
+            WorkspaceDiffFile(path: "", status: "modified", additions: 7, deletions: 7,
+                              hunks: [WorkspaceDiffHunk(path: "", header: "@@", oldText: "x", newText: "y")]),
+            WorkspaceDiffFile(path: "big.txt", status: "modified", additions: 999, deletions: 999,
+                              hunks: [WorkspaceDiffHunk(path: "big.txt", header: "@@", oldText: "old", newText: longText)])
+        ], truncated: false, error: nil)
+        let wire = NativeDiffInfo(host)
+        let decoded = try JSONDecoder().decode(NativeDiffInfo.self, from: JSONEncoder().encode(wire))
+        let client = decoded.sanitized()
+        XCTAssertEqual(client.files.map(\.path), ["big.txt"], "An empty host path is dropped at the client boundary")
+        let file = try XCTUnwrap(client.files.first)
+        XCTAssertEqual(file.additions, file.hunks.reduce(0) { $0 + NativeDiffInfo.lineCount($1.newText) },
+                       "Header totals match the rendered excerpt after clamping")
+        XCTAssertEqual(file.deletions, 1)
+        XCTAssertTrue(client.truncated)
+        XCTAssertLessThanOrEqual(file.hunks.first?.newText.split(separator: "\n", omittingEmptySubsequences: false).count ?? 0,
+                                 NativeDiffLimits.maximumLines)
+        let stable = try JSONDecoder().decode(NativeDiffInfo.self, from: JSONEncoder().encode(client))
+        XCTAssertEqual(stable, client, "A sanitized payload stays stable across another wire round-trip")
+    }
+
     func testSanitizeClampsOversizedHostPayload() {
         let longText = String(repeating: "x", count: 40_000)
         let info = NativeDiffInfo(base: "HEAD", files: [

@@ -96,7 +96,13 @@ public enum WorkspaceDiffBase: Sendable, Equatable {
 }
 
 public enum WorkspaceDiffEngine {
-    private static let diffFlags = ["--no-color", "--no-ext-diff", "--no-textconv", "-M", "--unified=0"]
+    /// `--relative` scopes the diff to the workspace and makes every path
+    /// workspace-relative, matching `git ls-files` (also run with cwd=workspace).
+    private static let diffFlags = ["--relative", "--no-color", "--no-ext-diff", "--no-textconv", "-M", "--unified=0"]
+    private static let gitExecutable = "/usr/bin/git"
+    /// The well-known empty tree: diffing against it lists every tracked file
+    /// as added, which is the right answer while HEAD is unborn.
+    private static let emptyTreeObject = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 
     public static func generate(base: WorkspaceDiffBase, workspace: String) async throws -> WorkspaceDiff {
         var arguments = ["diff"]
@@ -107,7 +113,7 @@ public enum WorkspaceDiffEngine {
         case .staged:
             arguments += ["--cached"] + diffFlags
         case .head:
-            arguments += ["HEAD"] + diffFlags
+            arguments += (try await hasUnbornHead(workspace: workspace) ? [emptyTreeObject] : ["HEAD"]) + diffFlags
         case .ref(let ref):
             guard let common = try await mergeBase(ref: ref, workspace: workspace) else {
                 return WorkspaceDiff(base: base.wireValue, resolvedBase: nil, files: [],
@@ -132,6 +138,13 @@ public enum WorkspaceDiffEngine {
         return result
     }
 
+    private static func hasUnbornHead(workspace: String) async throws -> Bool {
+        // `--verify -q HEAD` exits 1 only when HEAD points at no commit; any
+        // other failure (not a repository) falls through to the normal path.
+        let block = try await runGit(["rev-parse", "--verify", "-q", "HEAD"], workspace: workspace, outputLimit: 4096)
+        return block.exitCode == 1
+    }
+
     private static func mergeBase(ref: String, workspace: String) async throws -> String? {
         let block = try await runGit(["merge-base", ref, "HEAD"], workspace: workspace, outputLimit: 4096)
         guard block.outcome == "exited", block.exitCode == 0 else { return nil }
@@ -143,8 +156,12 @@ public enum WorkspaceDiffEngine {
     }
 
     private static func runGit(_ arguments: [String], workspace: String, outputLimit: Int = 1_048_576) async throws -> CommandBlock {
-        let command = "git --no-pager -c core.quotePath=false " + arguments.joined(separator: " ")
-        return try await ShellRunner.run(command: command, workspace: workspace, timeout: 30, outputLimit: outputLimit)
+        // argv, never a shell string: a hostile ref cannot add shell syntax or
+        // options. `isSafeRef` stays as belt-and-braces. `--no-optional-locks`
+        // keeps `git diff` from rewriting `.git/index`.
+        let gitArguments = ["--no-pager", "--no-optional-locks", "-c", "core.quotePath=false"] + arguments
+        return try await ShellRunner.run(executable: gitExecutable, arguments: gitArguments,
+                                         workspace: workspace, timeout: 30, outputLimit: outputLimit)
     }
 
     private static func failureMessage(_ block: CommandBlock) -> String {
@@ -162,24 +179,28 @@ public enum WorkspaceDiffEngine {
         for line in listing.stdout.components(separatedBy: "\n") where !line.isEmpty {
             guard result.files.count < WorkspaceDiffLimits.maximumFiles else { result.truncated = true; break }
             guard !line.contains("\0") else { continue }
-            let file = root.appendingPathComponent(line).standardizedFileURL.resolvingSymlinksInPath()
+            // `ls-files` C-quotes tabs, quotes, backslashes and control bytes
+            // even with `core.quotePath=false`; decode before touching disk.
+            let path = GitPath.unquotePlain(line)
+            guard !path.isEmpty else { continue }
+            let file = root.appendingPathComponent(path).standardizedFileURL.resolvingSymlinksInPath()
             guard file.path == root.path || file.path.hasPrefix(root.path + "/") else { continue }
             guard let (data, readTruncated) = readBounded(file, maximum: WorkspaceDiffLimits.maximumFieldBytes) else { continue }
             if data.contains(0) {
-                result.files.append(WorkspaceDiffFile(path: line, status: "untracked", binary: true, truncated: readTruncated))
+                result.files.append(WorkspaceDiffFile(path: path, status: "untracked", binary: true, truncated: readTruncated))
                 if readTruncated { result.truncated = true }
                 continue
             }
             guard let text = String(data: data, encoding: .utf8) else {
-                result.files.append(WorkspaceDiffFile(path: line, status: "untracked", binary: true, truncated: readTruncated))
+                result.files.append(WorkspaceDiffFile(path: path, status: "untracked", binary: true, truncated: readTruncated))
                 if readTruncated { result.truncated = true }
                 continue
             }
             let content = text.hasSuffix("\n") ? String(text.dropLast()) : text
             let (clamped, clampedByLines) = clamp(content, maxBytes: WorkspaceDiffLimits.maximumFieldBytes, maxLines: WorkspaceDiffLimits.maximumLines)
             let truncated = readTruncated || clampedByLines
-            var entry = WorkspaceDiffFile(path: line, status: "untracked", truncated: truncated,
-                                          hunks: [WorkspaceDiffHunk(path: line, header: "", oldText: "", newText: clamped)])
+            var entry = WorkspaceDiffFile(path: path, status: "untracked", truncated: truncated,
+                                          hunks: [WorkspaceDiffHunk(path: path, header: "", oldText: "", newText: clamped)])
             entry.additions = lineCount(clamped)
             result.files.append(entry)
             if truncated { result.truncated = true }
@@ -228,6 +249,7 @@ public enum WorkspaceDiffEngine {
         var files: [WorkspaceDiffFile] = []
         for var file in result.files {
             guard files.count < WorkspaceDiffLimits.maximumFiles else { result.truncated = true; break }
+            let hadHunks = !file.hunks.isEmpty
             var hunks: [WorkspaceDiffHunk] = []
             var fileBytes = 0
             for var hunk in file.hunks {
@@ -243,11 +265,78 @@ public enum WorkspaceDiffEngine {
                 }
                 fileBytes += size; total += size; hunks.append(hunk)
             }
+            if hadHunks && hunks.isEmpty {
+                // The budget cut this file before any hunk survived; emitting it
+                // would render a file with nothing to show.
+                file.truncated = true; result.truncated = true
+                continue
+            }
             file.hunks = hunks
+            if hadHunks {
+                // Header totals must describe the excerpt that remains after
+                // clamping, not the lines the host dropped.
+                file.additions = hunks.reduce(0) { $0 + lineCount($1.newText) }
+                file.deletions = hunks.reduce(0) { $0 + lineCount($1.oldText) }
+            }
             if file.truncated { result.truncated = true }
             files.append(file)
         }
         result.files = files
+    }
+}
+
+/// Decodes the C-quoted paths git emits for headers and `ls-files`. Git quotes
+/// tabs, double quotes, backslashes and control bytes regardless of
+/// `core.quotePath=false`, which only affects non-ASCII bytes.
+enum GitPath {
+    /// A `--- `/`+++ ` token: drops the `a/`/`b/` prefix and maps `/dev/null`
+    /// to nil.
+    static func unquoteHeader(_ value: String) -> String? {
+        let decoded = decode(value)
+        guard decoded != "/dev/null" else { return nil }
+        if decoded.hasPrefix("a/") || decoded.hasPrefix("b/") { return String(decoded.dropFirst(2)) }
+        return decoded
+    }
+
+    /// A repo/workspace-relative path with no `a/`/`b/` prefix: `ls-files`
+    /// output and `rename from`/`rename to` values.
+    static func unquotePlain(_ value: String) -> String {
+        decode(value)
+    }
+
+    private static func decode(_ value: String) -> String {
+        var text = value
+        if let tab = text.firstIndex(of: "\t") { text = String(text[..<tab]) }
+        if text.hasPrefix("\""), text.hasSuffix("\""), text.count >= 2 {
+            text = unescape(String(text.dropFirst().dropLast()))
+        }
+        return text
+    }
+
+    private static func unescape(_ value: String) -> String {
+        var result = ""
+        var iterator = value.makeIterator()
+        while let character = iterator.next() {
+            guard character == "\\" else { result.append(character); continue }
+            guard let next = iterator.next() else { result.append("\\"); break }
+            switch next {
+            case "n": result.append("\n")
+            case "t": result.append("\t")
+            case "r": result.append("\r")
+            case "\\": result.append("\\")
+            case "\"": result.append("\"")
+            case "a": result.append("\u{07}")
+            case "b": result.append("\u{08}")
+            case "f": result.append("\u{0C}")
+            case "v": result.append("\u{0B}")
+            default:
+                var digits = String(next)
+                for _ in 0..<2 { if let digit = iterator.next(), digit.isNumber { digits.append(digit) } }
+                if let code = UInt8(digits, radix: 8), let scalar = UnicodeScalar(UInt32(code)) { result.unicodeScalars.append(scalar) }
+                else { result.append(next) }
+            }
+        }
+        return result
     }
 }
 
@@ -291,13 +380,24 @@ private struct PatchParser {
             guard current != nil else { continue }
             if line.hasPrefix("new file mode") { current?.status = "added"; continue }
             if line.hasPrefix("deleted file mode") { current?.status = "deleted"; continue }
-            if line.hasPrefix("rename from ") { current?.oldPath = String(line.dropFirst("rename from ".count)); current?.status = "renamed"; continue }
-            if line.hasPrefix("rename to ") { current?.path = String(line.dropFirst("rename to ".count)); current?.status = "renamed"; continue }
+            if line.hasPrefix("rename from ") {
+                current?.oldPath = GitPath.unquotePlain(String(line.dropFirst("rename from ".count)))
+                current?.status = "renamed"; continue
+            }
+            if line.hasPrefix("rename to ") {
+                current?.path = GitPath.unquotePlain(String(line.dropFirst("rename to ".count)))
+                current?.status = "renamed"; continue
+            }
             if line.hasPrefix("Binary files ") || line.hasPrefix("GIT binary patch") { current?.binary = true; continue }
-            if line.hasPrefix("--- ") { sawMinus = true; minusPath = unquote(String(line.dropFirst(4))); continue }
-            if line.hasPrefix("+++ ") { sawPlus = true; plusPath = unquote(String(line.dropFirst(4))); continue }
             if line.hasPrefix("@@") { finishHunk(header: line); continue }
-            if hunkHeader == nil { continue }
+            // Only the preamble before the first hunk carries file headers. A
+            // removed/added content line can itself begin with `--- ` or `+++ `
+            // (e.g. `-- comment`), and must not be mistaken for a header.
+            if hunkHeader == nil {
+                if line.hasPrefix("--- ") { sawMinus = true; minusPath = GitPath.unquoteHeader(String(line.dropFirst(4))); continue }
+                if line.hasPrefix("+++ ") { sawPlus = true; plusPath = GitPath.unquoteHeader(String(line.dropFirst(4))); continue }
+                continue
+            }
             if line.hasPrefix("+") { hunkNew.append(String(line.dropFirst())) }
             else if line.hasPrefix("-") { hunkOld.append(String(line.dropFirst())) }
         }
@@ -349,47 +449,38 @@ private struct PatchParser {
         current = nil
     }
 
-    private func unquote(_ value: String) -> String? {
-        var text = value
-        if let tab = text.firstIndex(of: "\t") { text = String(text[..<tab]) }
-        if text == "/dev/null" { return nil }
-        if text.hasPrefix("\""), text.hasSuffix("\""), text.count >= 2 {
-            text = Self.unescape(String(text.dropFirst().dropLast()))
-        }
-        if text.hasPrefix("a/") || text.hasPrefix("b/") { text = String(text.dropFirst(2)) }
-        return text
-    }
-
+    /// Splits `a/old b/new` into two tokens, honouring git's C-quoting when a
+    /// path contains tabs, quotes or control bytes.
     private static func headerPaths(_ line: String) -> (old: String, new: String)? {
         let body = String(line.dropFirst("diff --git ".count))
-        guard body.hasPrefix("a/"), let separator = body.range(of: " b/") else { return nil }
-        let start = body.index(body.startIndex, offsetBy: 2)
-        return (String(body[start..<separator.lowerBound]), String(body[separator.upperBound...]))
+        guard let (oldToken, newToken) = splitHeaderTokens(body),
+              let old = GitPath.unquoteHeader(oldToken),
+              let new = GitPath.unquoteHeader(newToken) else { return nil }
+        return (old, new)
     }
 
-    private static func unescape(_ value: String) -> String {
-        var result = ""
-        var iterator = value.makeIterator()
-        while let character = iterator.next() {
-            guard character == "\\" else { result.append(character); continue }
-            guard let next = iterator.next() else { result.append("\\"); break }
-            switch next {
-            case "n": result.append("\n")
-            case "t": result.append("\t")
-            case "r": result.append("\r")
-            case "\\": result.append("\\")
-            case "\"": result.append("\"")
-            case "a": result.append("\u{07}")
-            case "b": result.append("\u{08}")
-            case "f": result.append("\u{0C}")
-            case "v": result.append("\u{0B}")
-            default:
-                var digits = String(next)
-                for _ in 0..<2 { if let digit = iterator.next(), digit.isNumber { digits.append(digit) } }
-                if let code = UInt8(digits, radix: 8), let scalar = UnicodeScalar(UInt32(code)) { result.unicodeScalars.append(scalar) }
-                else { result.append(next) }
-            }
+    private static func splitHeaderTokens(_ body: String) -> (String, String)? {
+        if body.hasPrefix("\"") {
+            guard let (first, rest) = readQuoted(body), rest.hasPrefix(" ") else { return nil }
+            return (first, String(rest.dropFirst()))
         }
-        return result
+        guard let separator = body.range(of: " b/") else { return nil }
+        return (String(body[..<separator.lowerBound]), String(body[separator.upperBound...]))
+    }
+
+    private static func readQuoted(_ text: String) -> (String, String)? {
+        guard text.first == "\"" else { return nil }
+        var index = text.index(after: text.startIndex), escaped = false
+        while index < text.endIndex {
+            let character = text[index]
+            if escaped { escaped = false }
+            else if character == "\\" { escaped = true }
+            else if character == "\"" {
+                let end = text.index(after: index)
+                return (String(text[..<end]), String(text[end...]))
+            }
+            index = text.index(after: index)
+        }
+        return nil
     }
 }
