@@ -17,8 +17,15 @@ public struct TerminalCommand: Codable, Sendable, Equatable {
     }
 }
 
-public struct TerminalInfo: Codable, Sendable {
-    public let id: String
+/// What a model wait is waiting for. `bytes` is the original behavior; the
+/// lifecycle conditions only complete on new shell frames, never on output.
+public enum TerminalWaitCondition: String, Codable, Sendable, CaseIterable {
+    case bytes
+    case commandFinished = "command_finished"
+    case cwdChanged = "cwd_changed"
+}
+
+public struct TerminalInfo: Codable, Sendable {    public let id: String
     public let initialWorkspace: String
     public let firstCursor: Int64
     public let latestCursor: Int64
@@ -38,6 +45,13 @@ public struct TerminalRead: Codable, Sendable {
     public let text: String
     public let exit: PTYExit?
     public let timedOut: Bool
+    /// Why the wait returned: bytes, gap, exit, timeout, command_finished or
+    /// cwd_changed. Nil for a plain `read`.
+    public let condition: String?
+    /// The command record that satisfied a `command_finished` wait.
+    public let command: TerminalCommand?
+    /// The directory that satisfied a `cwd_changed` wait (or the command's cwd).
+    public let cwd: String?
 }
 
 /// Synchronous capture preserves PTY byte order without one unbounded Task per
@@ -55,10 +69,14 @@ public final class TerminalObservation: @unchecked Sendable {
     private var exit: PTYExit?
     private var commands: [TerminalCommand] = []
     private var commandSeq: Int64 = 0
+    private var finishedCommands: Int64 = 0
+    private var cwdChanges: Int64 = 0
     private var latestDirectory: String
     private struct Waiter {
         let cursor: Int64
         let limit: Int
+        let condition: TerminalWaitCondition
+        let baseline: Int64
         let continuation: CheckedContinuation<TerminalRead, any Error>
         let timer: Task<Void, Never>
     }
@@ -79,7 +97,7 @@ public final class TerminalObservation: @unchecked Sendable {
             bytes.append(data)
             if bytes.count > capacity { bytes = Data(bytes.suffix(capacity)) }
         }
-        let ready = drainLocked()
+        let ready = drainBytesLocked()
         lock.unlock()
         resume(ready)
     }
@@ -87,7 +105,7 @@ public final class TerminalObservation: @unchecked Sendable {
         lock.lock()
         guard exit == nil else { lock.unlock(); return }
         exit = result
-        let ready = drainLocked()
+        let ready = drainAllLocked()
         lock.unlock()
         resume(ready)
     }
@@ -100,18 +118,23 @@ public final class TerminalObservation: @unchecked Sendable {
                                          directory: Self.clamp(directory, to: Self.maxDirectoryBytes),
                                          exitCode: nil, startedAt: date, endedAt: nil))
         if commands.count > Self.maxCommands { commands.removeFirst(commands.count - Self.maxCommands) }
-        latestDirectory = Self.clamp(directory, to: Self.maxDirectoryBytes)
+        let ready = updateDirectoryLocked(directory) ? drainCwdLocked(latestDirectory) : []
         lock.unlock()
+        resume(ready)
     }
     /// Records a `precmd` marker. A standalone ready (the initial prompt) is
     /// stored with `command == nil`; later ready frames close the open start.
     public func recordReady(code: Int, directory: String, at date: Date = Date()) {
         lock.lock()
+        var completed: TerminalCommand?
         if let index = commands.lastIndex(where: { $0.command != nil && $0.endedAt == nil }) {
             let open = commands[index]
-            commands[index] = TerminalCommand(seq: open.seq, command: open.command,
-                                              directory: Self.clamp(directory, to: Self.maxDirectoryBytes),
-                                              exitCode: code, startedAt: open.startedAt, endedAt: date)
+            let closed = TerminalCommand(seq: open.seq, command: open.command,
+                                         directory: Self.clamp(directory, to: Self.maxDirectoryBytes),
+                                         exitCode: code, startedAt: open.startedAt, endedAt: date)
+            commands[index] = closed
+            completed = closed
+            finishedCommands += 1
         } else {
             commandSeq += 1
             commands.append(TerminalCommand(seq: commandSeq, command: nil,
@@ -119,8 +142,18 @@ public final class TerminalObservation: @unchecked Sendable {
                                             exitCode: code, startedAt: date, endedAt: date))
             if commands.count > Self.maxCommands { commands.removeFirst(commands.count - Self.maxCommands) }
         }
-        latestDirectory = Self.clamp(directory, to: Self.maxDirectoryBytes)
+        var ready: [(Waiter, TerminalRead)] = []
+        if let completed { ready += drainFinishedLocked(completed) }
+        if updateDirectoryLocked(directory) { ready += drainCwdLocked(latestDirectory) }
         lock.unlock()
+        resume(ready)
+    }
+    private func updateDirectoryLocked(_ directory: String) -> Bool {
+        let clamped = Self.clamp(directory, to: Self.maxDirectoryBytes)
+        guard !clamped.isEmpty, clamped != latestDirectory else { return false }
+        latestDirectory = clamped
+        cwdChanges += 1
+        return true
     }
     /// Most recent command records, oldest first, bounded by `limit`.
     public func commandHistory(limit: Int = 32) -> [TerminalCommand] {
@@ -151,9 +184,12 @@ public final class TerminalObservation: @unchecked Sendable {
         try validateLocked(cursor, maxBytes)
         return readLocked(cursor, maxBytes)
     }
-    /// Completes on new bytes, retention gap, PTY exit, timeout, or cancellation.
-    /// An exit result means the whole PTY exited, not an arbitrary command inside it.
-    public func wait(after cursor: Int64, maxBytes: Int = 16384, timeout: Double = 30) async throws -> TerminalRead {
+    /// Completes on the requested condition, retention gap, PTY exit, timeout,
+    /// or cancellation. An exit result means the whole PTY exited, not an
+    /// arbitrary command inside it. The wait is the wake: there is no hidden
+    /// idle-agent auto-wake.
+    public func wait(after cursor: Int64, maxBytes: Int = 16384, timeout: Double = 30,
+                     condition: TerminalWaitCondition = .bytes) async throws -> TerminalRead {
         guard timeout.isFinite, timeout > 0, timeout <= 60 else { throw HarnessError.invalid("Terminal wait timeout must be in (0, 60]") }
         let token = UUID()
         return try await withTaskCancellationHandler {
@@ -162,8 +198,12 @@ public final class TerminalObservation: @unchecked Sendable {
                 do {
                     try Task.checkCancellation()
                     try validateLocked(cursor, maxBytes)
-                    if end > cursor || exit != nil {
-                        let result = readLocked(cursor, maxBytes)
+                    if exit != nil {
+                        let result = readLocked(cursor, maxBytes, condition: "exit")
+                        lock.unlock(); continuation.resume(returning: result); return
+                    }
+                    if condition == .bytes, end > cursor {
+                        let result = readLocked(cursor, maxBytes, condition: "bytes")
                         lock.unlock(); continuation.resume(returning: result); return
                     }
                     guard waiters.count < 32 else { throw HarnessError.invalid("Too many terminal waiters") }
@@ -171,7 +211,9 @@ public final class TerminalObservation: @unchecked Sendable {
                         do { try await Task.sleep(for: .seconds(timeout)) } catch { return }
                         self?.timeout(token)
                     }
-                    waiters[token] = Waiter(cursor: cursor, limit: maxBytes, continuation: continuation, timer: timer)
+                    let baseline = condition == .commandFinished ? finishedCommands : cwdChanges
+                    waiters[token] = Waiter(cursor: cursor, limit: maxBytes, condition: condition, baseline: baseline,
+                                            continuation: continuation, timer: timer)
                     lock.unlock()
                 } catch { lock.unlock(); continuation.resume(throwing: error) }
             }
@@ -180,18 +222,49 @@ public final class TerminalObservation: @unchecked Sendable {
     private func validateLocked(_ cursor: Int64, _ limit: Int) throws {
         guard cursor >= 0, cursor <= end, (1...65536).contains(limit) else { throw HarnessError.invalid("Invalid terminal cursor or read limit") }
     }
-    private func readLocked(_ cursor: Int64, _ limit: Int, timedOut: Bool = false) -> TerminalRead {
+    private func readLocked(_ cursor: Int64, _ limit: Int, timedOut: Bool = false, condition: String? = nil,
+                            command: TerminalCommand? = nil, cwd: String? = nil) -> TerminalRead {
         let first = end - Int64(bytes.count)
         let start = max(cursor, first)
         let count = min(limit, Int(end - start))
         let offset = Int(start - first)
         let chunk = Data(bytes.dropFirst(offset).prefix(count))
         return TerminalRead(terminalID: id, startCursor: start, nextCursor: start + Int64(count), latestCursor: end,
-                            gap: cursor < first, bytes: chunk, text: String(decoding: chunk, as: UTF8.self), exit: exit, timedOut: timedOut)
+                            gap: cursor < first, bytes: chunk, text: String(decoding: chunk, as: UTF8.self), exit: exit,
+                            timedOut: timedOut, condition: condition, command: command, cwd: cwd)
     }
-    private func drainLocked() -> [(Waiter, TerminalRead)] {
-        let entries = Array(waiters.values); waiters.removeAll()
-        return entries.map { ($0, readLocked($0.cursor, $0.limit)) }
+    private func drainBytesLocked() -> [(Waiter, TerminalRead)] {
+        var entries: [(Waiter, TerminalRead)] = []
+        for (token, waiter) in Array(waiters) where waiter.condition == .bytes && end > waiter.cursor {
+            waiters.removeValue(forKey: token)
+            entries.append((waiter, readLocked(waiter.cursor, waiter.limit, condition: "bytes")))
+        }
+        return entries
+    }
+    private func drainAllLocked() -> [(Waiter, TerminalRead)] {
+        var entries: [(Waiter, TerminalRead)] = []
+        for (token, waiter) in Array(waiters) {
+            waiters.removeValue(forKey: token)
+            entries.append((waiter, readLocked(waiter.cursor, waiter.limit, condition: "exit")))
+        }
+        return entries
+    }
+    private func drainFinishedLocked(_ command: TerminalCommand) -> [(Waiter, TerminalRead)] {
+        var entries: [(Waiter, TerminalRead)] = []
+        for (token, waiter) in Array(waiters) where waiter.condition == .commandFinished && waiter.baseline < finishedCommands {
+            waiters.removeValue(forKey: token)
+            entries.append((waiter, readLocked(waiter.cursor, waiter.limit, condition: "command_finished",
+                                               command: command, cwd: command.directory)))
+        }
+        return entries
+    }
+    private func drainCwdLocked(_ directory: String) -> [(Waiter, TerminalRead)] {
+        var entries: [(Waiter, TerminalRead)] = []
+        for (token, waiter) in Array(waiters) where waiter.condition == .cwdChanged && waiter.baseline < cwdChanges {
+            waiters.removeValue(forKey: token)
+            entries.append((waiter, readLocked(waiter.cursor, waiter.limit, condition: "cwd_changed", cwd: directory)))
+        }
+        return entries
     }
     private func resume(_ entries: [(Waiter, TerminalRead)]) {
         for (waiter, result) in entries { waiter.timer.cancel(); waiter.continuation.resume(returning: result) }
@@ -199,7 +272,7 @@ public final class TerminalObservation: @unchecked Sendable {
     private func timeout(_ token: UUID) {
         lock.lock()
         guard let waiter = waiters.removeValue(forKey: token) else { lock.unlock(); return }
-        let result = readLocked(waiter.cursor, waiter.limit, timedOut: true)
+        let result = readLocked(waiter.cursor, waiter.limit, timedOut: true, condition: "timeout")
         lock.unlock(); waiter.continuation.resume(returning: result)
     }
     private func cancel(_ token: UUID) {

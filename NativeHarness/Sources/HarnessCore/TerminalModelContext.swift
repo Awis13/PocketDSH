@@ -7,6 +7,7 @@ public enum TerminalModelContext {
 
     public static func encode(_ read: TerminalRead) throws -> String {
         let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        encoder.dateEncodingStrategy = .iso8601
         var object = try JSONSerialization.jsonObject(with: encoder.encode(read)) as! [String: Any]
         object.removeValue(forKey: "bytes")
         let clean = plain(read.text)
@@ -50,13 +51,14 @@ public enum TerminalModelContext {
     /// Repairs model serialization of older sessions without rewriting their
     /// durable history or altering request IDs / already admitted instructions.
     public static func compactLegacy(_ content: String, toolResult: Bool) -> String {
-        if toolResult, let read = try? JSONDecoder().decode(TerminalRead.self, from: Data(content.utf8)) {
+        let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
+        if toolResult, let read = try? decoder.decode(TerminalRead.self, from: Data(content.utf8)) {
             return (try? encode(read)) ?? content
         }
         guard let marker = content.range(of: "\n\nSelected terminal ", options: .backwards),
               let start = content.range(of: "\n{", range: marker.upperBound..<content.endIndex) else { return content }
         let payload = String(content[start.lowerBound...].dropFirst())
-        guard let read = try? JSONDecoder().decode(TerminalRead.self, from: Data(payload.utf8)),
+        guard let read = try? decoder.decode(TerminalRead.self, from: Data(payload.utf8)),
               let compact = try? encode(read) else { return content }
         return String(content[..<start.lowerBound]) + "\n" + compact
     }

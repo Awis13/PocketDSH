@@ -33,3 +33,18 @@ The first boundary is implemented locally in `TerminalObservation.swift`, `PTYSe
 
 Command boundaries are display lifecycle, not execution authority. A record only proves the shell reported a start and later a prompt with an exit status; it does not prove the command was helpful, that its output was captured, or that the process tree ended.
 
+## Wait conditions and wake policy (2026-09-11)
+
+`terminal_wait` takes a `condition`:
+
+- `bytes` (default) — the original behavior: new raw output after the cursor, or retention gap.
+- `command_finished` — a new `precmd` that closes an open `preexec`. The result carries the command record (command, cwd, exit code, timestamps). Output alone never satisfies it.
+- `cwd_changed` — the shell reported a different directory than the one the waiter observed at registration.
+
+The result keeps every existing field and adds `condition`, `command` and `cwd`, so older clients that read `text`/`nextCursor` are unaffected. Every wait still ends on the same terminal outcomes: the requested condition, a timeout, whole-PTY exit, a retention gap, or caller cancellation.
+
+**The wait is the wake.** A model request resumes only when one of those outcomes occurs; there is no hidden idle-agent auto-wake and no background model polling. `bytes` is not evidence a command finished, a timeout is not evidence a command finished, and a single command exit is not a whole-PTY exit. `foreground_idle` is deliberately not a condition.
+
+The real CLI probe `scripts/probe-native-observation.py` covers a blocking `command_finished` wait, a `cwd_changed` wait, and the `terminal_commands` list on an isolated fixture host.
+
+

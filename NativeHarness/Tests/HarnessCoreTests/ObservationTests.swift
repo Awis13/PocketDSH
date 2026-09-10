@@ -209,4 +209,112 @@ final class ObservationTests: XCTestCase, @unchecked Sendable {
         let command = ((result["commands"] as? [[String: Any]])?.first)?["command"] as? String
         XCTAssertEqual(command, "printf 'red'")
     }
+    func testCommandFinishedConditionIgnoresBytesAndWakesOnReady() async throws {
+        let history = try TerminalObservation(id: "cond", initialWorkspace: "/tmp")
+        let waiter = Task { try await history.wait(after: 0, timeout: 2, condition: .commandFinished) }
+        for _ in 0..<200 {
+            if history.inspect().pendingWaits == 1 { break }
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        history.append(Data("chatty output".utf8))
+        try await Task.sleep(for: .milliseconds(30))
+        XCTAssertEqual(history.inspect().pendingWaits, 1, "Output bytes must not satisfy a lifecycle wait")
+        history.recordStart(command: "make test", directory: "/tmp")
+        try await Task.sleep(for: .milliseconds(20))
+        XCTAssertEqual(history.inspect().pendingWaits, 1, "A start alone must not satisfy the wait")
+        history.recordReady(code: 2, directory: "/tmp")
+        let result = try await waiter.value
+        XCTAssertEqual(result.condition, "command_finished")
+        XCTAssertEqual(result.command?.command, "make test")
+        XCTAssertEqual(result.command?.exitCode, 2)
+        XCTAssertEqual(result.cwd, "/tmp")
+        XCTAssertFalse(result.timedOut)
+    }
+    func testCwdChangedConditionRequiresANewChange() async throws {
+        let history = try TerminalObservation(id: "cwd", initialWorkspace: "/tmp")
+        history.recordReady(code: 0, directory: "/tmp")
+        let waiter = Task { try await history.wait(after: 0, timeout: 2, condition: .cwdChanged) }
+        for _ in 0..<200 {
+            if history.inspect().pendingWaits == 1 { break }
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        history.recordStart(command: "cd /etc", directory: "/tmp")
+        history.recordReady(code: 0, directory: "/tmp")
+        try await Task.sleep(for: .milliseconds(20))
+        XCTAssertEqual(history.inspect().pendingWaits, 1, "A start that keeps the directory must not satisfy the wait")
+        history.recordStart(command: "pwd", directory: "/tmp")
+        history.recordReady(code: 0, directory: "/etc")
+        let result = try await waiter.value
+        XCTAssertEqual(result.condition, "cwd_changed")
+        XCTAssertEqual(result.cwd, "/etc")
+    }
+    func testLifecycleConditionTimesOutWithoutTrigger() async throws {
+        let history = try TerminalObservation(id: "late", initialWorkspace: "/tmp")
+        let started = ContinuousClock.now
+        let result = try await history.wait(after: 0, timeout: 0.02, condition: .commandFinished)
+        XCTAssertTrue(result.timedOut)
+        XCTAssertEqual(result.condition, "timeout")
+        XCTAssertNil(result.command)
+        XCTAssertLessThan(started.duration(to: ContinuousClock.now), .seconds(1))
+        XCTAssertEqual(history.inspect().pendingWaits, 0)
+    }
+    func testTerminalWaitToolReturnsStructuredLifecycleResult() async throws {
+        let catalog = TerminalObservations()
+        let history = try catalog.create(id: "tool-life", workspace: "/tmp")
+        let tools = try WorkspaceTools(root: FileManager.default.temporaryDirectory, observations: catalog)
+        let waiter = Task { try await tools.execute(ToolCall(id: "w", name: "terminal_wait", arguments: "{\"terminal_id\":\"tool-life\",\"after\":\"0\",\"timeout_seconds\":\"2\",\"condition\":\"command_finished\"}")) }
+        for _ in 0..<200 {
+            if history.inspect().pendingWaits == 1 { break }
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        history.recordStart(command: "ls", directory: "/tmp")
+        history.recordReady(code: 0, directory: "/")
+        let output = try await waiter.value.output
+        XCTAssertFalse(output.contains("\u{1b}"))
+        let result = try JSONSerialization.jsonObject(with: Data(output.utf8)) as! [String: Any]
+        XCTAssertEqual(result["condition"] as? String, "command_finished")
+        XCTAssertEqual(result["cwd"] as? String, "/")
+        XCTAssertNil(result["bytes"])
+        XCTAssertEqual(result["nextCursor"] as? Int, 0)
+        let command = result["command"] as? [String: Any]
+        XCTAssertEqual(command?["command"] as? String, "ls")
+        XCTAssertEqual(command?["exitCode"] as? Int, 0)
+        XCTAssertNotNil(command?["startedAt"] as? String)
+    }
+    func testLifecycleWaitKeepsPTYResponsive() async throws {
+        let history = try TerminalObservation(id: "resp", initialWorkspace: "/tmp")
+        let session = try PTYSession(workspace: FileManager.default.temporaryDirectory, observation: history, segmented: true, onOutput: { _ in })
+        defer { session.close() }
+        let lifecycle = Task { try await history.wait(after: 0, timeout: 5, condition: .commandFinished) }
+        for _ in 0..<250 {
+            if history.inspect().pendingWaits == 1 { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        try session.write(Data("printf 'RESPONSIVE\\n'\r".utf8))
+        let result = try await lifecycle.value
+        XCTAssertEqual(result.condition, "command_finished")
+        XCTAssertTrue(result.command?.command?.contains("RESPONSIVE") == true)
+        try session.write(Data("printf '\\nAFTER_WAIT\\n'\r".utf8))
+        var sawAfter = false
+        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+        while ContinuousClock.now < deadline {
+            if history.commandHistory(limit: 16).contains(where: { $0.command?.contains("AFTER_WAIT") == true && $0.endedAt != nil }) { sawAfter = true; break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertTrue(sawAfter)
+        session.close()
+        _ = await session.wait()
+    }
+    func testWaitConditionRawValueRejectsUnknownValues() async throws {
+        XCTAssertNil(TerminalWaitCondition(rawValue: "foreground_idle"))
+        XCTAssertEqual(TerminalWaitCondition(rawValue: "command_finished"), .commandFinished)
+        XCTAssertEqual(TerminalWaitCondition(rawValue: "cwd_changed"), .cwdChanged)
+        let catalog = TerminalObservations()
+        _ = try catalog.create(id: "reject", workspace: "/tmp")
+        let tools = try WorkspaceTools(root: FileManager.default.temporaryDirectory, observations: catalog)
+        do {
+            _ = try await tools.execute(ToolCall(id: "bad", name: "terminal_wait", arguments: "{\"terminal_id\":\"reject\",\"after\":\"0\",\"condition\":\"foreground_idle\"}"))
+            XCTFail("Expected unknown condition to be rejected")
+        } catch {}
+    }
 }
