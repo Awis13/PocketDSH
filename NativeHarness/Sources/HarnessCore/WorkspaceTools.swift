@@ -36,11 +36,11 @@ public actor WorkspaceTools: ToolExecutor {
         }
     }
 
-    public func execute(_ call: ToolCall) async throws -> String {
+    public func execute(_ call: ToolCall) async throws -> ToolOutput {
         return try await execute(call, context: ToolExecutionContext())
     }
 
-    public func execute(_ call: ToolCall, context: ToolExecutionContext) async throws -> String {
+    public func execute(_ call: ToolCall, context: ToolExecutionContext) async throws -> ToolOutput {
         try Task.checkCancellation()
         guard let definition = definitions.first(where: { $0.name == call.name }) else { throw HarnessError.invalid("Unknown tool") }
         guard let args = try JSONSerialization.jsonObject(with: Data(call.arguments.utf8)) as? [String: String],
@@ -52,7 +52,7 @@ public actor WorkspaceTools: ToolExecutor {
             guard let observations else { throw HarnessError.invalid("Terminal observation is unavailable") }
             let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
             if call.name == "terminal_inspect" {
-                return String(decoding: try encoder.encode(observations.list()), as: UTF8.self)
+                return ToolOutput(output: String(decoding: try encoder.encode(observations.list()), as: UTF8.self))
             }
             guard let cursor = Int64(args["after"]!), let limit = Int(args["max_bytes"] ?? "4096") else { throw HarnessError.invalid("Invalid terminal read arguments") }
             let observation = try observations.find(args["terminal_id"]!)
@@ -61,7 +61,7 @@ public actor WorkspaceTools: ToolExecutor {
                 guard let timeout = Double(args["timeout_seconds"] ?? "30") else { throw HarnessError.invalid("Invalid wait timeout") }
                 result = try await observation.wait(after: cursor, maxBytes: limit, timeout: timeout)
             } else { result = try observation.read(after: cursor, maxBytes: limit) }
-            return try TerminalModelContext.encode(result)
+            return ToolOutput(output: try TerminalModelContext.encode(result))
         }
         if call.name == "shell" {
             let command = args["command"]!
@@ -71,7 +71,7 @@ public actor WorkspaceTools: ToolExecutor {
             defer { shellRunning = false }
             try await authorize(call, context: context)
             let block = try await performShell(command: command, call: call, context: context)
-            return String(decoding: try JSONEncoder().encode(block), as: UTF8.self)
+            return ToolOutput(output: String(decoding: try JSONEncoder().encode(block), as: UTF8.self))
         }
         let path = args["path"]!
         guard !path.hasPrefix("/"), !path.contains("\0") else { throw HarnessError.invalid("Use a relative workspace path") }
@@ -79,13 +79,13 @@ public actor WorkspaceTools: ToolExecutor {
         guard file.path == root.path || file.path.hasPrefix(root.path + "/") else { throw HarnessError.invalid("Path escapes workspace") }
         if call.name == "list_files" {
             let names = try FileManager.default.contentsOfDirectory(atPath: file.path).sorted()
-            return names.prefix(200).joined(separator: "\n") + (names.count > 200 ? "\n[truncated]" : "")
+            return ToolOutput(output: names.prefix(200).joined(separator: "\n") + (names.count > 200 ? "\n[truncated]" : ""))
         }
         let values = try file.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
         guard values.isRegularFile == true, (values.fileSize ?? Int.max) <= 65536 else { throw HarnessError.invalid("Expected a regular file no larger than 64 KiB") }
         let data = try Data(contentsOf: file)
         guard data.count <= 65536, let text = String(data: data, encoding: .utf8) else { throw HarnessError.invalid("File is too large or not UTF-8") }
-        if call.name == "read_file" { return text }
+        if call.name == "read_file" { return ToolOutput(output: text) }
 
         let old = args["old_text"]!, new = args["new_text"]!
         guard !old.isEmpty, text.components(separatedBy: old).count == 2 else { throw HarnessError.invalid("old_text must match exactly once") }
@@ -94,8 +94,11 @@ public actor WorkspaceTools: ToolExecutor {
         if !allowWrite { try await authorize(call, context: context) }
         try Task.checkCancellation()
         guard try Data(contentsOf: file) == data else { throw HarnessError.invalid("File changed; read it again") }
+        // Project the before/after while both are still in scope; the diff is a
+        // display artifact and never affects the write or the model-visible text.
+        let diffs = ToolDiff.hunks(path: path, before: text, after: replacement)
         try Data(replacement.utf8).write(to: file, options: .atomic)
-        return "Updated \(path)"
+        return ToolOutput(output: "Updated \(path)", diffs: diffs)
     }
     /// Explicit host/user command submission. Agent tool calls must use execute,
     /// which obtains a one-use approval before reaching the same execution slot.

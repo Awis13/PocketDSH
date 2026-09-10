@@ -22,14 +22,21 @@ private actor WaitingProvider: TestModelProvider {
     }
 }
 
+private final class UpdateBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var updates: [LiveUpdate] = []
+    func record(_ update: LiveUpdate) { lock.lock(); defer { lock.unlock() }; updates.append(update) }
+    func all() -> [LiveUpdate] { lock.lock(); defer { lock.unlock() }; return updates }
+}
+
 private actor RecoveryCountingTools: ToolExecutor {
     nonisolated let workspaceIdentity: String
     nonisolated let definitions: [ToolDefinition] = []
     private(set) var dispatches = 0
     init(workspace: String) { workspaceIdentity = workspace }
-    func execute(_ call: ToolCall) async throws -> String {
+    func execute(_ call: ToolCall) async throws -> ToolOutput {
         dispatches += 1
-        return "unexpected historical dispatch"
+        return ToolOutput(output: "unexpected historical dispatch")
     }
 }
 
@@ -58,6 +65,27 @@ private actor RecoveryCountingTools: ToolExecutor {
         let events = try await store.load(session: "a")
         XCTAssertEqual(events.last?.detail, "completed")
         XCTAssertTrue(SessionEngine.recovery(events).isEmpty)
+    }
+
+    func testEditToolResultCarriesInlineDiff() async throws {
+        let root = try directory()
+        try Data("alpha\nbeta\ngamma\n".utf8).write(to: root.appendingPathComponent("note.txt"))
+        let call = ToolCall(id: "c1", name: "edit_file", arguments: #"{"path":"note.txt","old_text":"beta","new_text":"BETA"}"#)
+        let provider = ScriptedProvider([
+            ModelReply(message: .init(role: "assistant", content: "", calls: [call]), finishReason: "tool_calls"),
+            ModelReply(message: .init(role: "assistant", content: "done"))])
+        let store = try EventStore(path: root.appendingPathComponent("history.sqlite").path)
+        let engine = SessionEngine(id: "a", store: store, provider: provider, tools: try WorkspaceTools(root: root, allowWrite: true))
+        let updates = UpdateBox()
+        _ = try await engine.run(prompt: "edit note", onUpdate: { updates.record($0) })
+        let diffs = updates.all().compactMap { update -> [ToolDiffHunk]? in
+            if case .toolResult(_, _, _, let diffs) = update { return diffs }
+            return nil
+        }.first
+        XCTAssertEqual(diffs?.count, 1)
+        XCTAssertEqual(diffs?.first?.path, "note.txt")
+        XCTAssertEqual(diffs?.first?.oldText?.contains("beta"), true)
+        XCTAssertEqual(diffs?.first?.newText.contains("BETA"), true)
     }
 
     func testRecoveryDistinguishesStartedFromUnstartedAndDoesNotInventSuccess() {
