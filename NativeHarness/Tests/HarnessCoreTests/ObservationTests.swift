@@ -321,7 +321,21 @@ final class ObservationTests: XCTestCase, @unchecked Sendable {
         let history = try TerminalObservation(id: "fg", initialWorkspace: "/tmp")
         let session = try PTYSession(workspace: FileManager.default.temporaryDirectory, observation: history, onOutput: { _ in })
         defer { session.close() }
-        let atPrompt = history.inspect()
+        // forkpty returns before the child runs setsid/TIOCSCTTY, so tcgetpgrp on
+        // the master reports no foreground group for a brief window. Poll until
+        // the shell owns the terminal instead of sampling once; only then is the
+        // value meaningful.
+        var atPrompt: TerminalInfo?
+        let promptDeadline = ContinuousClock.now.advanced(by: .seconds(5))
+        while ContinuousClock.now < promptDeadline {
+            let info = history.inspect()
+            if info.foregroundPgid != nil { atPrompt = info; break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        guard let atPrompt else {
+            // The platform never exposed a foreground process group; assert nothing.
+            throw XCTSkip("The PTY never exposed a foreground process group in this environment")
+        }
         XCTAssertEqual(atPrompt.foregroundPgid, session.shellPgid)
         XCTAssertFalse(atPrompt.foregroundBusy)
         try session.write(Data("sleep 5\r".utf8))

@@ -53,5 +53,7 @@ The real CLI probe `scripts/probe-native-observation.py` covers a blocking `comm
 
 macOS has no supported query for "is a process waiting on stdin", so exact stdin-waiting is not reported: DSH hardcodes that signal false and states only the foreground process group. This is not proof that a command is interactive, backgrounded, or complete.
 
+`foregroundBusy` is false when the group is unknown or unavailable — an unknown group is never reported as idle. It is true only when a known foreground group differs from the shell's own group. Immediately after `forkpty` returns, and before the child establishes its session and controlling terminal, the PTY has no foreground group and `foregroundPgid` is nil; it settles once the shell owns the terminal. Readers should treat nil as "unknown", not "idle".
+
 
 
