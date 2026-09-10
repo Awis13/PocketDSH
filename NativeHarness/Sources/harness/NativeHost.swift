@@ -210,12 +210,22 @@ private actor NativeHostSession {
         guard peerID == nil || peerID == peer.id else { throw HarnessError.busy }
         // Reserve the attachment before any suspension so another peer cannot win it.
         peerID = peer.id
+        // Read the durable inbox before replaying opened/synced. A failure here
+        // releases the reservation while the client is still silent, instead of
+        // leaving it "ready" on the binding the caller is about to remove.
+        let snapshot: NativeEvent
+        do { snapshot = try await queueSnapshot() }
+        catch {
+            if peerID == peer.id { peerID = nil }
+            throw error
+        }
+        guard peerID == peer.id else { throw HarnessError.busy }
         sink.attach(peer, opened: NativeEvent(op: "opened", session: id, model: model, workspace: workspace, ptyID: observation.id, capabilities: [NativeCompactionInfo.capability, NativeQueueInfo.capability]))
         for request in await approvals.pending() where peerID == peer.id {
             peer.send(NativeEvent(op: "approval", session: id, approval: NativeApproval(id: request.id, name: request.call.name, arguments: request.call.arguments, workspace: request.workspace)))
         }
-        // Recomputed from the inbox, never replayed from a stale journal copy.
-        try await sendQueueSnapshot(to: peer)
+        // Sent after `opened`, which resets the client's queue projection.
+        peer.send(snapshot)
     }
 
     /// A failed inbox read must never be published as an empty queue: that would
@@ -407,6 +417,12 @@ private actor NativeHostSession {
 }
 
 actor NativeHost {
+    /// Inbound frame budget. Prompts and queue edits are capped at 256 KiB of
+    /// UTF-8 by `EventStore`; JSON escapes control characters up to 6 bytes each,
+    /// so 2 MiB covers the worst-case 256 KiB prompt envelope plus headers. A
+    /// smaller cap silently dropped an edit of a near-limit prompt even though
+    /// the edit itself was valid.
+    static let maximumInboundFrameBytes = 2_097_152
     private let listener: NWListener
     private let workspace: String
     private let model: String
@@ -426,7 +442,7 @@ actor NativeHost {
         let parameters = NWParameters.tcp
         parameters.requiredLocalEndpoint = .hostPort(host: .ipv4(.loopback), port: port)
         let websocket = NWProtocolWebSocket.Options()
-        websocket.autoReplyPing = true; websocket.maximumMessageSize = 262144
+        websocket.autoReplyPing = true; websocket.maximumMessageSize = NativeHost.maximumInboundFrameBytes
         websocket.setClientRequestHandler(DispatchQueue(label: "native.harness.auth")) { _, headers in
             let auth = headers.first { $0.name.lowercased() == "authorization" }?.value
             let origin = headers.first { $0.name.lowercased() == "origin" }?.value

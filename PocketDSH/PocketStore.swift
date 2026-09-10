@@ -34,7 +34,7 @@ final class PocketStore: ObservableObject {
     var openDefaultTaskWhenConnected = false
     @Published var voiceRecording = false
     @Published var selectedID: String? { didSet {
-        if selectedID != oldValue { nativeRequests = []; nativeProtocolNotices = []; nativeCompaction = nil; nativeSupportsCompaction = false; nativeCompactionPending = false; nativeQueue = []; nativeQueueOmitted = 0; nativeSupportsQueue = false }
+        if selectedID != oldValue { nativeRequests = []; nativeProtocolNotices = []; nativeCompaction = nil; nativeSupportsCompaction = false; nativeCompactionPending = false; nativeQueue = []; nativeQueueOmitted = 0; nativeSupportsQueue = false; queueTextHandlers.removeAll() }
         persistPane()
     } }
     @Published var composerFocusRequest: UUID?
@@ -215,7 +215,7 @@ final class PocketStore: ObservableObject {
         nativeReconnect?.cancel(); nativeReconnect = nil
         generation = UUID(); connectionTask?.cancel(); connectionTask = nil
         nativeShell?.disconnect(); nativeShell = nil
-        native?.disconnect(); native = nil; nativeRequests = []; nativeProtocolNotices = []; nativeCompaction = nil; nativeSupportsCompaction = false; nativeCompactionPending = false; nativeQueue = []; nativeQueueOmitted = 0; nativeSupportsQueue = false; nativeReady = false; nativeSubmission = nil; api = nil
+        native?.disconnect(); native = nil; nativeRequests = []; nativeProtocolNotices = []; nativeCompaction = nil; nativeSupportsCompaction = false; nativeCompactionPending = false; nativeQueue = []; nativeQueueOmitted = 0; nativeSupportsQueue = false; nativeReady = false; nativeSubmission = nil; queueTextHandlers.removeAll(); api = nil
         socket?.cancel(with: .goingAway, reason: nil); socket = nil
         connected = false; connecting = false; loadingHistory = false; interactions = []; clientID = ""
     }
