@@ -67,7 +67,15 @@ final class NativeTerminalHostView: UIView {
             for key in ["c", "с"] { commands.append(UIKeyCommand(input: key, modifierFlags: .control, action: #selector(interruptInPlace))) }
         }
         if blockShortcut != nil {
-            commands += Self.blockKeys.map { UIKeyCommand(input: $0.1, modifierFlags: $0.2, action: #selector(blockKey(_:))) }
+            // Command+Option+Up/Down block navigation is owned by the hidden
+            // SwiftUI shortcuts in `NativeShellPane`. Registering the same chord
+            // here as a key command gives the press two owners, so only the
+            // copy/find/attach chords are claimed. `action(for:)` still consumes
+            // every block key in `pressesBegan` before SwiftTerm turns it into
+            // PTY bytes.
+            commands += Self.blockKeys
+                .filter { $0.0 != .previous && $0.0 != .next }
+                .map { UIKeyCommand(input: $0.1, modifierFlags: $0.2, action: #selector(blockKey(_:))) }
         }
         commands.forEach { $0.wantsPriorityOverSystemBehavior = true }
         return commands + (super.keyCommands ?? [])
@@ -301,6 +309,10 @@ struct NativeShellPane: View {
         }.overlay(alignment: .top) { if isExpanded { fullScreenTerminalBanner } }
         .onGeometryChange(for: CGSize.self) { $0.size } action: { viewportWidth = $0.width; viewportHeight = $0.height }
         .background { if canUseActions && !isExpanded { keyboardActions } }
+        // Pane focus and maximize must stay reachable when an interaction card
+        // hides the block actions or the full-screen terminal is expanded, so
+        // they are gated on the active pane alone and registered separately.
+        .background { if active { paneActions } }
         .onChange(of: findQuery) { _, _ in matchIndex = 0; navigationRevision += 1 }
         .onChange(of: client.completionReply?.id) { _, _ in receiveCompletion() }
         .onChange(of: store.draft) { _, text in
@@ -541,8 +553,14 @@ struct NativeShellPane: View {
                 Button("Previous match") { moveMatch(-1) }.keyboardShortcut("g", modifiers: [.command, .shift])
                 Button("Close find") { closeFind() }.keyboardShortcut(.escape, modifiers: [])
             }
-            // iPad hardware keyboards have no Mac menu; mirror the pane chords
-            // with hidden buttons so directional focus and maximize work there.
+        }.frame(width: 0, height: 0).opacity(0).accessibilityHidden(true)
+    }
+    /// Pane focus and maximize are owned only by the active pane so exactly one
+    /// registration exists per chord, independent of the block-action
+    /// conditions above. iPad hardware keyboards have no Mac menu, so hidden
+    /// buttons are the only handler there and on Mac Catalyst.
+    private var paneActions: some View {
+        Group {
             Button("Focus pane left") { focusPane(.left) }.keyboardShortcut(.leftArrow, modifiers: [.control, .option])
             Button("Focus pane right") { focusPane(.right) }.keyboardShortcut(.rightArrow, modifiers: [.control, .option])
             Button("Focus pane above") { focusPane(.up) }.keyboardShortcut(.upArrow, modifiers: [.control, .option])
