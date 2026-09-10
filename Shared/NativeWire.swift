@@ -11,6 +11,9 @@ struct NativeCommand: Codable, Sendable {
     var allow: Bool?
     var withTerminal: Bool?
     var completionKind: String?
+    var mode: String?
+    var action: String?
+    var itemID: String?
 }
 struct NativeChat: Codable, Sendable, Identifiable {
     var id: String
@@ -57,6 +60,7 @@ struct NativeEvent: Codable, Sendable {
     var request: NativeRequestInfo?
     var capabilities: [String]?
     var compaction: NativeCompactionInfo?
+    var queue: NativeQueueInfo?
     var extraFields: [String: NativeJSON] = [:]
 }
 
@@ -121,8 +125,9 @@ extension NativeEvent {
         request = try? c.decodeIfPresent(NativeRequestInfo.self, forKey: NativeWireKey("request"))
         capabilities = try c.decodeIfPresent([String].self, forKey: NativeWireKey("capabilities"))
         compaction = try? c.decodeIfPresent(NativeCompactionInfo.self, forKey: NativeWireKey("compaction"))
-        let known: Set<String> = ["op", "session", "id", "text", "bytes", "stage", "model", "workspace", "ptyID", "chats", "approval", "running", "gap", "sequence", "exitCode", "arguments", "failed", "sessions", "rows", "columns", "candidates", "limited", "request", "capabilities", "compaction"]
-        for key in c.allKeys where !known.contains(key.stringValue) || (key.stringValue == "request" && request == nil) || (key.stringValue == "compaction" && compaction == nil) {
+        queue = try? c.decodeIfPresent(NativeQueueInfo.self, forKey: NativeWireKey("queue"))
+        let known: Set<String> = ["op", "session", "id", "text", "bytes", "stage", "model", "workspace", "ptyID", "chats", "approval", "running", "gap", "sequence", "exitCode", "arguments", "failed", "sessions", "rows", "columns", "candidates", "limited", "request", "capabilities", "compaction", "queue"]
+        for key in c.allKeys where !known.contains(key.stringValue) || (key.stringValue == "request" && request == nil) || (key.stringValue == "compaction" && compaction == nil) || (key.stringValue == "queue" && queue == nil) {
             extraFields[key.stringValue] = try c.decode(NativeJSON.self, forKey: key)
         }
     }
@@ -154,6 +159,7 @@ extension NativeEvent {
         try c.encodeIfPresent(request, forKey: NativeWireKey("request"))
         try c.encodeIfPresent(capabilities, forKey: NativeWireKey("capabilities"))
         try c.encodeIfPresent(compaction, forKey: NativeWireKey("compaction"))
+        try c.encodeIfPresent(queue, forKey: NativeWireKey("queue"))
     }
 }
 
@@ -312,5 +318,41 @@ struct NativeCompactionInfo: Codable, Sendable, Equatable, Identifiable {
     /// Only the ordinary editor owns slash controls; active terminal programs own raw input.
     static func isEditorCommand(_ text: String, terminalRunning: Bool = false) -> Bool {
         !terminalRunning && text.trimmingCharacters(in: .whitespacesAndNewlines) == "/compact"
+    }
+}
+
+/// One pending command as the client sees it. `preview` is bounded so a full
+/// queue can never approach the host's per-message budget; `truncated` tells the
+/// client not to prefill an editor from a clipped prompt.
+struct NativeQueueItem: Codable, Sendable, Equatable, Identifiable {
+    static let queued = "queued"
+    static let steering = "steering"
+    var id: String
+    var preview: String
+    var placement: String
+    var truncated: Bool
+    var valid: Bool {
+        !id.isEmpty && id.utf8.count <= 128 && !id.contains("\0")
+            && (placement == Self.queued || placement == Self.steering)
+    }
+    var isSteering: Bool { placement == Self.steering }
+    var placementLabel: String { isSteering ? "Steers the current turn" : "Runs after the current turn" }
+}
+
+/// Additive session queue snapshot. The host recomputes it from the durable
+/// inbox on attach and after every mutation instead of replaying stale copies,
+/// so it is a projection of current state, never transcript history.
+struct NativeQueueInfo: Codable, Sendable, Equatable {
+    static let capability = "session.queue.v1"
+    var items: [NativeQueueItem]
+    var omitted: Int
+    var count: Int { items.count + omitted }
+    static func rejectionDetail(_ code: String) -> String {
+        switch code {
+        case "queue-item-not-found": return "That pending request is no longer queued."
+        case "steer-unavailable": return "Steering is only available while a turn is running."
+        case "BUSY": return "Wait for the current operation to finish, or use Stop."
+        default: return NativeRequestInfo.label(code)
+        }
     }
 }

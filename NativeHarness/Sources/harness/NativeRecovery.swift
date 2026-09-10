@@ -42,8 +42,11 @@ enum NativeRecovery {
         }
         if request?.isFinished == false { request?.interrupt() }
         if active || engineInterrupted || pendingCount > 0 || !tools.isEmpty {
+            let queued = pendingCount > 0
+                ? " \(pendingCount) queued request\(pendingCount == 1 ? "" : "s") preserved; resume explicitly to run."
+                : " Send a new request to continue."
             result.append(NativeEvent(op: "stage", session: session,
-                text: "Host restarted. Unfinished work was interrupted; queued requests were not run. Send a new request to continue.", stage: "interrupted", request: request))
+                text: "Host restarted. Unfinished work was interrupted; queued requests were not run." + queued, stage: "interrupted", request: request))
         }
         return result
     }

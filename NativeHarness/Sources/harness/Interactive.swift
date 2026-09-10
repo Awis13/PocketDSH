@@ -30,6 +30,7 @@ enum Interactive {
         var observation: TerminalRead?
         var operationID: String?
         var compaction: CompactionReceipt?
+        var queue: NativeQueueInfo?
     }
     static func emit(_ reply: Reply) {
         if let data = try? JSONEncoder().encode(reply) {
@@ -93,7 +94,15 @@ enum Interactive {
                     case "approval":
                         guard let id = command.id, let allow = command.allow else { throw HarnessError.invalid("id and allow required") }
                         emit(Reply(control: "approvalAnswered", removed: await approvals.answer(id: id, allow: allow)))
-                    case "pending": emit(Reply(control: "pending", ids: try await engine.pending().map(\.id)))
+                    case "pending":
+                        let pending = try await engine.pending()
+                        emit(Reply(control: "pending", ids: pending.map(\.id), queue: NativeQueueProjection.snapshot(pending)))
+                    case "edit":
+                        guard let id = command.id, let prompt = command.prompt else { throw HarnessError.invalid("id and prompt required") }
+                        emit(Reply(control: "edited", removed: try await engine.editPending(commandID: id, prompt: prompt)))
+                    case "steerPending":
+                        guard let id = command.id else { throw HarnessError.invalid("id required") }
+                        emit(Reply(control: "steered", removed: try await engine.steerPending(commandID: id)))
                     case "remove":
                         guard let id = command.id else { throw HarnessError.invalid("id required") }
                         emit(Reply(control: "removed", removed: try await engine.removePending(commandID: id)))
