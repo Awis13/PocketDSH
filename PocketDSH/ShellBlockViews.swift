@@ -54,8 +54,9 @@ struct ShellAttachmentStrip: View {
     @EnvironmentObject private var store: PocketStore
     @Environment(\.harnessTheme) private var theme
     @State private var preview: ShellContextAttachment?
+    @State private var diffPreview: ShellDiffAttachment?
     var body: some View {
-        if !store.shellAttachments.isEmpty {
+        if !store.shellAttachments.isEmpty || !store.shellDiffAttachments.isEmpty {
             ScrollView(.horizontal) {
                 HStack(spacing: 8) {
                     ForEach(store.shellAttachments) { attachment in
@@ -69,9 +70,27 @@ struct ShellAttachmentStrip: View {
                             }.accessibilityLabel("Remove attached block: " + attachment.command)
                         }.background(theme.accent.opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
                     }
+                    ForEach(store.shellDiffAttachments) { attachment in
+                        HStack(spacing: 2) {
+                            Button { diffPreview = attachment } label: {
+                                Label(attachment.path, systemImage: "plus.forwardslash.minus")
+                                    .lineLimit(1).frame(maxWidth: 230).padding(.horizontal, 10).frame(minHeight: 44)
+                            }.accessibilityLabel("Preview attached diff: " + attachment.path)
+                            Button { store.shellDiffAttachments.removeAll { $0.id == attachment.id } } label: {
+                                Image(systemName: "xmark").frame(width: 44, height: 44)
+                            }.accessibilityLabel("Remove attached diff: " + attachment.path)
+                        }.background(theme.accent.opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
+                    }
                 }
             }.scrollIndicators(.hidden).font(.caption.monospaced()).buttonStyle(.plain)
                 .accessibilityIdentifier("shellAttachments")
+                .sheet(item: $diffPreview) { attachment in
+                    NavigationStack {
+                        ScrollView { Text(attachment.readable).font(.body.monospaced()).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading).padding() }
+                            .navigationTitle("Attached diff")
+                            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { diffPreview = nil } } }
+                    }.tint(theme.accent)
+                }
                 .sheet(item: $preview) { attachment in
                     NavigationStack {
                         ScrollView {

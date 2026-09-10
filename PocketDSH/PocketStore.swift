@@ -94,10 +94,15 @@ final class PocketStore: ObservableObject {
     private var native: NativeChatConnection?
     @Published var nativeShell: NativeClient?
     @Published private var shellContextDrafts: [String: [ShellContextAttachment]] = [:]
+    @Published private var shellDiffDrafts: [String: [ShellDiffAttachment]] = [:]
     @Published private var shellBlockSelections: [String: String] = [:]
     var shellAttachments: [ShellContextAttachment] {
         get { shellContextDrafts[imageDraftKey] ?? savedShellAttachments(key: imageDraftKey) }
         set { saveShellAttachments(newValue, key: imageDraftKey) }
+    }
+    var shellDiffAttachments: [ShellDiffAttachment] {
+        get { shellDiffDrafts[imageDraftKey] ?? savedShellDiffAttachments(key: imageDraftKey) }
+        set { saveShellDiffAttachments(newValue, key: imageDraftKey) }
     }
     private func savedShellAttachments(key: String) -> [ShellContextAttachment] {
         guard let data = UserDefaults.standard.data(forKey: "harness.shellContext." + key),
@@ -108,6 +113,23 @@ final class PocketStore: ObservableObject {
         shellContextDrafts[key] = attachments
         if attachments.isEmpty { UserDefaults.standard.removeObject(forKey: "harness.shellContext." + key) }
         else if let data = try? JSONEncoder().encode(attachments) { UserDefaults.standard.set(data, forKey: "harness.shellContext." + key) }
+    }
+    private func savedShellDiffAttachments(key: String) -> [ShellDiffAttachment] {
+        guard let data = UserDefaults.standard.data(forKey: "harness.shellDiff." + key),
+              let saved = try? JSONDecoder().decode([ShellDiffAttachment].self, from: data) else { return [] }
+        return Array(saved.prefix(4))
+    }
+    private func saveShellDiffAttachments(_ attachments: [ShellDiffAttachment], key: String) {
+        shellDiffDrafts[key] = attachments
+        if attachments.isEmpty { UserDefaults.standard.removeObject(forKey: "harness.shellDiff." + key) }
+        else if let data = try? JSONEncoder().encode(attachments) { UserDefaults.standard.set(data, forKey: "harness.shellDiff." + key) }
+    }
+    @discardableResult func attachDiffAttachment(path: String, header: String, oldText: String, newText: String, base: String) -> Bool {
+        guard shellDiffAttachments.count < 4 else {
+            error = "Up to four diff hunks can be attached. Remove one before adding another."; return false
+        }
+        shellDiffAttachments.append(ShellDiffAttachment(path: path, header: header, oldText: oldText, newText: newText, base: base))
+        return true
     }
     var shellSelectedBlockID: String? {
         get { shellBlockSelections[imageDraftKey] }
@@ -123,7 +145,7 @@ final class PocketStore: ObservableObject {
     }
     private var nativeTranscript = NativeTranscript()
     var nativeReady = false
-    private var nativeSubmission: (id: String, text: String, session: String, draft: String, attachmentIDs: [String])?
+    private var nativeSubmission: (id: String, text: String, session: String, draft: String, attachmentIDs: [String], diffAttachmentIDs: [String])?
     private var queueTextHandlers: [String: (String?) -> Void] = [:]
     private var nativeReconnect: Task<Void, Never>?
     private var nativeRetry = 0
@@ -133,6 +155,7 @@ final class PocketStore: ObservableObject {
         var terminal: Bool
         var draft: String?
         var attachmentIDs: [String]?
+        var diffAttachmentIDs: [String]?
     }
     private func nativeRequestKey(_ id: String) -> String { "harness.nativeRequest." + endpoint + "|" + id }
     var usesNativeHarness: Bool { endpoint.hasPrefix("ws://") || endpoint.hasPrefix("wss://") }
@@ -699,6 +722,8 @@ extension PocketStore {
             let contextKey = endpoint + "|" + submission.session
             let remaining = (shellContextDrafts[contextKey] ?? savedShellAttachments(key: contextKey)).filter { !submission.attachmentIDs.contains($0.id) }
             saveShellAttachments(remaining, key: contextKey)
+            let remainingDiffs = (shellDiffDrafts[contextKey] ?? savedShellDiffAttachments(key: contextKey)).filter { !submission.diffAttachmentIDs.contains($0.id) }
+            saveShellDiffAttachments(remainingDiffs, key: contextKey)
             let key = "harness.drafts." + endpoint
             var saved = UserDefaults.standard.dictionary(forKey: key) as? [String: String] ?? [:]
             if saved[submission.session]?.trimmingCharacters(in: .whitespacesAndNewlines) == submission.draft {
@@ -785,6 +810,7 @@ extension PocketStore {
                let saved = try? JSONDecoder().decode(SavedNativeRequest.self, from: data), saved.id == event.id {
                 if draft.trimmingCharacters(in: .whitespacesAndNewlines) == (saved.draft ?? saved.text) { draft = "" }
                 shellAttachments.removeAll { (saved.attachmentIDs ?? []).contains($0.id) }
+                shellDiffAttachments.removeAll { (saved.diffAttachmentIDs ?? []).contains($0.id) }
                 UserDefaults.standard.removeObject(forKey: nativeRequestKey(id)); nativeSubmission = nil
             }
         }
@@ -811,7 +837,7 @@ extension PocketStore {
     func askFromShell(_ text: String, block: NativeBlock?) async {
         guard nativeReady, native != nil else { return }
         let question = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !question.isEmpty || block != nil || !shellAttachments.isEmpty else { error = "Enter a question or choose a command block to discuss."; return }
+        guard !question.isEmpty || block != nil || !shellAttachments.isEmpty || !shellDiffAttachments.isEmpty else { error = "Enter a question or choose a command block to discuss."; return }
         guard !submitting, nativeSubmission == nil else { return }
         guard draft.isEmpty || draft.trimmingCharacters(in: .whitespacesAndNewlines) == question else {
             error = "There is an unsent draft. Send or clear it before asking about another block."; return
@@ -827,7 +853,8 @@ extension PocketStore {
         let submittedDraft = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !submittedDraft.isEmpty else { return }
         let attachments = shellAttachments
-        let text = ShellPromptContent(question: submittedDraft, attachments: attachments).text
+        let diffs = shellDiffAttachments
+        let text = ShellPromptContent(question: submittedDraft, attachments: attachments, diffs: diffs).text
         let saved = UserDefaults.standard.data(forKey: nativeRequestKey(id)).flatMap { try? JSONDecoder().decode(SavedNativeRequest.self, from: $0) }
         let matching = saved.flatMap { $0.text == text ? $0 : nil }
         let request = pendingRequest.flatMap { $0.session == id && $0.text == text ? $0 : nil }
@@ -835,11 +862,12 @@ extension PocketStore {
             ?? (id: UUID().uuidString, text: text, session: id, imageIDs: [UUID]())
         // Explicit attachments replace the implicit live terminal tail. What the user previews
         // is the terminal context sent with this request, including on retry.
-        let terminal = matching?.terminal ?? (withTerminal && attachments.isEmpty)
+        let terminal = matching?.terminal ?? (withTerminal && attachments.isEmpty && diffs.isEmpty)
         let attachmentIDs = attachments.map(\.id)
-        if let data = try? JSONEncoder().encode(SavedNativeRequest(id: request.id, text: text, terminal: terminal, draft: submittedDraft, attachmentIDs: attachmentIDs)) { UserDefaults.standard.set(data, forKey: nativeRequestKey(id)) }
+        let diffAttachmentIDs = diffs.map(\.id)
+        if let data = try? JSONEncoder().encode(SavedNativeRequest(id: request.id, text: text, terminal: terminal, draft: submittedDraft, attachmentIDs: attachmentIDs, diffAttachmentIDs: diffAttachmentIDs)) { UserDefaults.standard.set(data, forKey: nativeRequestKey(id)) }
         pendingRequest = request; pendingText = submittedDraft; submitting = true
-        nativeSubmission = (request.id, text, id, submittedDraft, attachmentIDs)
+        nativeSubmission = (request.id, text, id, submittedDraft, attachmentIDs, diffAttachmentIDs)
         defer { submitting = false }
         do {
             try await native.send(NativeCommand(op: "prompt", session: id, id: request.id, text: text, withTerminal: terminal, mode: mode))

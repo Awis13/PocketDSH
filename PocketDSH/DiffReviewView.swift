@@ -68,7 +68,7 @@ struct DiffReviewView: View {
                     } else if diff.files.isEmpty {
                         notice("No changes against this base.", color: .secondary)
                     } else {
-                        ForEach(diff.files, id: \.path) { file in fileView(file) }
+                        ForEach(diff.files, id: \.path) { file in fileView(file, base: diff.base) }
                     }
                     if diff.truncated {
                         notice("Preview truncated by the host's size limits.", color: .orange)
@@ -96,7 +96,7 @@ struct DiffReviewView: View {
         Text(text).font(.callout).foregroundStyle(color).frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private func fileView(_ file: NativeDiffFile) -> some View {
+    private func fileView(_ file: NativeDiffFile, base: String) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 8) {
                 Image(systemName: symbol(file.status)).foregroundStyle(theme.accent).frame(width: 16)
@@ -115,7 +115,7 @@ struct DiffReviewView: View {
             } else if file.hunks.isEmpty {
                 Text(file.status == "renamed" ? "Renamed without content changes." : "No textual changes.").font(.caption).foregroundStyle(.secondary)
             } else {
-                ForEach(Array(file.hunks.enumerated()), id: \.offset) { _, hunk in hunkView(hunk) }
+                ForEach(Array(file.hunks.enumerated()), id: \.offset) { _, hunk in hunkView(hunk, path: file.path, base: base) }
             }
             if file.truncated { Text("This file's preview was truncated.").font(.caption2).foregroundStyle(.orange) }
         }
@@ -123,10 +123,19 @@ struct DiffReviewView: View {
         .background(theme.surface.opacity(0.45), in: RoundedRectangle(cornerRadius: 10))
     }
 
-    private func hunkView(_ hunk: NativeDiffHunk) -> some View {
+    private func hunkView(_ hunk: NativeDiffHunk, path: String, base: String) -> some View {
         VStack(alignment: .leading, spacing: 4) {
-            if !hunk.header.isEmpty {
-                Text(hunk.header).font(.caption2.monospaced()).foregroundStyle(.secondary).lineLimit(1)
+            HStack(spacing: 8) {
+                if !hunk.header.isEmpty {
+                    Text(hunk.header).font(.caption2.monospaced()).foregroundStyle(.secondary).lineLimit(1)
+                }
+                Spacer(minLength: 4)
+                Button {
+                    store.attachDiffAttachment(path: path, header: hunk.header, oldText: hunk.oldText, newText: hunk.newText, base: base)
+                } label: {
+                    Label("Attach hunk", systemImage: "paperclip").font(.caption)
+                }.buttonStyle(.borderless).accessibilityIdentifier("attachDiffHunk")
+                    .disabled(store.shellDiffAttachments.count >= 4)
             }
             if !hunk.oldText.isEmpty { code(hunk.oldText, sign: "−", color: .red) }
             if !hunk.newText.isEmpty { code(hunk.newText, sign: "+", color: .green) }

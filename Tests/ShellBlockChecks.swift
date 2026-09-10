@@ -102,5 +102,31 @@ import Foundation
         precondition(clipped.clipped && clipped.running && clipped.output.hasSuffix("LAST"))
         precondition(!clipped.output.contains("�"), "UTF-8 clipping must not split characters")
         print("PASS: block navigation, literal Unicode find, match limits, copy, immutable bounded context and replay formatting")
+
+        let diff = ShellDiffAttachment(path: "PocketDSH/A.swift", header: "@@ -1 +1 @@", oldText: "let a = 1", newText: "let a = 2", base: "HEAD")
+        let mixed = ShellPromptContent(question: "Review this hunk", attachments: [attachment], diffs: [diff])
+        let mixedParsed = ShellPromptContent.parse(mixed.text)
+        precondition(mixedParsed.question == mixed.question)
+        precondition(mixedParsed.attachments == [attachment] && mixedParsed.diffs == [diff])
+        precondition(mixedParsed.readableContext.contains("let a = 2") && mixedParsed.readableContext.contains("PocketDSH/A.swift"))
+        precondition(ShellPromptContent(question: mixed.question, attachments: [attachment], diffs: [diff]).text == mixed.text,
+                     "Diff context and identity must be stable for retries")
+        let diffOnly = ShellPromptContent(question: "Just the hunk", attachments: [], diffs: [diff])
+        precondition(ShellPromptContent.parse(diffOnly.text).diffs == [diff])
+        precondition(ShellPromptContent(question: "plain", attachments: [], diffs: []).text == "plain")
+
+        let hugeDiff = ShellDiffAttachment(path: String(repeating: "p", count: 2000), header: "", oldText: "", newText: String(repeating: "x", count: 20_000), base: "HEAD")
+        precondition(hugeDiff.path.utf8.count <= 1024 && hugeDiff.newText.utf8.count <= 8192 && hugeDiff.clipped)
+        precondition(!hugeDiff.newText.contains("�"), "Diff clipping must not split characters")
+
+        let legacy = "Explain" + ShellPromptContent.delimiter + #"[{"blockID":"b1","command":"make","directory":"/tmp","output":"boom","exitCode":1,"running":false,"clipped":false,"id":"fixed"}]"#
+        let legacyParsed = ShellPromptContent.parse(legacy)
+        precondition(legacyParsed.question == "Explain" && legacyParsed.attachments.count == 1 && legacyParsed.diffs.isEmpty,
+                     "A terminal-block-only payload without a kind must still parse")
+        let unknown = "Question" + ShellPromptContent.delimiter + #"[{"kind":"future","payload":"x"},{"kind":"terminal","blockID":"b2","command":"ls","directory":"/","output":"ok","exitCode":0,"running":false,"clipped":false,"id":"t2"}]"#
+        let unknownParsed = ShellPromptContent.parse(unknown)
+        precondition(unknownParsed.attachments.count == 1 && unknownParsed.attachments.first?.command == "ls" && unknownParsed.diffs.isEmpty,
+                     "An unknown attachment kind is skipped, not fatal")
+        print("PASS diff hunk attachment: round-trip, diff-only, bounds, unknown kinds and legacy prompt back-compat")
     }
 }
