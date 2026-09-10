@@ -14,6 +14,7 @@ struct NativeCommand: Codable, Sendable {
     var mode: String?
     var action: String?
     var itemID: String?
+    var base: String?
 }
 struct NativeChat: Codable, Sendable, Identifiable {
     var id: String
@@ -61,6 +62,7 @@ struct NativeEvent: Codable, Sendable {
     var capabilities: [String]?
     var compaction: NativeCompactionInfo?
     var queue: NativeQueueInfo?
+    var diff: NativeDiffInfo?
     var extraFields: [String: NativeJSON] = [:]
 }
 
@@ -126,8 +128,9 @@ extension NativeEvent {
         capabilities = try c.decodeIfPresent([String].self, forKey: NativeWireKey("capabilities"))
         compaction = try? c.decodeIfPresent(NativeCompactionInfo.self, forKey: NativeWireKey("compaction"))
         queue = try? c.decodeIfPresent(NativeQueueInfo.self, forKey: NativeWireKey("queue"))
-        let known: Set<String> = ["op", "session", "id", "text", "bytes", "stage", "model", "workspace", "ptyID", "chats", "approval", "running", "gap", "sequence", "exitCode", "arguments", "failed", "sessions", "rows", "columns", "candidates", "limited", "request", "capabilities", "compaction", "queue"]
-        for key in c.allKeys where !known.contains(key.stringValue) || (key.stringValue == "request" && request == nil) || (key.stringValue == "compaction" && compaction == nil) || (key.stringValue == "queue" && queue == nil) {
+        diff = try? c.decodeIfPresent(NativeDiffInfo.self, forKey: NativeWireKey("diff"))
+        let known: Set<String> = ["op", "session", "id", "text", "bytes", "stage", "model", "workspace", "ptyID", "chats", "approval", "running", "gap", "sequence", "exitCode", "arguments", "failed", "sessions", "rows", "columns", "candidates", "limited", "request", "capabilities", "compaction", "queue", "diff"]
+        for key in c.allKeys where !known.contains(key.stringValue) || (key.stringValue == "request" && request == nil) || (key.stringValue == "compaction" && compaction == nil) || (key.stringValue == "queue" && queue == nil) || (key.stringValue == "diff" && diff == nil) {
             extraFields[key.stringValue] = try c.decode(NativeJSON.self, forKey: key)
         }
     }
@@ -160,6 +163,7 @@ extension NativeEvent {
         try c.encodeIfPresent(capabilities, forKey: NativeWireKey("capabilities"))
         try c.encodeIfPresent(compaction, forKey: NativeWireKey("compaction"))
         try c.encodeIfPresent(queue, forKey: NativeWireKey("queue"))
+        try c.encodeIfPresent(diff, forKey: NativeWireKey("diff"))
     }
 }
 
@@ -371,4 +375,159 @@ struct NativeQueueInfo: Codable, Sendable, Equatable {
         default: return NativeRequestInfo.label(code)
         }
     }
+}
+
+/// Read-only workspace diff. A hunk mirrors the rendered `{path, oldText,
+/// newText}` model: removed lines and added lines, no context. The host bounds
+/// every field; the client re-clamps so an older or hostile host cannot inflate
+/// a single frame.
+struct NativeDiffHunk: Codable, Sendable, Equatable {
+    var path: String
+    var header: String
+    var oldText: String
+    var newText: String
+
+    init(path: String, header: String, oldText: String, newText: String) {
+        self.path = path; self.header = header; self.oldText = oldText; self.newText = newText
+    }
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        path = (try? c.decode(String.self, forKey: .path)) ?? ""
+        header = (try? c.decodeIfPresent(String.self, forKey: .header)) ?? ""
+        oldText = (try? c.decodeIfPresent(String.self, forKey: .oldText)) ?? ""
+        newText = (try? c.decodeIfPresent(String.self, forKey: .newText)) ?? ""
+    }
+    func clamped(maximumBytes: Int = NativeDiffLimits.maximumFieldBytes) -> NativeDiffHunk {
+        var copy = self
+        copy.path = NativeDiffInfo.prefixText(path, bytes: 1024)
+        copy.header = NativeDiffInfo.prefixText(header, bytes: 256)
+        copy.oldText = NativeDiffInfo.clampText(oldText, bytes: maximumBytes)
+        copy.newText = NativeDiffInfo.clampText(newText, bytes: maximumBytes)
+        return copy
+    }
+}
+
+struct NativeDiffFile: Codable, Sendable, Equatable {
+    var path: String
+    var oldPath: String?
+    var status: String
+    var binary: Bool
+    var additions: Int
+    var deletions: Int
+    var truncated: Bool
+    var hunks: [NativeDiffHunk]
+
+    init(path: String, oldPath: String? = nil, status: String, binary: Bool = false,
+         additions: Int = 0, deletions: Int = 0, truncated: Bool = false, hunks: [NativeDiffHunk] = []) {
+        self.path = path; self.oldPath = oldPath; self.status = status; self.binary = binary
+        self.additions = additions; self.deletions = deletions; self.truncated = truncated; self.hunks = hunks
+    }
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        path = (try? c.decode(String.self, forKey: .path)) ?? ""
+        oldPath = try? c.decodeIfPresent(String.self, forKey: .oldPath)
+        status = (try? c.decodeIfPresent(String.self, forKey: .status)) ?? "modified"
+        binary = (try? c.decodeIfPresent(Bool.self, forKey: .binary)) ?? false
+        additions = (try? c.decodeIfPresent(Int.self, forKey: .additions)) ?? 0
+        deletions = (try? c.decodeIfPresent(Int.self, forKey: .deletions)) ?? 0
+        truncated = (try? c.decodeIfPresent(Bool.self, forKey: .truncated)) ?? false
+        hunks = (try? c.decodeIfPresent([NativeDiffHunk].self, forKey: .hunks)) ?? []
+    }
+}
+
+struct NativeDiffInfo: Codable, Sendable, Equatable {
+    static let capability = "workspace.diff.v1"
+    var base: String
+    var resolvedBase: String?
+    var files: [NativeDiffFile]
+    var truncated: Bool
+    var error: String?
+
+    init(base: String, resolvedBase: String? = nil, files: [NativeDiffFile] = [], truncated: Bool = false, error: String? = nil) {
+        self.base = base; self.resolvedBase = resolvedBase; self.files = files
+        self.truncated = truncated; self.error = error
+    }
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        base = (try? c.decodeIfPresent(String.self, forKey: .base)) ?? "HEAD"
+        resolvedBase = try? c.decodeIfPresent(String.self, forKey: .resolvedBase)
+        files = (try? c.decodeIfPresent([NativeDiffFile].self, forKey: .files)) ?? []
+        truncated = (try? c.decodeIfPresent(Bool.self, forKey: .truncated)) ?? false
+        error = try? c.decodeIfPresent(String.self, forKey: .error)
+    }
+
+    var statusLabel: String {
+        switch base {
+        case "worktree": return "Working tree"
+        case "staged": return "Staged"
+        case "HEAD": return "Working tree vs HEAD"
+        default: return "Branch vs " + base
+        }
+    }
+
+    var summary: String {
+        let additions = files.reduce(0) { $0 + $1.additions }
+        let deletions = files.reduce(0) { $0 + $1.deletions }
+        return "\(files.count) file\(files.count == 1 ? "" : "s"), +\(additions) −\(deletions)"
+    }
+
+    /// Re-clamps an incoming payload to the same hard bounds the host enforces.
+    func sanitized(maximumFiles: Int = NativeDiffLimits.maximumFiles,
+                   maximumHunksPerFile: Int = NativeDiffLimits.maximumHunksPerFile,
+                   maximumTotalBytes: Int = NativeDiffLimits.maximumTotalBytes) -> NativeDiffInfo {
+        var copy = self
+        copy.base = NativeDiffInfo.prefixText(base, bytes: 200)
+        copy.resolvedBase = resolvedBase.map { NativeDiffInfo.prefixText($0, bytes: 128) }
+        copy.error = error.map { NativeDiffInfo.prefixText($0, bytes: 400) }
+        var total = 0, clamped = truncated
+        var result: [NativeDiffFile] = []
+        for var file in files {
+            guard result.count < maximumFiles else { clamped = true; break }
+            file.path = NativeDiffInfo.prefixText(file.path, bytes: 1024)
+            file.oldPath = file.oldPath.map { NativeDiffInfo.prefixText($0, bytes: 1024) }
+            file.additions = max(0, file.additions)
+            file.deletions = max(0, file.deletions)
+            var hunks: [NativeDiffHunk] = []
+            for hunk in file.hunks {
+                guard hunks.count < maximumHunksPerFile else { file.truncated = true; clamped = true; break }
+                let clampedHunk = hunk.clamped()
+                let size = clampedHunk.oldText.utf8.count + clampedHunk.newText.utf8.count
+                guard total + size <= maximumTotalBytes else { file.truncated = true; clamped = true; break }
+                total += size
+                if clampedHunk != hunk { clamped = true }
+                hunks.append(clampedHunk)
+            }
+            file.hunks = hunks
+            if file.truncated { clamped = true }
+            result.append(file)
+        }
+        copy.files = result
+        copy.truncated = clamped
+        return copy
+    }
+
+    static func clampText(_ text: String, bytes: Int) -> String {
+        var value = text
+        let lines = value.split(separator: "\n", omittingEmptySubsequences: false)
+        if lines.count > NativeDiffLimits.maximumLines { value = lines.prefix(NativeDiffLimits.maximumLines).joined(separator: "\n") }
+        return value.utf8.count > bytes ? prefixText(value, bytes: bytes) : value
+    }
+
+    static func prefixText(_ text: String, bytes: Int) -> String {
+        var end = text.startIndex, count = 0
+        while end < text.endIndex {
+            let next = text.index(after: end), size = text[end..<next].utf8.count
+            guard count + size <= bytes else { break }
+            count += size; end = next
+        }
+        return String(text[..<end])
+    }
+}
+
+enum NativeDiffLimits {
+    static let maximumFiles = 200
+    static let maximumHunksPerFile = 200
+    static let maximumFieldBytes = 16_384
+    static let maximumLines = 300
+    static let maximumTotalBytes = 262_144
 }
