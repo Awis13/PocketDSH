@@ -26,7 +26,7 @@ public final class PTYSession: @unchecked Sendable {
 
     /// The single canonical workspace path. Callers must pass this same string
     /// to the observation so the shell's `getcwd()` never looks like a change.
-    /// `URL.resolvingSymlinksInPath()` does not resolve macOS firmlinks such as
+    /// `URL.resolvingSymlinksInPath()` declines to resolve some symlinks such as
     /// `/var` and `/tmp`, so use `realpath(3)`, which matches `getcwd()`.
     public static func canonicalWorkspace(_ workspace: URL) -> String {
         let standardized = workspace.standardizedFileURL.path

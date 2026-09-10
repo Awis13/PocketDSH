@@ -366,7 +366,8 @@ final class ObservationTests: XCTestCase, @unchecked Sendable {
         let tools = try WorkspaceTools(root: FileManager.default.temporaryDirectory, observations: catalog)
         let output = try await tools.execute(ToolCall(id: "i", name: "terminal_inspect", arguments: "{}")).output
         let list = try JSONSerialization.jsonObject(with: Data(output.utf8)) as! [[String: Any]]
-        XCTAssertNil(list.first?["foregroundBusy"])
+        XCTAssertTrue(list.first?.keys.contains("foregroundBusy") == true, "Unknown foregroundBusy must serialize as an explicit key")
+        XCTAssertTrue(list.first?["foregroundBusy"] is NSNull, "Unknown foregroundBusy must serialize as null, matching the docs")
         XCTAssertNil(list.first?["foregroundPgid"])
         XCTAssertTrue(tools.definitions.first { $0.name == "terminal_inspect" }?.description.contains("foreground") == true)
     }
@@ -395,11 +396,13 @@ final class ObservationTests: XCTestCase, @unchecked Sendable {
         let session = try PTYSession(workspace: link, observation: history, segmented: true, onOutput: { _ in })
         defer { session.close() }
         // Wait for the initial prompt so the shell has reported its directory.
+        var promptSeen = false
         let promptDeadline = ContinuousClock.now.advanced(by: .seconds(5))
         while ContinuousClock.now < promptDeadline {
-            if history.commandHistory(limit: 1).contains(where: { $0.command == nil && $0.endedAt != nil }) { break }
+            if history.commandHistory(limit: 1).contains(where: { $0.command == nil && $0.endedAt != nil }) { promptSeen = true; break }
             try await Task.sleep(for: .milliseconds(10))
         }
+        XCTAssertTrue(promptSeen, "The shell must start and report its initial prompt")
         XCTAssertEqual(history.currentDirectory, canonical, "The shell must agree with the seeded workspace")
         let changed = try await history.wait(after: 0, timeout: 0.3, condition: .cwdChanged)
         XCTAssertTrue(changed.timedOut, "A matching canonical path must not look like a cwd change")

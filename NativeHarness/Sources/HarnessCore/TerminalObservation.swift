@@ -49,6 +49,29 @@ public struct TerminalInfo: Codable, Sendable {
     /// window before the child owns the terminal, or after the PTY closes.
     /// An unknown group is never reported as idle.
     public let foregroundBusy: Bool?
+
+    private enum CodingKeys: String, CodingKey {
+        case id, initialWorkspace, firstCursor, latestCursor, retainedBytes, pendingWaits, exit
+        case foregroundPgid, foregroundBusy
+    }
+
+    /// The documented wire shape promises an explicit `null` for an unknown
+    /// `foregroundBusy`, but synthesized `Codable` omits nil optionals. Encode
+    /// the key unconditionally so the JSON matches the docs; `foregroundPgid`
+    /// keeps its existing omit-when-nil behavior. Decoding stays synthesized and
+    /// therefore tolerant of a missing or null key.
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(initialWorkspace, forKey: .initialWorkspace)
+        try container.encode(firstCursor, forKey: .firstCursor)
+        try container.encode(latestCursor, forKey: .latestCursor)
+        try container.encode(retainedBytes, forKey: .retainedBytes)
+        try container.encode(pendingWaits, forKey: .pendingWaits)
+        try container.encodeIfPresent(exit, forKey: .exit)
+        try container.encodeIfPresent(foregroundPgid, forKey: .foregroundPgid)
+        try container.encode(foregroundBusy, forKey: .foregroundBusy)
+    }
 }
 
 public struct TerminalRead: Codable, Sendable {
