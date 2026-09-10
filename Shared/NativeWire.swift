@@ -63,6 +63,7 @@ struct NativeEvent: Codable, Sendable {
     var compaction: NativeCompactionInfo?
     var queue: NativeQueueInfo?
     var diff: NativeDiffInfo?
+    var toolDiffs: [NativeInlineDiffHunk]?
     var extraFields: [String: NativeJSON] = [:]
 }
 
@@ -129,8 +130,9 @@ extension NativeEvent {
         compaction = try? c.decodeIfPresent(NativeCompactionInfo.self, forKey: NativeWireKey("compaction"))
         queue = try? c.decodeIfPresent(NativeQueueInfo.self, forKey: NativeWireKey("queue"))
         diff = try? c.decodeIfPresent(NativeDiffInfo.self, forKey: NativeWireKey("diff"))
-        let known: Set<String> = ["op", "session", "id", "text", "bytes", "stage", "model", "workspace", "ptyID", "chats", "approval", "running", "gap", "sequence", "exitCode", "arguments", "failed", "sessions", "rows", "columns", "candidates", "limited", "request", "capabilities", "compaction", "queue", "diff"]
-        for key in c.allKeys where !known.contains(key.stringValue) || (key.stringValue == "request" && request == nil) || (key.stringValue == "compaction" && compaction == nil) || (key.stringValue == "queue" && queue == nil) || (key.stringValue == "diff" && diff == nil) {
+        toolDiffs = try? c.decodeIfPresent([NativeInlineDiffHunk].self, forKey: NativeWireKey("toolDiffs"))
+        let known: Set<String> = ["op", "session", "id", "text", "bytes", "stage", "model", "workspace", "ptyID", "chats", "approval", "running", "gap", "sequence", "exitCode", "arguments", "failed", "sessions", "rows", "columns", "candidates", "limited", "request", "capabilities", "compaction", "queue", "diff", "toolDiffs"]
+        for key in c.allKeys where !known.contains(key.stringValue) || (key.stringValue == "request" && request == nil) || (key.stringValue == "compaction" && compaction == nil) || (key.stringValue == "queue" && queue == nil) || (key.stringValue == "diff" && diff == nil) || (key.stringValue == "toolDiffs" && toolDiffs == nil) {
             extraFields[key.stringValue] = try c.decode(NativeJSON.self, forKey: key)
         }
     }
@@ -164,6 +166,7 @@ extension NativeEvent {
         try c.encodeIfPresent(compaction, forKey: NativeWireKey("compaction"))
         try c.encodeIfPresent(queue, forKey: NativeWireKey("queue"))
         try c.encodeIfPresent(diff, forKey: NativeWireKey("diff"))
+        try c.encodeIfPresent(toolDiffs, forKey: NativeWireKey("toolDiffs"))
     }
 }
 
@@ -374,6 +377,70 @@ struct NativeQueueInfo: Codable, Sendable, Equatable {
         case "BUSY": return "Wait for the current operation to finish, or use Stop."
         default: return NativeRequestInfo.label(code)
         }
+    }
+}
+
+/// One inline edit hunk published beside a native `toolResult`. Deliberately
+/// distinct from `NativeDiffHunk` (the read-only `workspace.diff.v1`
+/// projection): `oldText` is nullable so a pure insertion is representable, and
+/// there is no `header`/`base`. The host bounds every field; the client
+/// re-clamps so an older or hostile host cannot inflate a single frame.
+struct NativeInlineDiffHunk: Codable, Sendable, Equatable {
+    var path: String
+    var oldText: String?
+    var newText: String
+
+    private enum CodingKeys: String, CodingKey { case path, oldText, newText }
+
+    init(path: String, oldText: String?, newText: String) {
+        self.path = path; self.oldText = oldText; self.newText = newText
+    }
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        path = (try? c.decode(String.self, forKey: .path)) ?? ""
+        oldText = try? c.decodeIfPresent(String.self, forKey: .oldText)
+        newText = (try? c.decodeIfPresent(String.self, forKey: .newText)) ?? ""
+    }
+
+    /// Emit an explicit `null` for a nil `oldText` instead of omitting the key.
+    /// DSH's wire always carries `{"path","oldText":null,"newText"}` for a pure
+    /// insertion, and the synthesized encoder would `encodeIfPresent` the key
+    /// away. Keep the key unconditionally present so the frame stays
+    /// unmistakably distinct from the singular `diff` field (`NativeDiffInfo`,
+    /// `workspace.diff.v1`), a different contract whose hunks have no nullable
+    /// `oldText`. Decoding still tolerates both a missing key and an explicit
+    /// null.
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(path, forKey: .path)
+        if let oldText { try c.encode(oldText, forKey: .oldText) } else { try c.encodeNil(forKey: .oldText) }
+        try c.encode(newText, forKey: .newText)
+    }
+    func clamped(maximumBytes: Int = NativeDiffLimits.maximumFieldBytes) -> NativeInlineDiffHunk {
+        var copy = self
+        copy.path = NativeDiffInfo.prefixText(path, bytes: 1024)
+        copy.oldText = oldText.map { NativeDiffInfo.clampText($0, bytes: maximumBytes) }
+        copy.newText = NativeDiffInfo.clampText(newText, bytes: maximumBytes)
+        return copy
+    }
+
+    /// Re-clamps a whole payload to the same hard bounds the host enforces. An
+    /// empty path has no renderable identity and is dropped.
+    static func sanitized(_ hunks: [NativeInlineDiffHunk],
+                          maximumHunks: Int = NativeDiffLimits.maximumHunksPerFile,
+                          maximumTotalBytes: Int = NativeDiffLimits.maximumTotalBytes) -> [NativeInlineDiffHunk] {
+        var result: [NativeInlineDiffHunk] = []
+        var total = 0
+        for hunk in hunks {
+            guard result.count < maximumHunks else { break }
+            let clamped = hunk.clamped()
+            guard !clamped.path.isEmpty else { continue }
+            let size = (clamped.oldText?.utf8.count ?? 0) + clamped.newText.utf8.count
+            guard total + size <= maximumTotalBytes else { break }
+            total += size
+            result.append(clamped)
+        }
+        return result
     }
 }
 

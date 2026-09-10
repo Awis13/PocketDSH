@@ -140,6 +140,19 @@ enum NativeDiffPresentation {
     }
 }
 
+/// Maps the core inline edit projection onto the wire. Kept pure and internal so
+/// the host test target can exercise the projection without a live WebSocket,
+/// mirroring `NativeDiffPresentation`. An all-dropped payload becomes nil so the
+/// frame omits `toolDiffs` entirely instead of publishing an empty array.
+enum NativeInlineDiffPresentation {
+    static func toolDiffs(_ diffs: [ToolDiffHunk]) -> [NativeInlineDiffHunk]? {
+        guard !diffs.isEmpty else { return nil }
+        let bounded = NativeInlineDiffHunk.sanitized(
+            diffs.map { NativeInlineDiffHunk(path: $0.path, oldText: $0.oldText, newText: $0.newText) })
+        return bounded.isEmpty ? nil : bounded
+    }
+}
+
 extension NativeDiffInfo {
     init(_ result: WorkspaceDiff) {
         self.init(base: result.base, resolvedBase: result.resolvedBase,
@@ -187,7 +200,12 @@ private actor NativeHostSession {
             case .reasoning(let text): sink.send(NativeEvent(op: "reasoning", session: id, text: text))
             case .tool: break
             case .toolCall(let call): sink.send(NativeEvent(op: "toolCall", session: id, id: call.id, text: call.name, arguments: call.arguments))
-            case .toolResult(let callID, let output, let failed): sink.send(NativeEvent(op: "toolResult", session: id, id: callID, text: output, failed: failed))
+            case .toolResult(let callID, let output, let failed, let diffs):
+                // Enforce the documented wire bound at the mapping site, not only
+                // inside the core projection, so a future core regression cannot
+                // emit an unbounded frame. An all-dropped payload becomes nil.
+                sink.send(NativeEvent(op: "toolResult", session: id, id: callID, text: output, failed: failed,
+                                      toolDiffs: NativeInlineDiffPresentation.toolDiffs(diffs)))
             case .compaction(let receipt):
                 if let info = try? NativeCompactionInfo(encoding: receipt) {
                     sink.send(NativeEvent(op: "compaction", session: id, id: info.id, compaction: info))

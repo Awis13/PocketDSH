@@ -70,7 +70,7 @@ actor CompactionTools: ToolExecutor {
     nonisolated let definitions = [ToolDefinition(name: "fixture_tool", description: "Test side effects", properties: [:], required: [])]
     private(set) var count = 0
     init(_ path: String) { workspaceIdentity = path }
-    func execute(_ call: ToolCall) async throws -> String { count += 1; return "side effect" }
+    func execute(_ call: ToolCall) async throws -> ToolOutput { count += 1; return ToolOutput(output: "side effect") }
 }
 
 @MainActor class CompactionTestCase: XCTestCase {

@@ -54,9 +54,20 @@ public struct SessionEvent: Codable, Sendable {
     }
 }
 
+/// The result of one tool call: the model-visible output plus any inline diff
+/// the host wants to render beside it. Only `edit_file` currently populates
+/// `diffs`; every other tool leaves it empty.
+public struct ToolOutput: Sendable, Equatable {
+    public var output: String
+    public var diffs: [ToolDiffHunk]
+    public init(output: String, diffs: [ToolDiffHunk] = []) {
+        self.output = output; self.diffs = diffs
+    }
+}
+
 public enum LiveUpdate: Sendable {
     case text(String), reasoning(String), tool(String)
-    case toolCall(ToolCall), toolResult(id: String, output: String, failed: Bool)
+    case toolCall(ToolCall), toolResult(id: String, output: String, failed: Bool, diffs: [ToolDiffHunk])
     case providerHeaders, providerData
     case approval(ApprovalRequest), shell(ShellOutput)
     case diagnostic(DiagnosticEvent)
@@ -80,12 +91,12 @@ public struct ToolDefinition: Sendable {
 public protocol ToolExecutor: Sendable {
     var definitions: [ToolDefinition] { get }
     var workspaceIdentity: String { get }
-    func execute(_ call: ToolCall) async throws -> String
-    func execute(_ call: ToolCall, context: ToolExecutionContext) async throws -> String
+    func execute(_ call: ToolCall) async throws -> ToolOutput
+    func execute(_ call: ToolCall, context: ToolExecutionContext) async throws -> ToolOutput
 }
 
 public extension ToolExecutor {
-    func execute(_ call: ToolCall, context: ToolExecutionContext) async throws -> String {
+    func execute(_ call: ToolCall, context: ToolExecutionContext) async throws -> ToolOutput {
         try await execute(call)
     }
 }

@@ -99,7 +99,7 @@ final class ObservationTests: XCTestCase, @unchecked Sendable {
         let tools = try WorkspaceTools(root: FileManager.default.temporaryDirectory, observations: catalog)
         let waiter = Task { try await tools.execute(ToolCall(id: "wait", name: "terminal_wait", arguments: "{\"terminal_id\":\"user-terminal\",\"after\":\"0\",\"timeout_seconds\":\"1\"}")) }
         history.append(Data("update continues".utf8))
-        let result = try JSONSerialization.jsonObject(with: Data(try await waiter.value.utf8)) as! [String: Any]
+        let result = try JSONSerialization.jsonObject(with: Data(try await waiter.value.output.utf8)) as! [String: Any]
         XCTAssertEqual(result["text"] as? String, "update continues")
         XCTAssertNil(result["bytes"])
         XCTAssertFalse(tools.definitions.contains { $0.name == "terminal_send" })

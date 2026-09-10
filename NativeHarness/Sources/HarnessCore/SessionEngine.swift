@@ -316,21 +316,24 @@ public actor SessionEngine {
                         trace.record(.toolStarted)
                         onUpdate(.tool(call.name))
                         onUpdate(.toolCall(call))
-                        let output: String
+                        let toolOutput: ToolOutput
                         var failed = false
                         do {
                             let context = ToolExecutionContext(update: onUpdate, record: { event in
                                 try await self.save([event], trace: trace)
                             })
-                            output = try await tools.execute(call, context: context)
+                            toolOutput = try await tools.execute(call, context: context)
                             trace.record(.toolCompleted)
                         }
                         catch is CancellationError { throw CancellationError() }
-                        catch { failed = true; trace.record(.toolFailed, code: DiagnosticTrace.errorCode(error)); output = "Tool error: \(error)" }
-                        let result = Message(role: "tool", content: output, toolCallID: call.id)
+                        catch {
+                            failed = true; trace.record(.toolFailed, code: DiagnosticTrace.errorCode(error))
+                            toolOutput = ToolOutput(output: "Tool error: \(error)")
+                        }
+                        let result = Message(role: "tool", content: toolOutput.output, toolCallID: call.id)
                         try await save([SessionEvent("message", message: result)], trace: trace)
                         history.append(result)
-                        onUpdate(.toolResult(id: call.id, output: output, failed: failed))
+                        onUpdate(.toolResult(id: call.id, output: toolOutput.output, failed: failed, diffs: toolOutput.diffs))
                     }
                 }
                 if !finishedTurn { throw HarnessError.limit }
