@@ -83,16 +83,28 @@ enum PaneFocusNavigator {
     private static func descend(_ node: Node, active: String, direction: PaneFocusDirection, range: ClosedRange<Double>, activePerpendicular: Double) -> String? {
         guard case .split(let axis, let first, let second) = node else { return nil }
         if axis == movementAxis(direction) {
-            // The move crosses this split when `active` sits on its far side.
-            let crosses = (direction == .left || direction == .up) ? second.contains(active) : first.contains(active)
-            if crosses {
-                let target = (direction == .left || direction == .up) ? first : second
-                return edge(target, toward: opposite(direction), range: range, activePerpendicular: activePerpendicular)
+            // A parallel split is a boundary the move may cross, but only after
+            // the active path has been searched: without this the nearest
+            // parallel boundary on that path would be skipped and a left-leaning
+            // nest (for example `V(V(a, d), b)`) would jump past its neighbour.
+            if first.contains(active) {
+                if let deeper = descend(first, active: active, direction: direction, range: range, activePerpendicular: activePerpendicular) {
+                    return deeper
+                }
+                // The sibling lies further along a positive move only.
+                return direction == .right || direction == .down
+                    ? edge(second, toward: opposite(direction), range: range, activePerpendicular: activePerpendicular)
+                    : nil
             }
-            // Otherwise keep descending toward `active`; a parallel split does
-            // not change the perpendicular coordinate.
-            if first.contains(active) { return descend(first, active: active, direction: direction, range: range, activePerpendicular: activePerpendicular) }
-            if second.contains(active) { return descend(second, active: active, direction: direction, range: range, activePerpendicular: activePerpendicular) }
+            if second.contains(active) {
+                if let deeper = descend(second, active: active, direction: direction, range: range, activePerpendicular: activePerpendicular) {
+                    return deeper
+                }
+                // The sibling lies further along a negative move only.
+                return direction == .left || direction == .up
+                    ? edge(first, toward: opposite(direction), range: range, activePerpendicular: activePerpendicular)
+                    : nil
+            }
             return nil
         }
         // Perpendicular split: narrow the active pane's row/column range so the
