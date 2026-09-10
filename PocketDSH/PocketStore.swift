@@ -118,7 +118,7 @@ final class PocketStore: ObservableObject {
         return true
     }
     private var nativeTranscript = NativeTranscript()
-    private var nativeReady = false
+    var nativeReady = false
     private var nativeSubmission: (id: String, text: String, session: String, draft: String, attachmentIDs: [String])?
     private var nativeReconnect: Task<Void, Never>?
     private var nativeRetry = 0
