@@ -17,15 +17,59 @@ window.__ModuleLoader__.load({id:'dsh-images', factory(require) {
         h('button',{type:'button',onClick:()=>dialog.current.close(),'aria-label':'Close image',style:{display:'block',marginLeft:'auto',marginBottom:12}},'Close'),
         url&&h('img',{src:url,alt:label,style:{display:'block',maxWidth:'85vw',maxHeight:'80vh',objectFit:'contain'}})));
   }
-  function ImageResult({block, resolve, inspect}) {
-    const images=(block.content||[]).filter(b=>b.type==='image'&&b.attachment?.attachmentId);
-    const text=(block.content||[]).filter(b=>b.type==='text').map(b=>b.text).join('\n');
-    return h('section',{'aria-label':'Agent image output',style:{padding:'12px 0',display:'grid',gap:10}},
-      h('div',{style:{fontSize:13,opacity:.7}},block.kind==='tool-result'?(block.isError?'Image could not be attached':'Image attached'):'Opening image…'),
-      ...images.map((b,i)=>h(Picture,{key:b.attachment.attachmentId+':'+i,attachment:b.attachment,resolve})),
-      h('details',null,h('summary',null,'Image details'),h('pre',{style:{whiteSpace:'pre-wrap',overflowWrap:'anywhere',fontSize:12}},text||block.argsRaw||''),inspect&&h('button',{onClick:inspect},'Inspect')));
+  // Only durable tool-result attachments enter the gallery. Never interpret a
+  // filesystem path or a Markdown URL as an image download capability.
+  function toolImages(content, images = new Map()) {
+    for (const part of Array.isArray(content) ? content : []) {
+      if (part?.type !== 'tool-result' || part.isError) continue;
+      for (const child of Array.isArray(part.content) ? part.content : []) {
+        const ref = child?.type === 'image' ? child.attachment : null;
+        if (ref && /^sha256:[a-f0-9]{64}$/.test(ref.attachmentId) &&
+            /^image\//.test(ref.mediaType) && Number.isSafeInteger(ref.bytes) && ref.bytes > 0) {
+          images.set(ref.attachmentId, ref);
+        }
+      }
+      toolImages(part.content, images);
+    }
+    return images;
   }
-  return {inject:['slots','uiConversation'],apply(ctx){
-    ctx.slots.inject('tool.call.toolview',()=>ctx.slots.register({name:'tool.call.toolview',key:'read_image',inject(sessionId){return {resolve:attachment=>ctx.uiConversation.imageUrl(sessionId,attachment)}}},ImageResult));
+  const galleryDefinition = {
+    kind: 'dsh-image-gallery', target: 'chat',
+    match(event) {
+      if (!['turn/start', 'turn/end', 'tool/result', 'assistant/message'].includes(event.type)) return null;
+      if (['tool/result', 'assistant/message'].includes(event.type) && event.surfaceOp !== 'append') return null;
+      if (!Number.isSafeInteger(event.data?.turn)) return null;
+      return {id: String(event.data.turn), role: event.type === 'turn/start' ? 'start' : 'update'};
+    },
+    start() { return {}; },
+    update(context) { return context.state; },
+    buildViewNode(context) {
+      const location = context.start?.location ?? context.matches[0]?.location;
+      if (!location || !['turn', 'step'].includes(location.kind)) return null;
+      const tail = location.turn.data.get('turn-tail');
+      const images = new Map();
+      for (const {event} of context.matches) {
+        if (event.type === 'tool/result' && event.surfaceOp === 'append') {
+          toolImages(event.data?.message?.content, images);
+        }
+      }
+      if (!images.size || !tail?.closing) return null;
+      // Between the final assistant and the action footer (+0.1). This keeps
+      // the gallery outside compact process disclosure and preserves Branch.
+      return {key: context.key, id: context.id, kind: 'dsh-image-gallery', target: 'chat',
+        anchorSeq: tail.closing.finalNode.seq + 0.075, location, visibility: 'visible',
+        data: {images: [...images.values()]}};
+    }
+  };
+  function ImageGallery({node, loadImage}) {
+    return h('section', {'aria-label': 'Agent image output',
+      style: {padding: '12px 0', display: 'flex', flexWrap: 'wrap', gap: 12}},
+      ...node.data.images.map(attachment => h(Picture,
+        {key: attachment.attachmentId, attachment, resolve: loadImage})));
+  }
+  return {inject: ['slots', 'uiConversation'], galleryDefinition, toolImages, apply(ctx) {
+    ctx.uiConversation.events.register(galleryDefinition);
+    ctx.slots.inject('conversation.chat.node', () => ctx.slots.register(
+      {name: 'conversation.chat.node', key: 'dsh-image-gallery'}, ImageGallery));
   }};
 }});
