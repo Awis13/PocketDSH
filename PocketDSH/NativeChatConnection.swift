@@ -82,6 +82,9 @@ struct NativeTranscript {
     private(set) var protocolNotices: [String] = []
     private(set) var supportsCompaction = false
     private(set) var compactions: [NativeCompactionInfo] = []
+    private(set) var supportsQueue = false
+    private(set) var queue: [NativeQueueItem] = []
+    private(set) var queueOmitted = 0
     var compaction: NativeCompactionInfo? { compactions.last }
     private var sessionID: String?
     private var sequence = 0
@@ -90,7 +93,9 @@ struct NativeTranscript {
     mutating func apply(_ event: NativeEvent) {
         if event.op == "opened" {
             self = NativeTranscript(); sessionID = event.session
-            supportsCompaction = event.capabilities?.contains(NativeCompactionInfo.capability) == true; return
+            supportsCompaction = event.capabilities?.contains(NativeCompactionInfo.capability) == true
+            supportsQueue = event.capabilities?.contains(NativeQueueInfo.capability) == true
+            return
         }
         if let sessionID, let incoming = event.session, sessionID != incoming { return }
         if let next = event.sequence {
@@ -166,8 +171,11 @@ struct NativeTranscript {
                                           text: event.stage == "cancelled" ? "Response stopped" : event.text == "CONTEXT_LIMIT" ? "Model context limit exceeded. Terminal and conversation are preserved." : "Native Harness turn failed", failed: event.stage == "failed"))
             }
         case "shellReset": rows.append(TranscriptRow(id: "native-shell-reset-\(sequence)", kind: .notice, text: event.text ?? "New shell; previous commands were not rerun."))
+        case "queue":
+            queue = (event.queue?.items ?? []).filter(\.valid)
+            queueOmitted = event.queue?.omitted ?? 0
         // These events belong to session controls, PTY or workspace state.
-        case "request", "compaction", "compactionRejected", "pty", "terminalSize", "workspaceAction", "sessions", "status", "synced", "accepted", "approval", "completion", "error": break
+        case "request", "compaction", "compactionRejected", "queueAccepted", "queueRejected", "pty", "terminalSize", "workspaceAction", "sessions", "status", "synced", "accepted", "approval", "completion", "error": break
         default: notice("Unrecognized event: " + NativeRequestInfo.label(event.op))
         }
     }

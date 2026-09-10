@@ -280,7 +280,7 @@ struct HarnessView: View {
                 } label: { Image(systemName: "arrow.up").font(.system(size: 18, weight: .semibold)).frame(width: 38, height: 38).background(theme.accent, in: Circle()).foregroundStyle(theme.canvas) }
                     .disabled(!canSend)
                     .opacity(store.draft.isEmpty && store.images.isEmpty ? 0.3 : 1).accessibilityLabel("Send").accessibilityIdentifier("sendPrompt")
-                    .contextMenu { if store.running && !store.usesNativeHarness { Button("Steer current turn") { Task { await store.submit(mode: "steer") } } } }
+                    .contextMenu { if store.running { Button("Steer current turn") { Task { await store.submit(mode: "steer") } } } }
             }
             if terminalInput { promptInput }
         }.padding(terminalInput ? 0 : 16)
