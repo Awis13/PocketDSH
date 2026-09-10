@@ -34,6 +34,7 @@
 		AEE9CF4748B05A40537309B6 /* SavedConnections.swift in Sources */ = {isa = PBXBuildFile; fileRef = 06C35CF3F2E4B245A4F9BB28 /* SavedConnections.swift */; };
 		B3E5A6229657B8C03CA87DEB /* ContextStatusView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4536C46B3F5C4076165E8409 /* ContextStatusView.swift */; };
 		C103524CD83608A91CE30F86 /* ConnectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F88F3CD3883D2F6BFE7D5AE7 /* ConnectionView.swift */; };
+		C519777D60BB3FCC4A067C08 /* TerminalPresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 69A98018D6A145FAF016AB93 /* TerminalPresentation.swift */; };
 		C9D4CACAFC991269FE6A7BCB /* PocketDSHApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = F816DAE6C96C8E45D149EEF5 /* PocketDSHApp.swift */; };
 		D82FC2E56324E4886177E337 /* PocketStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = C49C2AC1DB6173218484FA24 /* PocketStore.swift */; };
 		DEC528524D504A3BD961D8F2 /* SwiftTerm in Frameworks */ = {isa = PBXBuildFile; productRef = AD6686A33E1C422500B47929 /* SwiftTerm */; };
@@ -74,6 +75,7 @@
 		51A0DE6E9EE1DD8033673D14 /* ShellBlockInteraction.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShellBlockInteraction.swift; sourceTree = "<group>"; };
 		56106B6E42C165653F7CEDA4 /* QueueDockView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QueueDockView.swift; sourceTree = "<group>"; };
 		5BA7754331250B9CF01F8A4F /* TurnNotificationState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TurnNotificationState.swift; sourceTree = "<group>"; };
+		69A98018D6A145FAF016AB93 /* TerminalPresentation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalPresentation.swift; sourceTree = "<group>"; };
 		6DA2E6D500176C6992989EE1 /* HomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeView.swift; sourceTree = "<group>"; };
 		8742D0DC00E6185285EF6EC5 /* ImageAttachments.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImageAttachments.swift; sourceTree = "<group>"; };
 		8F45255EB3E729C10CE13B85 /* VoiceRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceRecorder.swift; sourceTree = "<group>"; };
@@ -169,6 +171,7 @@
 				44B25DCB6141C9DBACE0EE9B /* ShellBlockViews.swift */,
 				3F19FB2A62A2A1ADAA7337ED /* Simulator.entitlements */,
 				BA1BA7A9B1DC97856095C0CB /* TerminalAppearance.swift */,
+				69A98018D6A145FAF016AB93 /* TerminalPresentation.swift */,
 				212067D3F85E4C892F86FBAD /* TurnNotifications.swift */,
 				5BA7754331250B9CF01F8A4F /* TurnNotificationState.swift */,
 				8F45255EB3E729C10CE13B85 /* VoiceRecorder.swift */,
@@ -348,6 +351,7 @@
 				8A3284A72DB675093B2EB8B1 /* ShellBlockInteraction.swift in Sources */,
 				4B32DCC7FD423731DE545A37 /* ShellBlockViews.swift in Sources */,
 				A8F3CECEBAD3E60B962CBAB9 /* TerminalAppearance.swift in Sources */,
+				C519777D60BB3FCC4A067C08 /* TerminalPresentation.swift in Sources */,
 				6B1B4FB32A1AC9BFB4B73BEA /* TurnNotificationState.swift in Sources */,
 				EA878C65D62F5F5C13C46150 /* TurnNotifications.swift in Sources */,
 				6AA8B323AAB5F1859C0355FF /* VoiceRecorder.swift in Sources */,

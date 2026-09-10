@@ -152,6 +152,35 @@ import Foundation
         metrics.apply(NativeEvent(op: "stage", session: "other", stage: "requesting", sequence: 1))
         precondition(metrics.requests.isEmpty, "Old hosts without metadata must show unknown, not invented zeroes")
         print("PASS request metadata: lossless future fields, safe export, validated counts, session isolation, bounded protocol notes and replay")
+
+        var presentation = TerminalPresentation()
+        precondition(!presentation.isExpanded && !presentation.showsReturnControl && presentation.anchor == nil,
+                     "The terminal starts inline without a return anchor")
+        presentation.alternateBufferActivated(anchor: "block-1")
+        precondition(presentation.isExpanded && presentation.alternateBufferActive)
+        precondition(presentation.showsReturnControl && presentation.anchor == "block-1")
+        presentation.alternateBufferActivated(anchor: "block-2")
+        precondition(presentation.anchor == "block-2", "The newest TUI owns the return anchor")
+        presentation.returnToTranscript()
+        precondition(!presentation.isExpanded && presentation.alternateBufferActive,
+                     "A manual return collapses the surface while the TUI still owns the alternate buffer")
+        precondition(presentation.alternateBufferDeactivated() == false,
+                     "Exiting after a manual return must not trigger a second collapse")
+        precondition(!presentation.alternateBufferActive)
+        var tui = TerminalPresentation()
+        tui.alternateBufferActivated(anchor: "block-3")
+        precondition(tui.alternateBufferDeactivated() == true,
+                     "Leaving a TUI collapses the expanded surface")
+        precondition(tui.mode == .inline && !tui.alternateBufferActive)
+        precondition(tui.consumeAnchor() == "block-3" && tui.anchor == nil, "The return anchor is one-shot")
+        precondition(tui.consumeAnchor() == nil && tui.alternateBufferDeactivated() == false,
+                     "A deactivation without an active TUI is inert")
+        var reset = TerminalPresentation()
+        reset.alternateBufferActivated(anchor: "block-4")
+        reset.reset()
+        precondition(reset == TerminalPresentation(), "Reset clears every presentation field")
+        print("PASS terminal presentation: alternate-buffer transitions, one-shot return anchor and reset")
+
         guard CommandLine.arguments.count > 1 else { return }
         let config = try JSONDecoder().decode([String:String].self, from: Data(contentsOf: URL(fileURLWithPath: CommandLine.arguments[1])))
         let id = UUID().uuidString

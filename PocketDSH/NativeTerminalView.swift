@@ -6,6 +6,8 @@ enum ShellTerminalShortcut { case previous, next, find, copyCommand, copyOutput,
 
 final class NativeTerminalSurface: TerminalView {
     var appearance: TerminalAppearance?
+    /// Reports alternate-buffer ownership changes (DECSET/DECRST 47/1047/1049).
+    var onBufferActivated: ((Bool) -> Void)?
     // SwiftUI measures representables with zero-sized proposals. Such a proposal
     // must not resize the persistent emulator/remote PTY and corrupt its output.
     override var frame: CGRect {
@@ -17,6 +19,10 @@ final class NativeTerminalSurface: TerminalView {
         set { if newValue.width >= 100 && newValue.height >= 40 { super.bounds = newValue } }
     }
     var onAgent: (() -> Void)?
+    override func bufferActivated(source: Terminal) {
+        super.bufferActivated(source: source)
+        onBufferActivated?(source.isCurrentBufferAlternate)
+    }
     override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
         let host = superview as? NativeTerminalHostView
         let remaining = Set(presses.filter { press in
@@ -39,8 +45,8 @@ final class NativeTerminalHostView: UIView {
     var interruptCommand: (() -> Void)?
     var blockShortcut: ((ShellTerminalShortcut) -> Void)?
     private static let blockKeys: [(ShellTerminalShortcut, String, UIKeyModifierFlags, UIKeyboardHIDUsage)] = [
-        (.previous, UIKeyCommand.inputUpArrow, [.command, .alternate], .keyboardUpArrow),
-        (.next, UIKeyCommand.inputDownArrow, [.command, .alternate], .keyboardDownArrow),
+        (.previous, UIKeyCommand.inputUpArrow, [.command, .shift], .keyboardUpArrow),
+        (.next, UIKeyCommand.inputDownArrow, [.command, .shift], .keyboardDownArrow),
         (.find, "f", .command, .keyboardF), (.copyCommand, "c", [.command, .alternate], .keyboardC),
         (.copyOutput, "c", [.command, .shift], .keyboardC), (.copyBoth, "c", [.command, .alternate, .shift], .keyboardC),
         (.attach, "a", [.command, .shift], .keyboardA)
@@ -93,6 +99,7 @@ struct NativeTerminalView: UIViewRepresentable {
         client.terminal.removeFromSuperview()
         client.terminal.frame = host.bounds
         client.terminal.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        client.terminal.onBufferActivated = { [weak client] alternate in client?.terminalBufferActivated(alternate: alternate) }
         host.addSubview(client.terminal)
         return host
     }
@@ -118,6 +125,7 @@ struct NativeTerminalView: UIViewRepresentable {
         for case let terminal as NativeTerminalSurface in host.subviews {
             terminal.pendingFocus = false
             terminal.resignFirstResponder()
+            terminal.onBufferActivated = nil
         }
     }
     final class Coordinator { var revision: UUID? }
@@ -138,6 +146,7 @@ struct NativeShellPane: View {
     @State private var viewportHeight: CGFloat = 700
     @State private var scrollRequest = 0
     @State private var navigationRevision = 0
+    @State private var anchorRequest: String?
     @State private var findVisible = false
     @State private var findQuery = ""
     @State private var findFocusRequest = UUID()
@@ -161,13 +170,18 @@ struct NativeShellPane: View {
         historySuggestions && canUseActions && client.connected && !client.shellRunning && !client.shellExited &&
         !findVisible && completionInput == nil && store.shellAttachments.isEmpty
     }
+    private var isExpanded: Bool { client.presentation.isExpanded }
+    private var inlineTerminalHeight: CGFloat { max(300, min(560, viewportHeight * 0.6)) }
+    private var terminalHeight: CGFloat { isExpanded ? max(320, viewportHeight - 48) : inlineTerminalHeight }
 
     var body: some View {
         VStack(spacing: 0) {
-            ContextStatusView()
-            QueueDockView().padding(.horizontal, 20).padding(.top, 8)
-            if !blocks.isEmpty { blockToolbar }
-            if findVisible { findBar }
+            if !isExpanded {
+                ContextStatusView()
+                QueueDockView().padding(.horizontal, 20).padding(.top, 8)
+                if !blocks.isEmpty { blockToolbar }
+                if findVisible { findBar }
+            }
             ScrollViewReader { scroll in
                 ScrollView {
                     VStack(alignment: .leading, spacing: 22) {
@@ -185,7 +199,7 @@ struct NativeShellPane: View {
                                 } else {
                                     TranscriptCell(row: row, sessionID: store.selectedID ?? "", terminal: true)
                                 }
-                            }.environment(\.nativeTerminalHeight, max(300, min(560, viewportHeight * 0.6)))
+                            }.environment(\.nativeTerminalHeight, terminalHeight)
                         }
                         if store.rows.isEmpty {
                             Text("Enter runs a command · ⌘Enter asks the agent here")
@@ -202,6 +216,7 @@ struct NativeShellPane: View {
                     }.padding(24).frame(maxWidth: .infinity, alignment: .leading)
                         .background { GeometryReader { geometry in Color.clear.preference(key: ConversationContentHeight.self, value: geometry.size.height) } }
                 }.scrollIndicators(.hidden).accessibilityIdentifier("shellTranscript")
+                    .scrollDisabled(isExpanded)
                     .modifier(ReadingScrollObserver(onScroll: { following = false }, onBottom: {
                         if store.shellSelectedBlockID == nil && !findVisible { following = true; scrollRequest += 1 }
                     }))
@@ -219,64 +234,81 @@ struct NativeShellPane: View {
                         guard !findVisible || activeMatch == nil else { return }
                         scroll.scrollTo("shell-block-" + selected, anchor: .top)
                     }
+                    .task(id: anchorRequest) {
+                        guard let anchorRequest else { return }
+                        do { try await Task.sleep(for: .milliseconds(40)) } catch { return }
+                        scroll.scrollTo("shell-block-" + anchorRequest, anchor: .top)
+                    }
                     .overlay(alignment: .bottomTrailing) {
-                        if !following { Button { resumeFollowing() } label: { Image(systemName: "arrow.down").frame(width: 44, height: 44) }.accessibilityLabel("Jump to latest output").padding(12) }
+                        if !following && !isExpanded { Button { resumeFollowing() } label: { Image(systemName: "arrow.down").frame(width: 44, height: 44) }.accessibilityLabel("Jump to latest output").padding(12) }
                     }
             }.clipped()
-            if let interaction = store.currentInteractions.first {
-                InteractionView(item: interaction).id(interaction.id).frame(maxWidth: 560).padding(16)
+            if !isExpanded {
+                if let interaction = store.currentInteractions.first {
+                    InteractionView(item: interaction).id(interaction.id).frame(maxWidth: 560).padding(16)
+                }
+                Divider()
+                VStack(alignment: .leading, spacing: 8) {
+                    ShellAttachmentStrip()
+                    completionMenu
+                    HStack {
+                        Text(client.directory).font(.caption.monospaced()).lineLimit(1).truncationMode(.middle)
+                        Spacer()
+                        if store.running { Button("Stop agent") { Task { await store.cancel() } } }
+                        if client.shellRunning {
+                            Button("Focus terminal") { closeFind(); focus = nil; client.terminal.requestInputFocus() }
+                            Button("Interrupt · Ctrl+C") { client.interruptCommand() }.accessibilityIdentifier("interruptShell")
+                            Button("Watch with agent") { ask("Inspect the running command using terminal_inspect, terminal_read and terminal_wait. Follow its progress and report the result without running additional commands.") }
+                        }
+                    }.font(.caption).foregroundStyle(.secondary)
+                    HStack(alignment: .top) {
+                        Text("❯").foregroundStyle(theme.accent).padding(.top, 8)
+                        DesktopPromptEditor(text: $store.draft, focusRequest: $focus, collapsed: false,
+                            ink: theme.ink, monospaced: true, textSize: theme.messageSize,
+                            suggestionsVisible: !completions.isEmpty,
+                            moveSuggestion: moveCompletion, completeSuggestion: acceptCompletion, dismissSuggestions: dismissCompletion,
+                            accessibilityName: "Shell command or agent question", accessibilityID: "shellComposer",
+                            sendToAgent: store.currentInteractions.isEmpty ? { ask(store.draft) } : nil,
+                            interruptCommand: client.shellRunning ? { client.interruptCommand() } : nil,
+                            yieldFocusOnSend: !NativeCompactionInfo.isEditorCommand(store.draft, terminalRunning: client.shellRunning), allowsRequestedFocus: !findVisible && (!client.shellRunning || !store.shellAttachments.isEmpty),
+                            shellCompletion: client.shellRunning ? nil : requestCompletion,
+                            shellHistory: client.shellRunning ? nil : { direction, text, selection in
+                                dismissCompletion()
+                                return history.move(direction, text: text, selection: selection, history: client.commandHistory)
+                            },
+                            shellSelectionChanged: { text, selection in
+                                if let input = completionInput, input.original != text || input.selection != selection { dismissCompletion() }
+                            }, shellEdit: shellEdit,
+                            shellSuggestion: canSuggestHistory ? { text in
+                                ShellHistorySuggestion.suffix(for: text, directory: client.directory, history: client.suggestionHistory)
+                            } : nil, send: run)
+                    }.disabled(!client.connected)
+                    HStack {
+                        Text(client.shellExited ? "Shell exited · agent is available" : client.shellRunning ? "Enter sends input · ⌘Enter asks agent" : "Enter runs · Shift+Enter newline · ⌘Enter asks agent")
+                        Spacer()
+                        Button("Ask agent") { ask(store.draft) }.disabled(store.draft.isEmpty && store.shellAttachments.isEmpty)
+                        Button(client.shellRunning ? "Send input" : "Run") { run() }.disabled(store.draft.isEmpty || client.shellExited)
+                    }.font(.caption).foregroundStyle(.secondary)
+                }.padding(20)
             }
-            Divider()
-            VStack(alignment: .leading, spacing: 8) {
-                ShellAttachmentStrip()
-                completionMenu
-                HStack {
-                    Text(client.directory).font(.caption.monospaced()).lineLimit(1).truncationMode(.middle)
-                    Spacer()
-                    if store.running { Button("Stop agent") { Task { await store.cancel() } } }
-                    if client.shellRunning {
-                        Button("Focus terminal") { closeFind(); focus = nil; client.terminal.requestInputFocus() }
-                        Button("Interrupt · Ctrl+C") { client.interruptCommand() }.accessibilityIdentifier("interruptShell")
-                        Button("Watch with agent") { ask("Inspect the running command using terminal_inspect, terminal_read and terminal_wait. Follow its progress and report the result without running additional commands.") }
-                    }
-                }.font(.caption).foregroundStyle(.secondary)
-                HStack(alignment: .top) {
-                    Text("❯").foregroundStyle(theme.accent).padding(.top, 8)
-                    DesktopPromptEditor(text: $store.draft, focusRequest: $focus, collapsed: false,
-                        ink: theme.ink, monospaced: true, textSize: theme.messageSize,
-                        suggestionsVisible: !completions.isEmpty,
-                        moveSuggestion: moveCompletion, completeSuggestion: acceptCompletion, dismissSuggestions: dismissCompletion,
-                        accessibilityName: "Shell command or agent question", accessibilityID: "shellComposer",
-                        sendToAgent: store.currentInteractions.isEmpty ? { ask(store.draft) } : nil,
-                        interruptCommand: client.shellRunning ? { client.interruptCommand() } : nil,
-                        yieldFocusOnSend: !NativeCompactionInfo.isEditorCommand(store.draft, terminalRunning: client.shellRunning), allowsRequestedFocus: !findVisible && (!client.shellRunning || !store.shellAttachments.isEmpty),
-                        shellCompletion: client.shellRunning ? nil : requestCompletion,
-                        shellHistory: client.shellRunning ? nil : { direction, text, selection in
-                            dismissCompletion()
-                            return history.move(direction, text: text, selection: selection, history: client.commandHistory)
-                        },
-                        shellSelectionChanged: { text, selection in
-                            if let input = completionInput, input.original != text || input.selection != selection { dismissCompletion() }
-                        }, shellEdit: shellEdit,
-                        shellSuggestion: canSuggestHistory ? { text in
-                            ShellHistorySuggestion.suffix(for: text, directory: client.directory, history: client.suggestionHistory)
-                        } : nil, send: run)
-                }.disabled(!client.connected)
-                HStack {
-                    Text(client.shellExited ? "Shell exited · agent is available" : client.shellRunning ? "Enter sends input · ⌘Enter asks agent" : "Enter runs · Shift+Enter newline · ⌘Enter asks agent")
-                    Spacer()
-                    Button("Ask agent") { ask(store.draft) }.disabled(store.draft.isEmpty && store.shellAttachments.isEmpty)
-                    Button(client.shellRunning ? "Send input" : "Run") { run() }.disabled(store.draft.isEmpty || client.shellExited)
-                }.font(.caption).foregroundStyle(.secondary)
-            }.padding(20)
-        }.onGeometryChange(for: CGSize.self) { $0.size } action: { viewportWidth = $0.width; viewportHeight = $0.height }
-        .background { if canUseActions { keyboardActions } }
+        }.overlay(alignment: .top) { if isExpanded { fullScreenTerminalBanner } }
+        .onGeometryChange(for: CGSize.self) { $0.size } action: { viewportWidth = $0.width; viewportHeight = $0.height }
+        .background { if canUseActions && !isExpanded { keyboardActions } }
         .onChange(of: findQuery) { _, _ in matchIndex = 0; navigationRevision += 1 }
         .onChange(of: client.completionReply?.id) { _, _ in receiveCompletion() }
         .onChange(of: store.draft) { _, text in
             if let input = completionInput, input.original != text { dismissCompletion() }
         }
         .onChange(of: store.selectedID) { _, _ in history.reset(); dismissCompletion() }
+        .onChange(of: client.presentation) { old, new in
+            if new.isExpanded {
+                focus = nil
+                client.terminal.requestInputFocus()
+            } else if old.isExpanded {
+                if let anchor = client.consumeReturnAnchor() { anchorRequest = anchor }
+                focusInput()
+            }
+        }
         .onDisappear { dismissCompletion() }
         .task(id: completionRequest) {
             guard let id = completionRequest else { return }
@@ -291,6 +323,18 @@ struct NativeShellPane: View {
         }.onChange(of: appearance) { _, value in value.apply(to: client.terminal) }
         .onChange(of: active) { _, _ in dismissCompletion(); focusInput() }
             .onChange(of: client.shellRunning) { _, _ in dismissCompletion(); history.reset(); focusInput() }
+    }
+    private var fullScreenTerminalBanner: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "rectangle.inset.filled")
+            Text("Full-screen terminal")
+            Spacer()
+            Button("Return to transcript") { client.returnToTranscript() }
+                .accessibilityIdentifier("returnToTranscript")
+        }
+        .font(.caption).padding(.horizontal, 16).padding(.vertical, 10)
+        .background(.regularMaterial)
+        .overlay(alignment: .bottom) { Divider() }
     }
     @ViewBuilder private var completionMenu: some View {
         if !completions.isEmpty {
@@ -372,7 +416,7 @@ struct NativeShellPane: View {
         }
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, !client.shellExited else { return }
         if client.shellRunning { client.input(Data((text + "\r").utf8)); store.draft = "" }
-        else { client.prepareForCommand(width: viewportWidth - 48); client.shellDraft = text; client.runShell(); if client.shellDraft.isEmpty { store.draft = "" } }
+        else { client.prepareForCommand(width: viewportWidth - 48, height: inlineTerminalHeight); client.shellDraft = text; client.runShell(); if client.shellDraft.isEmpty { store.draft = "" } }
         resumeFollowing()
     }
     private func ask(_ text: String) {
@@ -428,8 +472,8 @@ struct NativeShellPane: View {
     private var blockToolbar: some View {
         ScrollView(.horizontal) {
             HStack(spacing: 6) {
-                Button { moveBlock(-1) } label: { Image(systemName: "chevron.up").frame(width: 44, height: 44) }.accessibilityLabel("Previous command block").help("Previous block · ⌘⌥↑")
-                Button { moveBlock(1) } label: { Image(systemName: "chevron.down").frame(width: 44, height: 44) }.accessibilityLabel("Next command block").help("Next block · ⌘⌥↓")
+                Button { moveBlock(-1) } label: { Image(systemName: "chevron.up").frame(width: 44, height: 44) }.accessibilityLabel("Previous command block").help("Previous block · ⌘⇧↑")
+                Button { moveBlock(1) } label: { Image(systemName: "chevron.down").frame(width: 44, height: 44) }.accessibilityLabel("Next command block").help("Next block · ⌘⇧↓")
                 Text(selectedBlock.flatMap { block in blocks.firstIndex(where: { $0.id == block.id }).map { "Block \($0 + 1) of \(blocks.count)" } } ?? "\(blocks.count) command blocks")
                     .font(.caption.monospaced()).foregroundStyle(.secondary)
                 Button { openFind() } label: { Image(systemName: "magnifyingglass").frame(width: 44, height: 44) }.accessibilityLabel("Find in command output").help("Find in output · ⌘F")
@@ -471,8 +515,8 @@ struct NativeShellPane: View {
     }
     private var keyboardActions: some View {
         Group {
-            Button("Previous block") { moveBlock(-1) }.keyboardShortcut(.upArrow, modifiers: [.command, .option])
-            Button("Next block") { moveBlock(1) }.keyboardShortcut(.downArrow, modifiers: [.command, .option])
+            Button("Previous block") { moveBlock(-1) }.keyboardShortcut(.upArrow, modifiers: [.command, .shift])
+            Button("Next block") { moveBlock(1) }.keyboardShortcut(.downArrow, modifiers: [.command, .shift])
             Button("Find output") { openFind() }.keyboardShortcut("f", modifiers: .command)
             if selectedBlock != nil {
                 Button("Copy command") { copy(.command) }.keyboardShortcut("c", modifiers: [.command, .option])
@@ -526,6 +570,11 @@ struct NativeCommandCell: View {
                 NativeTerminalView(client: client, focus: active && terminal, revision: revision, askAgent: {
                     Task { await store.askFromShell(store.draft.isEmpty ? "Inspect this running terminal command and explain its current output without executing more commands." : store.draft, block: nil) }
                 }, blockShortcut: blockShortcut).frame(height: terminalHeight)
+            } else if !block.finished {
+                // Reserve the live surface's slot even when the host connection
+                // is gone, so the transcript feed does not reflow around a
+                // running command.
+                NativeTerminalPlaceholder(height: terminalHeight)
             } else if !block.preview.isEmpty {
                 ScrollView(.horizontal) {
                     Text(block.attributedOutput(appearance: TerminalAppearance(theme: theme, scheme: scheme)))
@@ -560,5 +609,21 @@ extension EnvironmentValues {
     var nativeTerminalHeight: CGFloat {
         get { self[NativeTerminalHeightKey.self] }
         set { self[NativeTerminalHeightKey.self] = newValue }
+    }
+}
+
+/// Reserves the live terminal's place in the transcript feed when the surface
+/// itself cannot be shown, keeping block layout stable across reconnects.
+private struct NativeTerminalPlaceholder: View {
+    @Environment(\.harnessTheme) private var theme
+    let height: CGFloat
+    var body: some View {
+        RoundedRectangle(cornerRadius: 8)
+            .fill(theme.surface.opacity(0.35))
+            .frame(height: height)
+            .overlay {
+                Text("Live terminal unavailable").font(.caption.monospaced()).foregroundStyle(.secondary)
+            }
+            .accessibilityIdentifier("nativeTerminalPlaceholder")
     }
 }
