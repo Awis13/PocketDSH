@@ -384,6 +384,40 @@ import Foundation
         precondition(!NativeDiffInfo.isValidBase("../../etc") && !NativeDiffInfo.isValidBase("a b") && !NativeDiffInfo.isValidBase("$(x)"))
         print("PASS native diff: capability, fold, bounds, reconnect reset, unknown fields and base validation")
 
+        var inline = NativeTranscript()
+        inline.apply(NativeEvent(op: "toolCall", id: "edit", text: "edit_file", sequence: 1, arguments: #"{"path":"a.txt","old_text":"old","new_text":"new"}"#))
+        inline.apply(NativeEvent(op: "toolResult", id: "edit", text: "Updated a.txt", sequence: 2, failed: false,
+                                 toolDiffs: [NativeInlineDiffHunk(path: "a.txt", oldText: "old", newText: "new")]))
+        let inlineRow = inline.rows.first { $0.kind == .tool }
+        precondition(inlineRow?.diffs.count == 1, "A native tool result carries its inline diff into the row")
+        precondition(inlineRow?.diffs.first?["path"].string == "a.txt")
+        precondition(inlineRow?.diffs.first?["oldText"].string == "old")
+        precondition(inlineRow?.diffs.first?["newText"].string == "new")
+        inline.apply(NativeEvent(op: "toolCall", id: "add", text: "edit_file", sequence: 3))
+        inline.apply(NativeEvent(op: "toolResult", id: "add", text: "Updated b.txt", sequence: 4,
+                                 toolDiffs: [NativeInlineDiffHunk(path: "b.txt", oldText: nil, newText: "added")]))
+        precondition(inline.rows.last { $0.kind == .tool }?.diffs.first?["oldText"] == .null,
+                     "A pure insertion keeps its null oldText so it renders as an insertion")
+        inline.apply(NativeEvent(op: "toolResult", id: "edit", text: "Updated a.txt", sequence: 5, failed: false))
+        precondition(inline.rows.first { $0.id == "tool-edit" }?.diffs.count == 1,
+                     "A later result without a diff keeps the row's existing diff")
+        print("PASS native inline diff: fold into row.diffs, insertion null oldText, missing payload keeps prior")
+
+        var hugeInline = NativeTranscript()
+        hugeInline.apply(NativeEvent(op: "toolCall", id: "big", text: "edit_file", sequence: 1))
+        hugeInline.apply(NativeEvent(op: "toolResult", id: "big", text: "Updated", sequence: 2,
+                                     toolDiffs: [NativeInlineDiffHunk(path: "big", oldText: nil, newText: String(repeating: "x", count: 50_000))]))
+        precondition((hugeInline.rows.first { $0.kind == .tool }?.diffs.first?["newText"].string.utf8.count ?? 0) <= 16_384,
+                     "An oversized native inline diff is re-clamped on the client")
+        let futureInline = try JSONDecoder().decode(NativeEvent.self, from: Data(#"{"op":"toolResult","id":"c","toolDiffs":[{"path":"a","oldText":null,"newText":"x"}],"futureInlineField":{"deep":[1]}}"#.utf8))
+        precondition(futureInline.toolDiffs?.first?.newText == "x" && futureInline.extraFields["futureInlineField"] != nil,
+                     "Unknown fields beside an inline diff survive replay")
+        var futureRow = NativeTranscript()
+        futureRow.apply(NativeEvent(op: "toolCall", id: "c", text: "edit_file", sequence: 1))
+        futureRow.apply(futureInline)
+        precondition(futureRow.protocolNotices.isEmpty, "An additive inline diff is not an unsupported operation")
+        print("PASS native inline diff bounds: client re-clamp, additive fields and no protocol notices")
+
         guard CommandLine.arguments.count > 1 else { return }
         let config = try JSONDecoder().decode([String:String].self, from: Data(contentsOf: URL(fileURLWithPath: CommandLine.arguments[1])))
         let id = UUID().uuidString

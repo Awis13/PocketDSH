@@ -171,6 +171,13 @@ struct NativeTranscript {
                 rows[i].detail = (toolArguments.removeValue(forKey: rows[i].id) ?? "") + "\n\n" + Self.result(event.text ?? "", tool: rows[i].text)
                 toolStreams.removeValue(forKey: rows[i].id)
                 rows[i].complete = true; rows[i].failed = event.failed ?? false
+                // Native inline edit diffs reuse the DSH renderer by folding the
+                // wire hunks into the same `{path, oldText|null, newText}` JSON
+                // shape. Re-clamp so an older or hostile host cannot inflate a
+                // frame; a missing payload keeps the row's existing diffs.
+                if let hunks = event.toolDiffs, !hunks.isEmpty {
+                    rows[i].diffs = NativeInlineDiffHunk.sanitized(hunks).map(Self.diffJSON)
+                }
             }
         case "stage":
             if ["modelCompleted", "turnCompleted", "completed", "cancelled", "failed", "interrupted"].contains(event.stage ?? "") { finish() }
@@ -201,6 +208,15 @@ struct NativeTranscript {
     private mutating func notice(_ value: String) {
         guard protocolNotices.count < 8, !protocolNotices.contains(value) else { return }
         protocolNotices.append(value)
+    }
+
+    /// The renderer's `ToolDiffView` reads `JSON`, so the wire hunks are
+    /// projected into the exact shape the DSH fold already produces: a `null`
+    /// `oldText` renders as a pure insertion.
+    private static func diffJSON(_ hunk: NativeInlineDiffHunk) -> JSON {
+        .object(["path": .string(hunk.path),
+                 "oldText": hunk.oldText.map { .string($0) } ?? .null,
+                 "newText": .string(hunk.newText)])
     }
 
     private static func arguments(_ text: String) -> String {
