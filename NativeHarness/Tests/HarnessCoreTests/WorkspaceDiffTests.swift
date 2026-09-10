@@ -345,4 +345,52 @@ final class WorkspaceDiffTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(Set(diff.files.map(\.path)), ["my file.txt", weird])
         for file in diff.files { XCTAssertEqual(file.additions, 1) }
     }
+
+    func testTopLevelBDirectoryKeepsPrefixForBinaryModeAndEmpty() async throws {
+        let root = try await makeRepo(); defer { try? FileManager.default.removeItem(at: root) }
+        let nested = root.appendingPathComponent("b")
+        try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
+        try Data([0, 1, 2, 3]).write(to: nested.appendingPathComponent("x.bin"))
+        try write("stable\n", to: nested, "mode.txt")
+        _ = try await git(["add", "."], at: root)
+        _ = try await git(["commit", "-qm", "init"], at: root)
+        // A binary change, an executable-bit-only change and a staged empty add
+        // emit no `---`/`+++` lines, so the `diff --git` header is the only path
+        // source. A real top-level `b/` component must survive intact.
+        try Data([0, 9, 9, 9]).write(to: nested.appendingPathComponent("x.bin"))
+        try FileManager.default.setAttributes([.posixPermissions: 0o755],
+                                              ofItemAtPath: nested.appendingPathComponent("mode.txt").path)
+        try Data().write(to: nested.appendingPathComponent("newempty.txt"))
+        _ = try await git(["add", "b/newempty.txt"], at: root)
+        let diff = try await WorkspaceDiffEngine.generate(base: .head, workspace: root.path)
+        XCTAssertNil(diff.error)
+        XCTAssertEqual(Set(diff.files.map(\.path)), ["b/x.bin", "b/mode.txt", "b/newempty.txt"],
+                       "A path under a top-level `b/` directory must not lose its first component")
+        let binary = try XCTUnwrap(diff.files.first { $0.path == "b/x.bin" })
+        XCTAssertTrue(binary.binary)
+        XCTAssertNil(binary.oldPath, "An in-place binary change has no rename source")
+        let mode = try XCTUnwrap(diff.files.first { $0.path == "b/mode.txt" })
+        XCTAssertNil(mode.oldPath, "A mode-only change keeps the same path")
+        let empty = try XCTUnwrap(diff.files.first { $0.path == "b/newempty.txt" })
+        XCTAssertEqual(empty.status, "added")
+        XCTAssertNil(empty.oldPath, "An empty new file has no old path")
+    }
+
+    func testUnbornHeadResolvesEmptyTreeForSHA256Repository() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString).resolvingSymlinksInPath()
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let initBlock = try await git(["init", "-q", "-b", "main", "--object-format=sha256"], at: dir)
+        guard initBlock.exitCode == 0 else { throw XCTSkip("git lacks --object-format=sha256") }
+        _ = try await git(["config", "user.email", "fixture@example.com"], at: dir)
+        _ = try await git(["config", "user.name", "Fixture"], at: dir)
+        try write("staged\n", to: dir, "staged.txt")
+        _ = try await git(["add", "staged.txt"], at: dir)
+        let diff = try await WorkspaceDiffEngine.generate(base: .head, workspace: dir.path)
+        XCTAssertNil(diff.error, "A SHA-256 repository needs its own empty tree, not the SHA-1 one")
+        let file = try XCTUnwrap(diff.files.first { $0.path == "staged.txt" })
+        XCTAssertEqual(file.status, "added")
+        XCTAssertEqual(file.additions, 1)
+    }
 }

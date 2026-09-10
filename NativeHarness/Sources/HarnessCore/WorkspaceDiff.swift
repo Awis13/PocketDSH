@@ -100,9 +100,10 @@ public enum WorkspaceDiffEngine {
     /// workspace-relative, matching `git ls-files` (also run with cwd=workspace).
     private static let diffFlags = ["--relative", "--no-color", "--no-ext-diff", "--no-textconv", "-M", "--unified=0"]
     private static let gitExecutable = "/usr/bin/git"
-    /// The well-known empty tree: diffing against it lists every tracked file
-    /// as added, which is the right answer while HEAD is unborn.
-    private static let emptyTreeObject = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+    /// SHA-1 empty tree, used only if the repository cannot report its own.
+    /// Diffing against the empty tree lists every tracked file as added, which
+    /// is the right answer while HEAD is unborn.
+    private static let fallbackEmptyTreeObject = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 
     public static func generate(base: WorkspaceDiffBase, workspace: String) async throws -> WorkspaceDiff {
         var arguments = ["diff"]
@@ -113,7 +114,11 @@ public enum WorkspaceDiffEngine {
         case .staged:
             arguments += ["--cached"] + diffFlags
         case .head:
-            arguments += (try await hasUnbornHead(workspace: workspace) ? [emptyTreeObject] : ["HEAD"]) + diffFlags
+            if try await hasUnbornHead(workspace: workspace) {
+                arguments += [await emptyTree(workspace: workspace)] + diffFlags
+            } else {
+                arguments += ["HEAD"] + diffFlags
+            }
         case .ref(let ref):
             guard let common = try await mergeBase(ref: ref, workspace: workspace) else {
                 return WorkspaceDiff(base: base.wireValue, resolvedBase: nil, files: [],
@@ -143,6 +148,20 @@ public enum WorkspaceDiffEngine {
         // other failure (not a repository) falls through to the normal path.
         let block = try await runGit(["rev-parse", "--verify", "-q", "HEAD"], workspace: workspace, outputLimit: 4096)
         return block.exitCode == 1
+    }
+
+    /// The repository's empty tree, resolved in its own object format. The
+    /// hard-coded constant is SHA-1 only, so `git init --object-format=sha256`
+    /// needs this dynamic lookup. `hash-object -t tree /dev/null` hashes an
+    /// empty input, yielding the canonical empty tree for either format.
+    private static func emptyTree(workspace: String) async -> String {
+        if let block = try? await runGit(["hash-object", "-t", "tree", "/dev/null"],
+                                         workspace: workspace, outputLimit: 4096),
+           block.outcome == "exited", block.exitCode == 0 {
+            let value = block.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !value.isEmpty, value.count <= 128, value.allSatisfy({ $0.isHexDigit }) { return value }
+        }
+        return fallbackEmptyTreeObject
     }
 
     private static func mergeBase(ref: String, workspace: String) async throws -> String? {
@@ -464,8 +483,11 @@ private struct PatchParser {
             guard let (first, rest) = readQuoted(body), rest.hasPrefix(" ") else { return nil }
             return (first, String(rest.dropFirst()))
         }
+        // Keep git's `b/` prefix on the new token: `headerPaths` strips a prefix
+        // exactly once via `unquoteHeader`. Consuming it here would double-strip
+        // a real path under a top-level `b/` directory.
         guard let separator = body.range(of: " b/") else { return nil }
-        return (String(body[..<separator.lowerBound]), String(body[separator.upperBound...]))
+        return (String(body[..<separator.lowerBound]), "b/" + body[separator.upperBound...])
     }
 
     private static func readQuoted(_ text: String) -> (String, String)? {
