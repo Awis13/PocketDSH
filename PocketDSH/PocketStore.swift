@@ -34,7 +34,7 @@ final class PocketStore: ObservableObject {
     var openDefaultTaskWhenConnected = false
     @Published var voiceRecording = false
     @Published var selectedID: String? { didSet {
-        if selectedID != oldValue { nativeRequests = []; nativeProtocolNotices = []; nativeCompaction = nil; nativeSupportsCompaction = false; nativeCompactionPending = false; nativeQueue = []; nativeQueueOmitted = 0; nativeSupportsQueue = false; queueTextHandlers.removeAll() }
+        if selectedID != oldValue { nativeRequests = []; nativeProtocolNotices = []; nativeCompaction = nil; nativeSupportsCompaction = false; nativeCompactionPending = false; nativeQueue = []; nativeQueueOmitted = 0; nativeSupportsQueue = false; nativeDiff = nil; nativeSupportsDiff = false; nativeDiffLoading = false; queueTextHandlers.removeAll() }
         persistPane()
     } }
     @Published var composerFocusRequest: UUID?
@@ -50,9 +50,13 @@ final class PocketStore: ObservableObject {
     @Published var nativeQueue: [NativeQueueItem] = []
     @Published var nativeQueueOmitted = 0
     @Published var nativeSupportsQueue = false
+    @Published var nativeDiff: NativeDiffInfo?
+    @Published var nativeSupportsDiff = false
+    @Published var nativeDiffLoading = false
     var compactingContext: Bool { nativeCompactionPending || nativeCompaction?.isRunning == true }
     var canCompactContext: Bool { usesNativeHarness && nativeSupportsCompaction && connected && nativeReady && !running && !compactingContext && nativeSubmission == nil }
     var canControlQueue: Bool { usesNativeHarness && nativeSupportsQueue && connected && nativeReady }
+    var canReviewDiff: Bool { usesNativeHarness && nativeSupportsDiff && connected && nativeReady }
     private func compactionKey(_ session: String) -> String { "harness.compaction." + endpoint + "|" + session }
     @Published var nativeRequests: [NativeRequestInfo] = []
     @Published var nativeProtocolNotices: [String] = []
@@ -215,7 +219,7 @@ final class PocketStore: ObservableObject {
         nativeReconnect?.cancel(); nativeReconnect = nil
         generation = UUID(); connectionTask?.cancel(); connectionTask = nil
         nativeShell?.disconnect(); nativeShell = nil
-        native?.disconnect(); native = nil; nativeRequests = []; nativeProtocolNotices = []; nativeCompaction = nil; nativeSupportsCompaction = false; nativeCompactionPending = false; nativeQueue = []; nativeQueueOmitted = 0; nativeSupportsQueue = false; nativeReady = false; nativeSubmission = nil; queueTextHandlers.removeAll(); api = nil
+        native?.disconnect(); native = nil; nativeRequests = []; nativeProtocolNotices = []; nativeCompaction = nil; nativeSupportsCompaction = false; nativeCompactionPending = false; nativeQueue = []; nativeQueueOmitted = 0; nativeSupportsQueue = false; nativeDiff = nil; nativeSupportsDiff = false; nativeDiffLoading = false; nativeReady = false; nativeSubmission = nil; queueTextHandlers.removeAll(); api = nil
         socket?.cancel(with: .goingAway, reason: nil); socket = nil
         connected = false; connecting = false; loadingHistory = false; interactions = []; clientID = ""
     }
@@ -389,7 +393,7 @@ final class PocketStore: ObservableObject {
         if model == .null { model = catalog["default"] }
         guard connected else { return }
         if let native {
-            nativeReady = false; nativeTranscript = NativeTranscript(); nativeRequests = []; nativeProtocolNotices = []; nativeCompaction = nil; nativeSupportsCompaction = false; nativeCompactionPending = false; nativeQueue = []; nativeQueueOmitted = 0; nativeSupportsQueue = false; interactions = []
+            nativeReady = false; nativeTranscript = NativeTranscript(); nativeRequests = []; nativeProtocolNotices = []; nativeCompaction = nil; nativeSupportsCompaction = false; nativeCompactionPending = false; nativeQueue = []; nativeQueueOmitted = 0; nativeSupportsQueue = false; nativeDiff = nil; nativeSupportsDiff = false; nativeDiffLoading = false; interactions = []
             guard let id else { native.selectedID = nil; return }
             loadingHistory = true; native.selectedID = id
             do { try await native.send(NativeCommand(op: "open", session: id)) }
@@ -521,6 +525,24 @@ final class PocketStore: ObservableObject {
             try await native.send(NativeCommand(op: "compact", session: session, id: operationID))
         } catch {
             if selectedID == session { nativeCompactionPending = false; self.error = "Compaction not confirmed. Reconnect to retrieve its status: " + error.localizedDescription }
+        }
+    }
+    func reviewDiff(base: String) async {
+        guard usesNativeHarness, nativeSupportsDiff else {
+            error = "This host does not support workspace diffs. Connect to an updated Native Harness host."; return
+        }
+        guard connected, nativeReady, let native, let session = selectedID else {
+            error = "Open a native session before reviewing changes."; return
+        }
+        guard NativeDiffInfo.isValidBase(base) else {
+            error = "Enter a valid base: worktree, staged, HEAD or a branch name."; return
+        }
+        nativeDiffLoading = true
+        do {
+            try await native.send(NativeCommand(op: "diff", session: session, id: UUID().uuidString, base: base))
+        } catch {
+            nativeDiffLoading = false
+            self.error = "Could not request the diff: " + error.localizedDescription
         }
     }
     func cancel() async {
@@ -719,9 +741,12 @@ extension PocketStore {
         nativeTranscript.apply(event)
         nativeSupportsCompaction = nativeTranscript.supportsCompaction
         nativeSupportsQueue = nativeTranscript.supportsQueue
+        nativeSupportsDiff = nativeTranscript.supportsDiff
         if nativeCompaction != nativeTranscript.compaction { nativeCompaction = nativeTranscript.compaction }
         if nativeQueue != nativeTranscript.queue { nativeQueue = nativeTranscript.queue }
         if nativeQueueOmitted != nativeTranscript.queueOmitted { nativeQueueOmitted = nativeTranscript.queueOmitted }
+        if nativeDiff != nativeTranscript.diff { nativeDiff = nativeTranscript.diff }
+        if event.op == "diff" { nativeDiffLoading = false }
         // A queue snapshot retires the optimistic echo only once the host has
         // admitted the exact request, matching the DSH reconciliation.
         if let pending = pendingRequest, nativeQueue.contains(where: { $0.id == pending.id }) {

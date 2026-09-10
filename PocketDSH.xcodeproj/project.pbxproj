@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		01462F8C0CA4072255F2C695 /* DiffReviewView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 98AC5E64694BD203ECD59670 /* DiffReviewView.swift */; };
 		07B0636E1F8662F3B84B0B0C /* HomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6DA2E6D500176C6992989EE1 /* HomeView.swift */; };
 		17DB52B0576409D2EA9E2C0C /* SymbolsNerdFontMono-Regular.ttf in Resources */ = {isa = PBXBuildFile; fileRef = 0C0F59F2281C005DD28D2339 /* SymbolsNerdFontMono-Regular.ttf */; };
 		2BE9481F5EB86B12C151E7FD /* ImageAttachments.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8742D0DC00E6185285EF6EC5 /* ImageAttachments.swift */; };
@@ -80,6 +81,7 @@
 		6DA2E6D500176C6992989EE1 /* HomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeView.swift; sourceTree = "<group>"; };
 		8742D0DC00E6185285EF6EC5 /* ImageAttachments.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImageAttachments.swift; sourceTree = "<group>"; };
 		8F45255EB3E729C10CE13B85 /* VoiceRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceRecorder.swift; sourceTree = "<group>"; };
+		98AC5E64694BD203ECD59670 /* DiffReviewView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiffReviewView.swift; sourceTree = "<group>"; };
 		990F411D48619BD1EAC856DE /* NativeClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeClient.swift; sourceTree = "<group>"; };
 		9A23CDF070AEDF1D7FEED50A /* DemoData.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DemoData.swift; sourceTree = "<group>"; };
 		9D6E11C03392FD115F72A46C /* MarkdownBlocks.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownBlocks.swift; sourceTree = "<group>"; };
@@ -149,6 +151,7 @@
 				F88F3CD3883D2F6BFE7D5AE7 /* ConnectionView.swift */,
 				4536C46B3F5C4076165E8409 /* ContextStatusView.swift */,
 				9A23CDF070AEDF1D7FEED50A /* DemoData.swift */,
+				98AC5E64694BD203ECD59670 /* DiffReviewView.swift */,
 				213F6D56A815333905F5F393 /* HarnessAPI.swift */,
 				0A6ACA8367AD55DAF03625A7 /* HarnessProtocol.swift */,
 				19B8B07078D82DC7A7EE6EC4 /* HarnessView.swift */,
@@ -331,6 +334,7 @@
 				C103524CD83608A91CE30F86 /* ConnectionView.swift in Sources */,
 				B3E5A6229657B8C03CA87DEB /* ContextStatusView.swift in Sources */,
 				AB8C7FF9C25F4275D73B6A31 /* DemoData.swift in Sources */,
+				01462F8C0CA4072255F2C695 /* DiffReviewView.swift in Sources */,
 				40BBF01895004C9E8FAC5FE0 /* HarnessAPI.swift in Sources */,
 				5860D86558FAB4821B9CBDF9 /* HarnessProtocol.swift in Sources */,
 				80C50DEC3D296393371771EE /* HarnessView.swift in Sources */,

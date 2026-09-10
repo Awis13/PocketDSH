@@ -506,6 +506,18 @@ struct NativeDiffInfo: Codable, Sendable, Equatable {
         return copy
     }
 
+    /// Mirrors the host's base validation so the client cannot even request an
+    /// option-like or escaping ref; the host remains the authority.
+    static func isValidBase(_ value: String) -> Bool {
+        switch value {
+        case "worktree", "staged", "HEAD": return true
+        default: break
+        }
+        guard !value.isEmpty, value.utf8.count <= 200, !value.contains(".."), !value.hasPrefix("-") else { return false }
+        let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._/@{}~^:+-")
+        return value.unicodeScalars.allSatisfy { allowed.contains($0) }
+    }
+
     static func clampText(_ text: String, bytes: Int) -> String {
         var value = text
         let lines = value.split(separator: "\n", omittingEmptySubsequences: false)
