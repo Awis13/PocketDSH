@@ -18,9 +18,10 @@ actor PTYControl {
     func open(rows: Int, columns: Int) throws {
         guard active == nil else { throw HarnessError.busy }
         let id = UUID().uuidString
-        let observation = try observations.create(id: id, workspace: workspace)
+        let resolved = PTYSession.canonicalWorkspace(URL(fileURLWithPath: workspace))
+        let observation = try observations.create(id: id, workspace: resolved)
         let session: PTYSession
-        do { session = try PTYSession(workspace: URL(fileURLWithPath: workspace), rows: rows, columns: columns, observation: observation, segmented: true) { bytes in
+        do { session = try PTYSession(workspace: URL(fileURLWithPath: resolved), rows: rows, columns: columns, observation: observation, segmented: true) { bytes in
             Self.emit(Event(control: "ptyOutput", ptyID: id, bytes: bytes))
         } } catch { observations.discard(id: id); throw error }
         active = (id, session)

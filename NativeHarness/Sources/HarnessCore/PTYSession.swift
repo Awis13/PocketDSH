@@ -24,13 +24,26 @@ public final class PTYSession: @unchecked Sendable {
     private let worker: Task<PTYExit, Never>
     private let integration: ShellIntegration?
 
+    /// The single canonical workspace path. Callers must pass this same string
+    /// to the observation so the shell's `getcwd()` never looks like a change.
+    /// `URL.resolvingSymlinksInPath()` does not resolve macOS firmlinks such as
+    /// `/var` and `/tmp`, so use `realpath(3)`, which matches `getcwd()`.
+    public static func canonicalWorkspace(_ workspace: URL) -> String {
+        let standardized = workspace.standardizedFileURL.path
+        guard !standardized.contains("\0") else { return workspace.resolvingSymlinksInPath().path }
+        if let resolved = standardized.withCString({ realpath($0, nil) }) {
+            defer { free(resolved) }
+            return String(cString: resolved)
+        }
+        return workspace.resolvingSymlinksInPath().path
+    }
     public init(workspace: URL, rows: Int = 24, columns: Int = 80,
                 observation: TerminalObservation? = nil,
                 segmented: Bool = false,
                 onFrame: @escaping @Sendable (ShellFrame) -> Void = { _ in },
                 onOutput: @escaping @Sendable (Data) -> Void) throws {
         try Self.validateSize(rows, columns)
-        let path = workspace.standardizedFileURL.resolvingSymlinksInPath().path
+        let path = Self.canonicalWorkspace(workspace)
         var directory: ObjCBool = false
         guard !path.contains("\0"), FileManager.default.fileExists(atPath: path, isDirectory: &directory), directory.boolValue else {
             throw HarnessError.invalid("PTY workspace must be a directory")
@@ -85,8 +98,6 @@ public final class PTYSession: @unchecked Sendable {
 
     /// The shell's own process group (its PID; it is the session leader).
     public var shellPgid: pid_t { state.pid }
-    /// Foreground process group of the PTY master, or nil when closed.
-    public func foregroundPgid() -> pid_t? { Self.foreground(of: state) }
     private static func foreground(of state: State) -> pid_t? {
         state.lock.lock(); defer { state.lock.unlock() }
         guard state.fd >= 0, !state.closing else { return nil }

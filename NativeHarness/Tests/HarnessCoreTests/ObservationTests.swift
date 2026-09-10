@@ -105,7 +105,8 @@ final class ObservationTests: XCTestCase, @unchecked Sendable {
         XCTAssertFalse(tools.definitions.contains { $0.name == "terminal_send" })
     }
 
-    func testModelExcerptBoundsRedrawsWithoutChangingRawHistoryOrCursors() throws {        let history = try TerminalObservation(id: "tui", initialWorkspace: "/tmp")
+    func testModelExcerptBoundsRedrawsWithoutChangingRawHistoryOrCursors() throws {
+        let history = try TerminalObservation(id: "tui", initialWorkspace: "/tmp")
         let output = Data((String(repeating: "\u{1b}[2;39H\u{1b}[31mCPU Привет 85%\u{1b}[0m\r\n", count: 1000) + "FINAL_MARKER").utf8)
         history.append(output)
         let raw = try history.read(after: 0, maxBytes: 65536)
@@ -171,7 +172,12 @@ final class ObservationTests: XCTestCase, @unchecked Sendable {
         let directoryHistory = try TerminalObservation(id: "dirs", initialWorkspace: "/tmp")
         directoryHistory.recordReady(code: 0, directory: long)
         XCTAssertEqual(directoryHistory.commandHistory(limit: 1).first?.directory?.utf8.count, 4096)
-        XCTAssertEqual(records.filter { $0.endedAt == nil }.count, 1, "Only the open clamps record should remain open")
+        XCTAssertTrue(records.filter { $0.endedAt == nil }.isEmpty, "Every start must be closed by its ready or superseded by a later start")
+        let superseded = try XCTUnwrap(records.first { $0.command == "cmd 50" })
+        XCTAssertNotNil(superseded.endedAt, "The newer start must close the superseded record")
+        XCTAssertNil(superseded.exitCode)
+        let clampedRecord = try XCTUnwrap(records.first { $0.command?.hasPrefix("xxx") == true })
+        XCTAssertNotNil(clampedRecord.endedAt, "The clamped command must still be paired with its ready")
     }
     func testTerminalCommandsToolIsReadOnlyAndUntrusted() async throws {
         let catalog = TerminalObservations()
@@ -224,7 +230,7 @@ final class ObservationTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(history.inspect().pendingWaits, 1, "A start alone must not satisfy the wait")
         history.recordReady(code: 2, directory: "/tmp")
         let result = try await waiter.value
-        XCTAssertEqual(result.condition, "command_finished")
+        XCTAssertEqual(result.condition, .commandFinished)
         XCTAssertEqual(result.command?.command, "make test")
         XCTAssertEqual(result.command?.exitCode, 2)
         XCTAssertEqual(result.cwd, "/tmp")
@@ -245,7 +251,7 @@ final class ObservationTests: XCTestCase, @unchecked Sendable {
         history.recordStart(command: "pwd", directory: "/tmp")
         history.recordReady(code: 0, directory: "/etc")
         let result = try await waiter.value
-        XCTAssertEqual(result.condition, "cwd_changed")
+        XCTAssertEqual(result.condition, .cwdChanged)
         XCTAssertEqual(result.cwd, "/etc")
     }
     func testLifecycleConditionTimesOutWithoutTrigger() async throws {
@@ -253,7 +259,7 @@ final class ObservationTests: XCTestCase, @unchecked Sendable {
         let started = ContinuousClock.now
         let result = try await history.wait(after: 0, timeout: 0.02, condition: .commandFinished)
         XCTAssertTrue(result.timedOut)
-        XCTAssertEqual(result.condition, "timeout")
+        XCTAssertEqual(result.condition, .timeout)
         XCTAssertNil(result.command)
         XCTAssertLessThan(started.duration(to: ContinuousClock.now), .seconds(1))
         XCTAssertEqual(history.inspect().pendingWaits, 0)
@@ -292,7 +298,7 @@ final class ObservationTests: XCTestCase, @unchecked Sendable {
         }
         try session.write(Data("printf 'RESPONSIVE\\n'\r".utf8))
         let result = try await lifecycle.value
-        XCTAssertEqual(result.condition, "command_finished")
+        XCTAssertEqual(result.condition, .commandFinished)
         XCTAssertTrue(result.command?.command?.contains("RESPONSIVE") == true)
         try session.write(Data("printf '\\nAFTER_WAIT\\n'\r".utf8))
         var sawAfter = false
@@ -309,6 +315,8 @@ final class ObservationTests: XCTestCase, @unchecked Sendable {
         XCTAssertNil(TerminalWaitCondition(rawValue: "foreground_idle"))
         XCTAssertEqual(TerminalWaitCondition(rawValue: "command_finished"), .commandFinished)
         XCTAssertEqual(TerminalWaitCondition(rawValue: "cwd_changed"), .cwdChanged)
+        XCTAssertFalse(TerminalWaitCondition(rawValue: "exit")!.isRequestable, "exit is an outcome, not a requestable condition")
+        XCTAssertFalse(TerminalWaitCondition(rawValue: "timeout")!.isRequestable, "timeout is an outcome, not a requestable condition")
         let catalog = TerminalObservations()
         _ = try catalog.create(id: "reject", workspace: "/tmp")
         let tools = try WorkspaceTools(root: FileManager.default.temporaryDirectory, observations: catalog)
@@ -337,7 +345,7 @@ final class ObservationTests: XCTestCase, @unchecked Sendable {
             throw XCTSkip("The PTY never exposed a foreground process group in this environment")
         }
         XCTAssertEqual(atPrompt.foregroundPgid, session.shellPgid)
-        XCTAssertFalse(atPrompt.foregroundBusy)
+        XCTAssertEqual(atPrompt.foregroundBusy, false)
         try session.write(Data("sleep 5\r".utf8))
         var busy = false
         var child: TerminalInfo?
@@ -358,8 +366,44 @@ final class ObservationTests: XCTestCase, @unchecked Sendable {
         let tools = try WorkspaceTools(root: FileManager.default.temporaryDirectory, observations: catalog)
         let output = try await tools.execute(ToolCall(id: "i", name: "terminal_inspect", arguments: "{}")).output
         let list = try JSONSerialization.jsonObject(with: Data(output.utf8)) as! [[String: Any]]
-        XCTAssertEqual(list.first?["foregroundBusy"] as? Bool, false)
+        XCTAssertNil(list.first?["foregroundBusy"])
         XCTAssertNil(list.first?["foregroundPgid"])
         XCTAssertTrue(tools.definitions.first { $0.name == "terminal_inspect" }?.description.contains("foreground") == true)
+    }
+    func testForegroundBusyIsTriState() throws {
+        let history = try TerminalObservation(id: "tri", initialWorkspace: "/tmp")
+        XCTAssertNil(history.inspect().foregroundBusy, "No attached PTY is unknown, never idle")
+        history.attachForeground(shellPgid: 42) { 42 }
+        XCTAssertEqual(history.inspect().foregroundBusy, false)
+        history.attachForeground(shellPgid: 42) { 7 }
+        XCTAssertEqual(history.inspect().foregroundBusy, true)
+        history.attachForeground(shellPgid: 42) { nil }
+        XCTAssertNil(history.inspect().foregroundBusy, "A nil foreground group is unknown, never idle")
+    }
+    func testSymlinkedWorkspaceDoesNotReportSpuriousCwdChange() async throws {
+        let manager = FileManager.default
+        let base = manager.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let real = base.appendingPathComponent("real")
+        let link = base.appendingPathComponent("link")
+        try manager.createDirectory(at: real, withIntermediateDirectories: true)
+        try manager.createSymbolicLink(at: link, withDestinationURL: real)
+        defer { try? manager.removeItem(at: base) }
+        let canonical = PTYSession.canonicalWorkspace(link)
+        XCTAssertEqual(canonical, PTYSession.canonicalWorkspace(real))
+        XCTAssertNotEqual(canonical, link.standardizedFileURL.path, "The symlink itself must not be seeded")
+        let history = try TerminalObservation(id: "symlink", initialWorkspace: canonical)
+        let session = try PTYSession(workspace: link, observation: history, segmented: true, onOutput: { _ in })
+        defer { session.close() }
+        // Wait for the initial prompt so the shell has reported its directory.
+        let promptDeadline = ContinuousClock.now.advanced(by: .seconds(5))
+        while ContinuousClock.now < promptDeadline {
+            if history.commandHistory(limit: 1).contains(where: { $0.command == nil && $0.endedAt != nil }) { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertEqual(history.currentDirectory, canonical, "The shell must agree with the seeded workspace")
+        let changed = try await history.wait(after: 0, timeout: 0.3, condition: .cwdChanged)
+        XCTAssertTrue(changed.timedOut, "A matching canonical path must not look like a cwd change")
+        XCTAssertEqual(history.currentDirectory, canonical)
+        session.close(); _ = await session.wait()
     }
 }
