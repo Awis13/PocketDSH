@@ -132,10 +132,16 @@ struct NativeTranscript {
                 rows[i].shell?.interrupted = event.failed == true || event.op == "ptyExit"
             }
         case "user":
+            // A re-emitted user event with the same id reconciles an edited queued
+            // request in place; it must update the row, never append a duplicate.
             let id = "native-user-" + (event.id ?? String(sequence))
-            guard !rows.contains(where: { $0.id == id }) else { return }
             let prompt = ShellPromptContent.parse(event.text ?? "")
-            rows.append(TranscriptRow(id: id, kind: .user, text: prompt.question, detail: prompt.readableContext))
+            if let index = rows.firstIndex(where: { $0.id == id }) {
+                rows[index].text = prompt.question
+                rows[index].detail = prompt.readableContext
+            } else {
+                rows.append(TranscriptRow(id: id, kind: .user, text: prompt.question, detail: prompt.readableContext))
+            }
         case "text", "reasoning":
             let kind: TranscriptRow.Kind = event.op == "text" ? .assistant : .reasoning
             if let i = rows.lastIndex(where: { $0.kind != .shell }), rows[i].kind == kind, !rows[i].complete { rows[i].text += event.text ?? "" }
@@ -172,10 +178,16 @@ struct NativeTranscript {
             }
         case "shellReset": rows.append(TranscriptRow(id: "native-shell-reset-\(sequence)", kind: .notice, text: event.text ?? "New shell; previous commands were not rerun."))
         case "queue":
-            queue = (event.queue?.items ?? []).filter(\.valid)
-            queueOmitted = event.queue?.omitted ?? 0
+            // A malformed/absent queue block is preserved as an extension, so keep
+            // the last good snapshot instead of wiping the dock to empty.
+            guard let info = event.queue else { return }
+            let valid = info.items.filter(\.valid)
+            queue = valid
+            // Invalid items are dropped from the list, so fold them into omitted
+            // to keep items + omitted equal to the host's reported count.
+            queueOmitted = info.omitted + (info.items.count - valid.count)
         // These events belong to session controls, PTY or workspace state.
-        case "request", "compaction", "compactionRejected", "queueAccepted", "queueRejected", "pty", "terminalSize", "workspaceAction", "sessions", "status", "synced", "accepted", "approval", "completion", "error": break
+        case "request", "compaction", "compactionRejected", "queueAccepted", "queueRejected", "queueText", "pty", "terminalSize", "workspaceAction", "sessions", "status", "synced", "accepted", "approval", "completion", "error": break
         default: notice("Unrecognized event: " + NativeRequestInfo.label(event.op))
         }
     }

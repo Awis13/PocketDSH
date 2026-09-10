@@ -83,6 +83,14 @@ import Foundation
         precondition(attached.rows == sentRows, "Reconnect must restore the same question and captured context")
         print("PASS attached context: readable question, exact sent excerpt and idempotent replay")
 
+        var edited = NativeTranscript()
+        edited.apply(NativeEvent(op: "user", id: "req", text: "original text", sequence: 1))
+        precondition(edited.rows.count == 1 && edited.rows[0].text == "original text")
+        edited.apply(NativeEvent(op: "user", id: "req", text: "edited text", sequence: 2))
+        precondition(edited.rows.count == 1 && edited.rows[0].text == "edited text",
+                     "An edited queued request must reconcile its existing row, not duplicate it")
+        print("PASS edited queue reconciliation: same request id updates the row in place")
+
         var queued = NativeTranscript()
         queued.apply(NativeEvent(op: "opened", session: "s", capabilities: [NativeQueueInfo.capability]))
         precondition(queued.supportsQueue)
@@ -93,10 +101,17 @@ import Foundation
         ], omitted: 2)
         queued.apply(NativeEvent(op: "queue", session: "s", queue: snapshot))
         precondition(queued.queue.map { $0.id } == ["a", "b"], "Invalid queue items must be dropped")
-        precondition(queued.queueOmitted == 2 && queued.queue.first?.isSteering == false && queued.queue.last?.isSteering == true)
+        // Dropped invalid items fold into omitted so the displayed total still agrees.
+        precondition(queued.queueOmitted == 3 && queued.queue.count + queued.queueOmitted == snapshot.count)
+        precondition(queued.queue.first?.isSteering == false && queued.queue.last?.isSteering == true)
         queued.apply(NativeEvent(op: "queueAccepted", session: "s"))
         queued.apply(NativeEvent(op: "queueRejected", session: "s"))
+        queued.apply(NativeEvent(op: "queueText", session: "s", id: "a", text: "full"))
         precondition(queued.protocolNotices.isEmpty, "Queue control events are not unsupported operations")
+        // A malformed queue block keeps the last good snapshot instead of wiping it.
+        queued.apply(NativeEvent(op: "queue", session: "s", queue: nil))
+        precondition(queued.queue.map { $0.id } == ["a", "b"] && queued.queueOmitted == 3,
+                     "A missing queue block must not clear a good snapshot")
         queued.apply(NativeEvent(op: "opened", session: "s", capabilities: [NativeQueueInfo.capability]))
         precondition(queued.queue.isEmpty && queued.queueOmitted == 0, "Reconnect clears stale queue state")
         let futureQueue = try JSONDecoder().decode(NativeEvent.self, from: Data(#"{"op":"queue","session":"s","queue":{"items":[],"omitted":0},"futureQueueField":{"deep":[1,2,3]}}"#.utf8))

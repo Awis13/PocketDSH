@@ -8,6 +8,7 @@ struct QueueDockView: View {
     @Environment(\.harnessTheme) private var theme
     @State private var editing: NativeQueueItem?
     @State private var editText = ""
+    @State private var loadingEdit = false
     @State private var busy = false
 
     private var visible: Bool {
@@ -69,8 +70,19 @@ struct QueueDockView: View {
 
     private func beginEditing(_ item: NativeQueueItem) {
         guard store.canControlQueue else { return }
-        editText = item.truncated ? "" : item.preview
         editing = item
+        guard item.truncated else {
+            loadingEdit = false
+            editText = item.preview
+            return
+        }
+        // The preview was clipped; fetch the bounded full text for this one item.
+        loadingEdit = true
+        editText = ""
+        store.loadQueuedText(item.id) { text in
+            editText = text
+            loadingEdit = false
+        }
     }
 
     private func act(_ work: @escaping () async -> Void) {
@@ -83,23 +95,24 @@ struct QueueDockView: View {
         NavigationStack {
             Form {
                 Section {
+                    if loadingEdit { ProgressView().controlSize(.small) }
                     TextField("Request text", text: $editText, axis: .vertical).lineLimit(3...12)
                         .accessibilityIdentifier("queueEditField")
                 } header: { Text("Edit queued request") } footer: {
                     Text(item.truncated
-                        ? "The stored request is longer than the preview; type the full replacement."
+                        ? "The stored request is longer than the preview; edit the full text below."
                         : "Replacing the text keeps this request's position and delivery mode.")
                 }
             }
             .navigationTitle("Edit request").navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { editing = nil } }
+                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { editing = nil; loadingEdit = false } }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Save") {
                         let id = item.id, text = editText
-                        editing = nil
+                        editing = nil; loadingEdit = false
                         Task { await store.editQueued(id, prompt: text) }
-                    }.disabled(editText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !store.canControlQueue)
+                    }.disabled(loadingEdit || editText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !store.canControlQueue)
                 }
             }
         }

@@ -120,6 +120,7 @@ final class PocketStore: ObservableObject {
     private var nativeTranscript = NativeTranscript()
     var nativeReady = false
     private var nativeSubmission: (id: String, text: String, session: String, draft: String, attachmentIDs: [String])?
+    private var queueTextHandlers: [String: (String) -> Void] = [:]
     private var nativeReconnect: Task<Void, Never>?
     private var nativeRetry = 0
     private struct SavedNativeRequest: Codable {
@@ -536,6 +537,19 @@ final class PocketStore: ObservableObject {
     }
     func removeQueued(_ id: String) async { await queueAction("remove", itemID: id) }
     func steerQueued(_ id: String) async { await queueAction("steer", itemID: id) }
+    /// Fetches the full stored prompt for one queued item on demand. The dock's
+    /// list preview stays clipped, so editing a long request never needs retyping.
+    func loadQueuedText(_ id: String, completion: @escaping (String) -> Void) {
+        guard canControlQueue, let native, let session = selectedID else { return }
+        queueTextHandlers[id] = completion
+        Task {
+            do { try await native.send(NativeCommand(op: "queue", session: session, id: UUID().uuidString, action: "text", itemID: id)) }
+            catch {
+                queueTextHandlers.removeValue(forKey: id)
+                self.error = error.localizedDescription
+            }
+        }
+    }
     private func queueAction(_ action: String, itemID: String, text: String? = nil) async {
         guard canControlQueue, let native, let session = selectedID else {
             error = "Reconnect to the native host before changing the queue."; return
@@ -653,6 +667,7 @@ extension PocketStore {
             }
             return
         }
+        guard event.session == nil || event.session == selectedID else { return }
         if event.op == "error" { error = event.text ?? "Native Harness error"; nativeSubmission = nil; loadingHistory = false; return }
         if event.op == "accepted", let submission = nativeSubmission, submission.id == event.id {
             if selectedID == submission.session, draft.trimmingCharacters(in: .whitespacesAndNewlines) == submission.draft { draft = "" }
@@ -668,9 +683,12 @@ extension PocketStore {
             pendingRequest = nil; pendingText = nil; nativeSubmission = nil
             UserDefaults.standard.removeObject(forKey: nativeRequestKey(submission.session))
         }
-        guard event.session == nil || event.session == selectedID else { return }
         if event.op == "completion" { nativeShell?.receive(event); return }
         if event.op == "queueRejected" { error = NativeQueueInfo.rejectionDetail(event.text ?? ""); return }
+        if event.op == "queueText", let itemID = event.id, let text = event.text {
+            queueTextHandlers.removeValue(forKey: itemID)?(text)
+            return
+        }
         if event.op == "opened", let id = event.session {
             if nativeShell?.id != id {
                 let shell = NativeClient(id: id, endpoint: endpoint, token: "")
