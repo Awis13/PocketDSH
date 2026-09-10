@@ -390,6 +390,8 @@ struct NativeInlineDiffHunk: Codable, Sendable, Equatable {
     var oldText: String?
     var newText: String
 
+    private enum CodingKeys: String, CodingKey { case path, oldText, newText }
+
     init(path: String, oldText: String?, newText: String) {
         self.path = path; self.oldText = oldText; self.newText = newText
     }
@@ -398,6 +400,21 @@ struct NativeInlineDiffHunk: Codable, Sendable, Equatable {
         path = (try? c.decode(String.self, forKey: .path)) ?? ""
         oldText = try? c.decodeIfPresent(String.self, forKey: .oldText)
         newText = (try? c.decodeIfPresent(String.self, forKey: .newText)) ?? ""
+    }
+
+    /// Emit an explicit `null` for a nil `oldText` instead of omitting the key.
+    /// DSH's wire always carries `{"path","oldText":null,"newText"}` for a pure
+    /// insertion, and the synthesized encoder would `encodeIfPresent` the key
+    /// away. Keep the key unconditionally present so the frame stays
+    /// unmistakably distinct from the singular `diff` field (`NativeDiffInfo`,
+    /// `workspace.diff.v1`), a different contract whose hunks have no nullable
+    /// `oldText`. Decoding still tolerates both a missing key and an explicit
+    /// null.
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(path, forKey: .path)
+        if let oldText { try c.encode(oldText, forKey: .oldText) } else { try c.encodeNil(forKey: .oldText) }
+        try c.encode(newText, forKey: .newText)
     }
     func clamped(maximumBytes: Int = NativeDiffLimits.maximumFieldBytes) -> NativeInlineDiffHunk {
         var copy = self

@@ -188,8 +188,12 @@ private actor NativeHostSession {
             case .tool: break
             case .toolCall(let call): sink.send(NativeEvent(op: "toolCall", session: id, id: call.id, text: call.name, arguments: call.arguments))
             case .toolResult(let callID, let output, let failed, let diffs):
-                let inline = diffs.isEmpty ? nil : diffs.map { NativeInlineDiffHunk(path: $0.path, oldText: $0.oldText, newText: $0.newText) }
-                sink.send(NativeEvent(op: "toolResult", session: id, id: callID, text: output, failed: failed, toolDiffs: inline))
+                // Enforce the documented wire bound at the mapping site, not only
+                // inside the core projection, so a future core regression cannot
+                // emit an unbounded frame. An all-dropped payload becomes nil.
+                let inline = diffs.isEmpty ? [] : NativeInlineDiffHunk.sanitized(
+                    diffs.map { NativeInlineDiffHunk(path: $0.path, oldText: $0.oldText, newText: $0.newText) })
+                sink.send(NativeEvent(op: "toolResult", session: id, id: callID, text: output, failed: failed, toolDiffs: inline.isEmpty ? nil : inline))
             case .compaction(let receipt):
                 if let info = try? NativeCompactionInfo(encoding: receipt) {
                     sink.send(NativeEvent(op: "compaction", session: id, id: info.id, compaction: info))

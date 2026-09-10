@@ -98,4 +98,41 @@ final class ToolDiffTests: XCTestCase {
         let hunks = ToolDiff.hunks(path: "f", before: beforeLines.joined(separator: "\n"), after: afterLines.joined(separator: "\n"))
         XCTAssertEqual(hunks.count, ToolDiffLimits.maximumHunks, "Hunk count is capped")
     }
+
+    func testTotalByteBudgetStopsEarlyAcrossManyHunks() {
+        let groups = 20
+        let oldLine = String(repeating: "o", count: 20_000)
+        let newLine = String(repeating: "n", count: 20_000)
+        var beforeLines: [String] = []
+        var afterLines: [String] = []
+        for i in 0..<groups {
+            beforeLines.append(oldLine + " \(i)")
+            afterLines.append(newLine + " \(i)")
+            for g in 0..<8 {
+                beforeLines.append("filler \(i)-\(g)")
+                afterLines.append("filler \(i)-\(g)")
+            }
+        }
+        let hunks = ToolDiff.hunks(path: "f", before: beforeLines.joined(separator: "\n"), after: afterLines.joined(separator: "\n"))
+        let total = hunks.reduce(0) { $0 + ($1.oldText?.utf8.count ?? 0) + $1.newText.utf8.count }
+        XCTAssertLessThanOrEqual(total, ToolDiffLimits.maximumTotalBytes)
+        XCTAssertGreaterThan(hunks.count, 0)
+        XCTAssertLessThan(hunks.count, groups, "The total-bytes budget stops hunk production early")
+    }
+
+    func testLargeRewriteCoalescesInsteadOfBuildingAGiantLCS() throws {
+        let count = 2_100
+        XCTAssertGreaterThan(count * count, ToolDiffLimits.maximumDiffCells,
+                             "Precondition: the full LCS table would exceed the cell budget")
+        let before = (0..<count).map { "old \($0)" }.joined(separator: "\n")
+        let after = (0..<count).map { "new \($0)" }.joined(separator: "\n")
+        let hunks = ToolDiff.hunks(path: "f", before: before, after: after)
+        XCTAssertEqual(hunks.count, 1, "A full rewrite coalesces into a single bounded hunk")
+        let hunk = try XCTUnwrap(hunks.first)
+        let oldText = try XCTUnwrap(hunk.oldText)
+        XCTAssertLessThanOrEqual(oldText.split(separator: "\n", omittingEmptySubsequences: false).count, ToolDiffLimits.maximumLines)
+        XCTAssertLessThanOrEqual(hunk.newText.split(separator: "\n", omittingEmptySubsequences: false).count, ToolDiffLimits.maximumLines)
+        XCTAssertLessThanOrEqual(oldText.utf8.count, ToolDiffLimits.maximumFieldBytes)
+        XCTAssertLessThanOrEqual(hunk.newText.utf8.count, ToolDiffLimits.maximumFieldBytes)
+    }
 }

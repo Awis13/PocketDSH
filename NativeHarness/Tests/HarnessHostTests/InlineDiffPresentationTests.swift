@@ -7,7 +7,11 @@ final class InlineDiffPresentationTests: XCTestCase {
     func testToolDiffsRoundTripLosslessly() throws {
         let event = NativeEvent(op: "toolResult", session: "s", id: "c1", text: "Updated a.txt", failed: false,
                                 toolDiffs: [NativeInlineDiffHunk(path: "a.txt", oldText: nil, newText: "line")])
-        let decoded = try JSONDecoder().decode(NativeEvent.self, from: JSONEncoder().encode(event))
+        let encoded = try JSONEncoder().encode(event)
+        let json = String(decoding: encoded, as: UTF8.self)
+        XCTAssertTrue(json.contains("\"oldText\":null"),
+                      "A pure insertion must emit an explicit null, not omit the key (DSH wire shape)")
+        let decoded = try JSONDecoder().decode(NativeEvent.self, from: encoded)
         XCTAssertEqual(decoded.toolDiffs, event.toolDiffs)
         XCTAssertTrue(decoded.extraFields.isEmpty, "A known field must not leak into unknown preservation")
     }

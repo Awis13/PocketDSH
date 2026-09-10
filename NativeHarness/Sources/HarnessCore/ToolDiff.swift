@@ -40,6 +40,10 @@ public enum ToolDiff {
         guard before != after else { return [] }
         let ops = diffOps(lines(before), lines(after))
         let changed = ops.indices.filter { !isEqual(ops[$0]) }
+        // A raw-text difference that vanishes at line granularity (a trailing
+        // newline added or removed) yields no changed ops and is intentionally
+        // not rendered: it has no lines to show and forcing a hunk would
+        // destabilize the context grouping for no reader value.
         guard !changed.isEmpty else { return [] }
 
         var groups: [(first: Int, last: Int)] = []
@@ -137,6 +141,11 @@ public enum ToolDiff {
             case .insert(let line): new.append(line)
             }
         }
+        // `oldText = nil` for a pure insertion is intentional: it matches the
+        // documented DSH `FileDiff` contract and gives the existing
+        // `ToolDiffView` a clean insertion card. (DSH's `computeHunkDiffs` JS
+        // historically also carried context on the old side, so this is the
+        // native contract, not a byte-for-byte clone of that implementation.)
         return ToolDiffHunk(path: path, oldText: removed ? clamp(old) : nil, newText: clamp(new))
     }
 
