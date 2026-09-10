@@ -40,6 +40,28 @@ final class InlineDiffPresentationTests: XCTestCase {
         XCTAssertNotNil(event.extraFields["toolDiffs"], "An undecodable payload must not be dropped or disconnect the client")
     }
 
+    func testInlineDiffWithAbsentOldTextDecodesAsNilForLegacyHosts() throws {
+        // An older host used the synthesized encoder, which omitted the key for a
+        // nil `oldText`; a newer client must still decode that frame.
+        let event = try JSONDecoder().decode(NativeEvent.self,
+            from: Data(#"{"op":"toolResult","toolDiffs":[{"path":"a","newText":"x"}]}"#.utf8))
+        let hunk = try XCTUnwrap(event.toolDiffs?.first)
+        XCTAssertEqual(hunk.path, "a")
+        XCTAssertEqual(hunk.newText, "x")
+        XCTAssertNil(hunk.oldText, "An absent oldText key decodes as nil rather than failing")
+    }
+
+    func testAllDroppedInlineDiffsMapToNilToolDiffs() {
+        // Every hunk has an empty path and is dropped by `sanitized`; the wire
+        // mapping must publish no `toolDiffs` at all rather than an empty array.
+        XCTAssertNil(NativeInlineDiffPresentation.toolDiffs([]),
+                     "No core diff means no wire diff, not an empty array")
+        XCTAssertNil(NativeInlineDiffPresentation.toolDiffs([ToolDiffHunk(path: "", oldText: "old", newText: "new")]),
+                     "An all-dropped payload maps back to nil")
+        let kept = NativeInlineDiffPresentation.toolDiffs([ToolDiffHunk(path: "a", oldText: nil, newText: "x")])
+        XCTAssertEqual(kept?.count, 1, "A renderable hunk survives the mapping")
+    }
+
     func testSanitizedClampsOversizedHunksAndDropsEmptyPaths() {
         let huge = String(repeating: "x", count: 40_000)
         let bounded = NativeInlineDiffHunk.sanitized([

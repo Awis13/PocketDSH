@@ -124,12 +124,23 @@ final class ToolDiffTests: XCTestCase {
         let count = 2_100
         XCTAssertGreaterThan(count * count, ToolDiffLimits.maximumDiffCells,
                              "Precondition: the full LCS table would exceed the cell budget")
-        let before = (0..<count).map { "old \($0)" }.joined(separator: "\n")
-        let after = (0..<count).map { "new \($0)" }.joined(separator: "\n")
-        let hunks = ToolDiff.hunks(path: "f", before: before, after: after)
-        XCTAssertEqual(hunks.count, 1, "A full rewrite coalesces into a single bounded hunk")
+        // The two files share lines at scattered intervals, so an LCS traceback
+        // without the `maximumDiffCells` guard would split them into many small
+        // hunks. The guard must coalesce the whole region into one bounded
+        // replacement. A wholly-different rewrite cannot observe this: its LCS
+        // traceback degrades to the same delete-all/insert-all stream the guard
+        // returns, so removing the guard would not change the output.
+        let changed = Set([0, 300, 600, 900, 1_200, 1_500, 1_800, count - 1])
+        let beforeLines = (0..<count).map { "old \($0)" }
+        let afterLines = (0..<count).map { changed.contains($0) ? "new \($0)" : "old \($0)" }
+        let hunks = ToolDiff.hunks(path: "f",
+                                   before: beforeLines.joined(separator: "\n"),
+                                   after: afterLines.joined(separator: "\n"))
+        XCTAssertEqual(hunks.count, 1, "A huge sparse edit coalesces into a single bounded hunk")
         let hunk = try XCTUnwrap(hunks.first)
         let oldText = try XCTUnwrap(hunk.oldText)
+        XCTAssertTrue(oldText.contains("old 100"),
+                      "The coalesced replacement spans far-apart changes instead of one local region")
         XCTAssertLessThanOrEqual(oldText.split(separator: "\n", omittingEmptySubsequences: false).count, ToolDiffLimits.maximumLines)
         XCTAssertLessThanOrEqual(hunk.newText.split(separator: "\n", omittingEmptySubsequences: false).count, ToolDiffLimits.maximumLines)
         XCTAssertLessThanOrEqual(oldText.utf8.count, ToolDiffLimits.maximumFieldBytes)
