@@ -43,6 +43,19 @@ public actor SessionEngine {
     public func pending() async throws -> [PendingCommand] { try await store.pending(session: id) }
     public func removePending(commandID: String) async throws -> Bool { try await store.removePending(session: id, id: commandID) }
 
+    /// Editing is safe while output streams: it only touches unclaimed work.
+    public func editPending(commandID: String, prompt: String) async throws -> Bool {
+        try await store.editPending(session: id, id: commandID, prompt: prompt)
+    }
+
+    /// Steering a queued item only makes sense for the in-flight turn. An idle
+    /// session rejects it outright so the host can report `steer-unavailable`
+    /// instead of silently leaving the item queued for a later turn.
+    public func steerPending(commandID: String) async throws -> Bool {
+        guard running else { throw QueueControlError.steerUnavailable }
+        return try await store.steerPending(session: id, id: commandID)
+    }
+
     public func run(prompt: String, maxSteps: Int = 12,
                     onUpdate: @escaping @Sendable (LiveUpdate) -> Void = { _ in }) async throws -> String {
         try await start(prompt: prompt, maxSteps: maxSteps, onUpdate: onUpdate)

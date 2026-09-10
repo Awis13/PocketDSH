@@ -230,6 +230,42 @@ public actor EventStore {
         }
     }
 
+    /// Replace the prompt of a pending command in place. The stable identity and
+    /// delivery mode are preserved so an edit never reorders or re-steers work.
+    /// Editing commits a new payload for the ID; retrying the old payload with
+    /// the same ID is then a different-payload rejection, exactly like enqueue.
+    public func editPending(session: String, id: String, prompt: String) throws -> Bool {
+        guard !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              prompt.utf8.count <= 262144, !prompt.contains("\0") else {
+            throw HarnessError.invalid("Invalid command prompt (limit 256 KiB)")
+        }
+        return try transaction {
+            let result = try rows("SELECT state,prompt FROM commands WHERE session=? AND id=?", [session,id])
+            guard result.first?.first == "pending" else { return false }
+            guard result.first?.last != prompt else { return true }
+            _ = try rows("UPDATE commands SET prompt=? WHERE session=? AND id=? AND state='pending'", [prompt,session,id])
+            var event = SessionEvent("inbox.edited"); event.commandID = id
+            try insertEvents([event], session: session)
+            return true
+        }
+    }
+
+    /// Convert a still-queued command into steering for the current turn. Only a
+    /// queue → steer transition is meaningful; anything else is a no-op, so a
+    /// retried steer after the first one committed reports not-found rather than
+    /// silently re-ordering already-claimed work.
+    public func steerPending(session: String, id: String) throws -> Bool {
+        try transaction {
+            let result = try rows("SELECT mode,state FROM commands WHERE session=? AND id=?", [session,id])
+            guard result.first?.first == DeliveryMode.queue.rawValue,
+                  result.first?.last == "pending" else { return false }
+            _ = try rows("UPDATE commands SET mode='steer' WHERE session=? AND id=? AND state='pending'", [session,id])
+            var event = SessionEvent("inbox.steered"); event.commandID = id
+            try insertEvents([event], session: session)
+            return true
+        }
+    }
+
     /// Claim and transcript admission are one transaction; a crash cannot
     /// remove a prompt from the inbox without leaving it in history.
     func claim(session: String, owner: String, startsTurn: Bool, trace: TraceContext) throws -> [Message] {
