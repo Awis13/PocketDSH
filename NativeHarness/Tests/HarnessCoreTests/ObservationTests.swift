@@ -317,4 +317,35 @@ final class ObservationTests: XCTestCase, @unchecked Sendable {
             XCTFail("Expected unknown condition to be rejected")
         } catch {}
     }
+    func testForegroundPgidMatchesShellAtPromptAndTracksChild() async throws {
+        let history = try TerminalObservation(id: "fg", initialWorkspace: "/tmp")
+        let session = try PTYSession(workspace: FileManager.default.temporaryDirectory, observation: history, onOutput: { _ in })
+        defer { session.close() }
+        let atPrompt = history.inspect()
+        XCTAssertEqual(atPrompt.foregroundPgid, session.shellPgid)
+        XCTAssertFalse(atPrompt.foregroundBusy)
+        try session.write(Data("sleep 5\r".utf8))
+        var busy = false
+        var child: TerminalInfo?
+        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+        while ContinuousClock.now < deadline {
+            child = history.inspect()
+            if child?.foregroundBusy == true { busy = true; break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertTrue(busy, "A foreground child should not share the shell process group")
+        XCTAssertNotEqual(child?.foregroundPgid, session.shellPgid)
+        try? session.interrupt()
+        session.close(); _ = await session.wait()
+    }
+    func testTerminalInspectReportsForegroundState() async throws {
+        let catalog = TerminalObservations()
+        _ = try catalog.create(id: "fg-tool", workspace: "/tmp")
+        let tools = try WorkspaceTools(root: FileManager.default.temporaryDirectory, observations: catalog)
+        let output = try await tools.execute(ToolCall(id: "i", name: "terminal_inspect", arguments: "{}")).output
+        let list = try JSONSerialization.jsonObject(with: Data(output.utf8)) as! [[String: Any]]
+        XCTAssertEqual(list.first?["foregroundBusy"] as? Bool, false)
+        XCTAssertNil(list.first?["foregroundPgid"])
+        XCTAssertTrue(tools.definitions.first { $0.name == "terminal_inspect" }?.description.contains("foreground") == true)
+    }
 }

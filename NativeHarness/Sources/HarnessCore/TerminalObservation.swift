@@ -24,14 +24,20 @@ public enum TerminalWaitCondition: String, Codable, Sendable, CaseIterable {
     case commandFinished = "command_finished"
     case cwdChanged = "cwd_changed"
 }
-
-public struct TerminalInfo: Codable, Sendable {    public let id: String
+public struct TerminalInfo: Codable, Sendable {
+    public let id: String
     public let initialWorkspace: String
     public let firstCursor: Int64
     public let latestCursor: Int64
     public let retainedBytes: Int
     public let pendingWaits: Int
     public let exit: PTYExit?
+    /// Foreground process group of the PTY, or nil when no shell is attached
+    /// or the PTY is closed. This is the only foreground signal reported:
+    /// exact "stdin waiting" is unavailable on macOS and DSH hardcodes it false.
+    public let foregroundPgid: Int32?
+    /// True when the foreground group differs from the shell's own group.
+    public let foregroundBusy: Bool
 }
 
 public struct TerminalRead: Codable, Sendable {
@@ -72,6 +78,8 @@ public final class TerminalObservation: @unchecked Sendable {
     private var finishedCommands: Int64 = 0
     private var cwdChanges: Int64 = 0
     private var latestDirectory: String
+    private var shellPgid: Int32 = -1
+    private var foreground: (@Sendable () -> Int32?)?
     private struct Waiter {
         let cursor: Int64
         let limit: Int
@@ -176,8 +184,17 @@ public final class TerminalObservation: @unchecked Sendable {
     }
     public func inspect() -> TerminalInfo {
         lock.lock(); defer { lock.unlock() }
+        let foregroundPgid = foreground?()
         return TerminalInfo(id: id, initialWorkspace: initialWorkspace, firstCursor: end - Int64(bytes.count), latestCursor: end,
-                            retainedBytes: bytes.count, pendingWaits: waiters.count, exit: exit)
+                            retainedBytes: bytes.count, pendingWaits: waiters.count, exit: exit,
+                            foregroundPgid: foregroundPgid,
+                            foregroundBusy: shellPgid > 0 && foregroundPgid != nil && foregroundPgid != shellPgid)
+    }
+    /// Ties this observation to the PTY that owns it. The provider is called
+    /// under the observation lock and only takes the PTY's own lock, so the
+    /// two locks are never acquired in the opposite order.
+    public func attachForeground(shellPgid: Int32, provider: @escaping @Sendable () -> Int32?) {
+        lock.lock(); self.shellPgid = shellPgid; self.foreground = provider; lock.unlock()
     }
     public func read(after cursor: Int64, maxBytes: Int = 16384) throws -> TerminalRead {
         lock.lock(); defer { lock.unlock() }

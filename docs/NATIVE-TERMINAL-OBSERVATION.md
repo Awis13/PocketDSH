@@ -47,4 +47,11 @@ The result keeps every existing field and adds `condition`, `command` and `cwd`,
 
 The real CLI probe `scripts/probe-native-observation.py` covers a blocking `command_finished` wait, a `cwd_changed` wait, and the `terminal_commands` list on an isolated fixture host.
 
+## Foreground state (2026-09-11)
+
+`terminal_inspect` now reports `foregroundPgid` (the `tcgetpgrp` of the PTY master, resolved live on each inspection) and `foregroundBusy` (true when the foreground group differs from the shell's own group). `PTYSession.foregroundPgid()` exposes the same value to the host; the observation is wired to the owning PTY, never cached for a later signal.
+
+macOS has no supported query for "is a process waiting on stdin", so exact stdin-waiting is not reported: DSH hardcodes that signal false and states only the foreground process group. This is not proof that a command is interactive, backgrounded, or complete.
+
+
 

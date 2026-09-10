@@ -78,9 +78,21 @@ public final class PTYSession: @unchecked Sendable {
             observation?.finish(result)
             return result
         }
+        observation?.attachForeground(shellPgid: pid) { [state] in Self.foreground(of: state) }
     }
 
     deinit { close() }
+
+    /// The shell's own process group (its PID; it is the session leader).
+    public var shellPgid: pid_t { state.pid }
+    /// Foreground process group of the PTY master, or nil when closed.
+    public func foregroundPgid() -> pid_t? { Self.foreground(of: state) }
+    private static func foreground(of state: State) -> pid_t? {
+        state.lock.lock(); defer { state.lock.unlock() }
+        guard state.fd >= 0, !state.closing else { return nil }
+        let foreground = tcgetpgrp(state.fd)
+        return foreground > 0 ? foreground : nil
+    }
 
     /// Queue input atomically; reject rather than dropping bytes on overload.
     public func write(_ bytes: Data) throws {
