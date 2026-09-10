@@ -4,3 +4,5 @@ cd "$(dirname "$0")/.."
 mkdir -p .build/checks
 xcrun swiftc -parse-as-library PocketDSH/HarnessProtocol.swift PocketDSH/HarnessAPI.swift PocketDSH/ImageAttachments.swift Tests/ProtocolChecks.swift -o .build/checks/protocol-checks
 .build/checks/protocol-checks
+xcrun swiftc -parse-as-library PocketDSH/SavedConnections.swift Tests/SavedConnectionChecks.swift -o .build/checks/connection-checks
+.build/checks/connection-checks

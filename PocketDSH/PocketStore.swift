@@ -155,6 +155,7 @@ final class PocketStore: ObservableObject {
         if restoringPrimary, let data = UserDefaults.standard.data(forKey: "harness.primaryPane.v1"),
            let state = try? JSONDecoder().decode(SavedPane.self, from: data) { restorePane(state) }
         primaryPane = restoringPrimary
+        SavedConnections.remember(endpoint)
     }
 
     private func connectionDiagnostic(_ stage: String, error: Error? = nil) {
@@ -198,6 +199,7 @@ final class PocketStore: ObservableObject {
             }
             connectionDiagnostic("session-list-loaded")
             api = candidate; endpoint = base.absoluteString
+            SavedConnections.remember(endpoint)
             UserDefaults.standard.set(endpoint, forKey: "harness.endpoint")
             sessions = result["items"].array.map { HarnessSession(raw: $0) }
             catalog = loadedCatalog
@@ -624,6 +626,7 @@ extension PocketStore {
             model = .object(["provider": .string("native"), "model": .string(event.model ?? "Host model")])
             catalog = .object(["default": model, "groups": .array([])])
             connected = true; connecting = false; nativeRetry = 0
+            SavedConnections.remember(endpoint)
             if wasConnecting, let id = selectedID {
                 if sessions.contains(where: { $0.id == id }) { Task { await self.select(id) } }
                 else { selectedID = nil; rows = []; interactions = []; nativeReady = false; error = "The saved session is not in this host's journal. Check the host address and storage path." }

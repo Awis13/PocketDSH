@@ -30,6 +30,7 @@
 		A52477BEDBE0E382C6C2C105 /* LiveReasoningView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1DB1F53D3DE276524D2EFC7 /* LiveReasoningView.swift */; };
 		A8F3CECEBAD3E60B962CBAB9 /* TerminalAppearance.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA1BA7A9B1DC97856095C0CB /* TerminalAppearance.swift */; };
 		AB8C7FF9C25F4275D73B6A31 /* DemoData.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9A23CDF070AEDF1D7FEED50A /* DemoData.swift */; };
+		AEE9CF4748B05A40537309B6 /* SavedConnections.swift in Sources */ = {isa = PBXBuildFile; fileRef = 06C35CF3F2E4B245A4F9BB28 /* SavedConnections.swift */; };
 		B3E5A6229657B8C03CA87DEB /* ContextStatusView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4536C46B3F5C4076165E8409 /* ContextStatusView.swift */; };
 		C103524CD83608A91CE30F86 /* ConnectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F88F3CD3883D2F6BFE7D5AE7 /* ConnectionView.swift */; };
 		C9D4CACAFC991269FE6A7BCB /* PocketDSHApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = F816DAE6C96C8E45D149EEF5 /* PocketDSHApp.swift */; };
@@ -53,6 +54,7 @@
 /* Begin PBXFileReference section */
 		02489B2F7AE0DF7A7A2B39F6 /* Mac.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Mac.entitlements; sourceTree = "<group>"; };
 		0519EE3AB14142CDB1CABDFE /* Build.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Build.xcconfig; sourceTree = "<group>"; };
+		06C35CF3F2E4B245A4F9BB28 /* SavedConnections.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SavedConnections.swift; sourceTree = "<group>"; };
 		07CDD0CC0057F5866D24FF20 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		0A6ACA8367AD55DAF03625A7 /* HarnessProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HarnessProtocol.swift; sourceTree = "<group>"; };
 		0C0F59F2281C005DD28D2339 /* SymbolsNerdFontMono-Regular.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "SymbolsNerdFontMono-Regular.ttf"; sourceTree = "<group>"; };
@@ -159,6 +161,7 @@
 				997B7365DE1C0EC9385B47BB /* NativeWorkspace.swift */,
 				F816DAE6C96C8E45D149EEF5 /* PocketDSHApp.swift */,
 				C49C2AC1DB6173218484FA24 /* PocketStore.swift */,
+				06C35CF3F2E4B245A4F9BB28 /* SavedConnections.swift */,
 				51A0DE6E9EE1DD8033673D14 /* ShellBlockInteraction.swift */,
 				44B25DCB6141C9DBACE0EE9B /* ShellBlockViews.swift */,
 				3F19FB2A62A2A1ADAA7337ED /* Simulator.entitlements */,
@@ -337,6 +340,7 @@
 				958504A85B823EF29E80CCF4 /* NativeWorkspace.swift in Sources */,
 				C9D4CACAFC991269FE6A7BCB /* PocketDSHApp.swift in Sources */,
 				D82FC2E56324E4886177E337 /* PocketStore.swift in Sources */,
+				AEE9CF4748B05A40537309B6 /* SavedConnections.swift in Sources */,
 				8A3284A72DB675093B2EB8B1 /* ShellBlockInteraction.swift in Sources */,
 				4B32DCC7FD423731DE545A37 /* ShellBlockViews.swift in Sources */,
 				A8F3CECEBAD3E60B962CBAB9 /* TerminalAppearance.swift in Sources */,
@@ -402,7 +406,7 @@
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 2;
+				CURRENT_PROJECT_VERSION = 4;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = PocketDSH/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = "Pocket DSH";
@@ -416,7 +420,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.0.1;
+				MARKETING_VERSION = 1.0.2;
 				PRODUCT_BUNDLE_IDENTIFIER = dev.awis.PocketDSH;
 				SDKROOT = iphoneos;
 				SUPPORTS_MACCATALYST = YES;
@@ -434,7 +438,7 @@
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 2;
+				CURRENT_PROJECT_VERSION = 4;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = PocketDSH/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = "Pocket DSH";
@@ -448,7 +452,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.0.1;
+				MARKETING_VERSION = 1.0.2;
 				PRODUCT_BUNDLE_IDENTIFIER = dev.awis.PocketDSH;
 				SDKROOT = iphoneos;
 				SUPPORTS_MACCATALYST = YES;
