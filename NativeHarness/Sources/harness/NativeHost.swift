@@ -106,6 +106,18 @@ final class NativeSink: @unchecked Sendable {
     }
 }
 
+/// Pure queue-edit decisions, kept out of the session actor so the wire
+/// invariants are executable from tests.
+enum NativeQueueEditing {
+    /// A re-emitted `user` row tells the transcript which text was edited. Only a
+    /// request that was actually shown to the user owns such a row: agent/`watch`
+    /// items are enqueued straight into the inbox and never emitted one, so
+    /// editing them must not fabricate a phantom user message.
+    static func reemitsUser(admitted: Set<String>, itemID: String, edited: Bool, previousPrompt: String?, updatedPrompt: String) -> Bool {
+        edited && admitted.contains(itemID) && previousPrompt != updatedPrompt
+    }
+}
+
 private actor NativeHostSession {
     let id: String
     let workspace: String
@@ -308,8 +320,9 @@ private actor NativeHostSession {
                 let edited = try await engine.editPending(commandID: itemID, prompt: text)
                 rejected = edited ? nil : "queue-item-not-found"
                 // Re-publish the prompt under the same request identity so the chat
-                // row and replayed transcript show the edited text, not the stale one.
-                if edited, previous?.prompt != text {
+                // row and replayed transcript show the edited text, not the stale
+                // one. Only do so for a request that was admitted as a user turn.
+                if NativeQueueEditing.reemitsUser(admitted: admitted, itemID: itemID, edited: edited, previousPrompt: previous?.prompt, updatedPrompt: text) {
                     sink.send(NativeEvent(op: "user", session: id, id: itemID, text: text))
                 }
             case "remove":
