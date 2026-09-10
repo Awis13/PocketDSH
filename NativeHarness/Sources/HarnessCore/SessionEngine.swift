@@ -50,9 +50,12 @@ public actor SessionEngine {
 
     /// Steering a queued item only makes sense for the in-flight turn. An idle
     /// session rejects it outright so the host can report `steer-unavailable`
-    /// instead of silently leaving the item queued for a later turn.
+    /// instead of silently leaving the item queued for a later turn. An item
+    /// that already steers stays an idempotent success even when idle, so a
+    /// retried control command after a restart is not misreported.
     public func steerPending(commandID: String) async throws -> Bool {
-        guard running else { throw QueueControlError.steerUnavailable }
+        let alreadySteering = try await store.commandMode(session: id, id: commandID) == .steer
+        guard running || alreadySteering else { throw QueueControlError.steerUnavailable }
         return try await store.steerPending(session: id, id: commandID)
     }
 
