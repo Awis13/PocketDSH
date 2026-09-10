@@ -36,6 +36,20 @@ import Foundation
         precondition(!NativeQueueItem(id: "", preview: "", placement: NativeQueueItem.queued, truncated: false).valid)
         precondition(!NativeQueueItem(id: "x", preview: "", placement: "later", truncated: false).valid)
         precondition(NativeQueueInfo.rejectionDetail("queue-item-not-found") != NativeQueueInfo.rejectionDetail("steer-unavailable"))
+
+        // An acknowledgement for the user's own submission must survive switching
+        // sessions, or `nativeSubmission`/`pendingRequest` would never clear and
+        // every later send would stay blocked. Error/rejection and transcript
+        // events remain scoped to the selected session.
+        precondition(NativeEvent(op: "accepted", session: "A").deliversToSelection("B"),
+                     "A submission ACK must be processed even after switching sessions")
+        precondition(!NativeEvent(op: "error", session: "A").deliversToSelection("B"))
+        precondition(!NativeEvent(op: "queueRejected", session: "A").deliversToSelection("B"))
+        precondition(!NativeEvent(op: "user", session: "A").deliversToSelection("B"))
+        precondition(NativeEvent(op: "accepted", session: "A").deliversToSelection("A"))
+        precondition(NativeEvent(op: "error").deliversToSelection("B"),
+                     "A session-less error is host-wide and still applied")
+        print("PASS native selection scope: ACK clears across sessions, errors stay scoped")
         print("PASS native queue wire: optional mode, edit/remove/steer fields, bounded snapshot, capability and lossless future fields")
     }
 }

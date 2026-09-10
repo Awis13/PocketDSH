@@ -163,6 +163,21 @@ extension NativeEvent {
     }
 }
 
+extension NativeEvent {
+    /// Acknowledgement of the user's own submission. It carries the session it
+    /// was sent to and must still be applied after the user switches sessions,
+    /// otherwise `nativeSubmission`/`pendingRequest` would never clear and every
+    /// later send would stay blocked. Every other scoped event, including
+    /// `error`/`queueRejected`, belongs to the currently selected session.
+    var appliesRegardlessOfSelection: Bool { op == "accepted" }
+
+    /// Whether this event may be processed while `selected` is on screen.
+    /// Session-less events are host-wide; a nil `selected` admits only those.
+    func deliversToSelection(_ selected: String?) -> Bool {
+        appliesRegardlessOfSelection || session == nil || session == selected
+    }
+}
+
 /// An extensible metadata object with a deliberately narrow, validated UI API.
 /// Unknown fields survive serialization but never enter the diagnostic export.
 struct NativeRequestInfo: Codable, Sendable, Equatable, Identifiable {

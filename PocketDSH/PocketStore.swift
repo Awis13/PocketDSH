@@ -667,7 +667,10 @@ extension PocketStore {
             }
             return
         }
-        guard event.session == nil || event.session == selectedID else { return }
+        // `accepted` applies regardless of the current selection so switching
+        // sessions mid-send cannot strand a submission; `error`/`queueRejected`
+        // and the transcript events below stay scoped to the selected session.
+        guard event.deliversToSelection(selectedID) else { return }
         if event.op == "error" { error = event.text ?? "Native Harness error"; nativeSubmission = nil; loadingHistory = false; return }
         if event.op == "accepted", let submission = nativeSubmission, submission.id == event.id {
             if selectedID == submission.session, draft.trimmingCharacters(in: .whitespacesAndNewlines) == submission.draft { draft = "" }
