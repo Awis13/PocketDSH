@@ -120,7 +120,7 @@ final class PocketStore: ObservableObject {
     private var nativeTranscript = NativeTranscript()
     var nativeReady = false
     private var nativeSubmission: (id: String, text: String, session: String, draft: String, attachmentIDs: [String])?
-    private var queueTextHandlers: [String: (String) -> Void] = [:]
+    private var queueTextHandlers: [String: (String?) -> Void] = [:]
     private var nativeReconnect: Task<Void, Never>?
     private var nativeRetry = 0
     private struct SavedNativeRequest: Codable {

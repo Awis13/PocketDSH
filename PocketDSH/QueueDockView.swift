@@ -81,10 +81,11 @@ struct QueueDockView: View {
         editText = ""
         store.loadQueuedText(item.id) { text in
             // Ignore a late reply for a different item: the shared editor state
-            // belongs to whatever sheet is currently open.
+            // belongs to whatever sheet is currently open. Clear the spinner
+            // defensively even when the reply is stale.
+            defer { if editing?.id == item.id { loadingEdit = false } }
             guard editing?.id == item.id else { return }
             if let text { editText = text }
-            loadingEdit = false
         }
     }
 
