@@ -1,0 +1,17 @@
+# @deepseek-ai installed 0.1.3-alpha.2 artifacts; paths relative to @deepseek-ai/
+f29567a8eb2f04aaf34523e597d52e46f0fb5bed273db4bf7fa25bc38e2877da  dsh-agent/lib/types/dispatch.js
+8323c5035171f07a35454df7b78df50bed1c933ed69625b63ea85148a4e4f06a  dsh-agent/lib/types/inbox.js
+025b3f13a5f4d221572f6dcf54e4029db49373268abbc4b0bfbc1ce9ab15ab29  dsh-agent-loop/lib/index.js
+1a09af77bedab8c38b43886355bd532362ba5df8f4081641998e2e2d232fba55  dsh-session/lib/types/repair.js
+0aec15b8ee1ae816633e58603b68a763f0957217a2115f3c83a989f4ecc28ca5  dsh-session-persistence-jsonl/lib/index.js
+5b915306c73465f8c1f9a8441062bea9d797b7cff43bb68f921354d922db3e4e  dsh-compaction-basic/lib/index.js
+14df3f0b32be58c39dbc3a12eb889ff91ae149dccc898a2cfcc631199c6f54bd  dsh-user-approval/lib/types/index.js
+25567ce5cb57221528d10f42c0c46fc531dac50280cde1ccbf998fe10f800e40  dsh-tools/lib/types/index.js
+f3533a38fca8e95755c69ab2e09c78e60c094e26105a0feb323e91daecb4ad1a  dsh-sandbox-local/lib/index.js
+f0a8fe075ac24c56ed2aa5d5e359a85539f5ffa237af54b68d3f4fc5124b5d83  dsh-llm/lib/types/retry-policy.js
+230738b07d0bd296c8e6f2a55c0ed0c5df7322b4b50f1d30c11ed48f2f282317  dsh-goal/lib/types/index.js
+a3605fbe1435badd1f73f03fc0464d92bc6c157854b8332cda9a2c8094275436  dsh-subagent/lib/types/child-agent.js
+fff29e8f76fe858203eab67b162520a149031cc00d1173e268c15d36a4511c8a  dsh-subagent/lib/types/run-settlement.js
+ad03ea7b8cb98201424d96aa65d20f5839a8978ef16ea8d31fe8634120d3d6e5  dsh-api-session-controller/lib/types/commands.js
+9c6562b3e6a067a83a71a2bb1225060c8f7c6d8b3644470169de9e3aa59f2050  dsh-api-session-controller/lib/types/client/sessions/session.js
+0e8b972f2a51a3897d02961212ca43f0f4985680ba6dd5e53991a22ef7350fd7  dsh-api-session-controller/lib/types/client/ordered-baseline.js

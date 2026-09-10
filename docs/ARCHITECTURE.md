@@ -1,6 +1,6 @@
 # Architecture
 
-Pocket DSH is a thin native client. Harness owns agent execution, tools, session history, and model configuration.
+Pocket DSH is a native client with two explicit backends. DeepSeek Harness owns execution through its Remote RPC contract. The included experimental Swift Native Harness owns execution through a separate authenticated WebSocket protocol. Selecting a backend does not replace the UI. Shell execution stays on a macOS host; the iOS client does not run local processes.
 
 | Area | Files |
 | --- | --- |
@@ -13,6 +13,16 @@ Pocket DSH is a thin native client. Harness owns agent execution, tools, session
 | Themes and theme editor | `Appearance.swift` |
 | Attachments and recording | `ImageAttachments.swift`, `ImageViews.swift`, `VoiceRecorder.swift` |
 | Offline screenshot fixtures (Debug only) | `DemoData.swift` |
+| Native wire contract | `Shared/NativeWire.swift` |
+| Native transport and transcript folding | `NativeChatConnection.swift`, `NativeClient.swift` |
+| Shell surface, selection, find and attachments | `NativeTerminalView.swift`, `ShellBlockInteraction.swift`, `ShellBlockViews.swift` |
+| ANSI palette and symbol font | `TerminalAppearance.swift`, `Vendor/SwiftTerm`, `Vendor/NerdFonts` |
+| Swift agent loop, receipts, approvals, diagnostics | `NativeHarness/Sources/HarnessCore` |
+| macOS host, ordered presentation and restart recovery | `NativeHarness/Sources/harness`, `PresentationJournal.swift` |
+
+Native Shell and Chat render one ordered journal and share a draft/session. A persistent PTY feeds the live emulator; completed blocks retain bounded output and styles. The engine database and adjacent `.native.sqlite` presentation journal have distinct responsibilities and must be backed up together. Reconnect reconstructs output; host restart marks interrupted work without rerunning commands or restoring dead OS processes.
+
+The headless engine uses Swift/Foundation, SQLite and a small in-tree C bridge. The client bundles a locally patched SwiftTerm library subset and Nerd Fonts symbols with notices. Optional eza runs on the host. `NativeWorkspace.swift` is an earlier experiment retained in source, not the application entry point. See [native integration](NATIVE-CHAT-INTEGRATION.md) for current implementation evidence and constraints.
 
 Each pane owns a store and follows its selected session through the Harness remote stream. Historical and streaming events fold into transcript rows. Signing configuration lives outside source code in an ignored local xcconfig.
 

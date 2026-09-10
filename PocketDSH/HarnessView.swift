@@ -2,6 +2,7 @@ import SwiftUI
 import UIKit
 
 struct HarnessView: View {
+    @Environment(\.nativePanelTerminal) private var nativePanelTerminal
     @Environment(\.harnessTheme) private var theme
     @EnvironmentObject var store: PocketStore
     @Environment(\.agentPaneIsActive) private var activePane
@@ -13,7 +14,7 @@ struct HarnessView: View {
     @State private var commandIndex = 0
     @State private var commandsDismissed = false
     @State private var creatingTask = false
-    private let commands = [("/view", "Switch chat / terminal"), ("/model", "Search models"), ("/new", "New task in default workspace")]
+    private let commands = [("/view", "Switch chat / terminal"), ("/model", "Search models"), ("/new", "New task in default workspace"), ("/compact", "Compact model context")]
     private var commandMatches: [(String, String)] {
         guard !commandsDismissed, store.draft.hasPrefix("/"), !store.draft.contains(where: { $0.isWhitespace }) else { return [] }
         return commands.filter { $0.0.hasPrefix(store.draft.lowercased()) }
@@ -21,8 +22,12 @@ struct HarnessView: View {
     private func runCommand(_ command: String) {
         guard !creatingTask else { return }
         switch command {
+        case "/compact": Task { await store.compactContext(fromEditor: true) }
         case "/view": store.draft = ""; terminalInput.toggle(); store.composerFocusRequest = UUID()
-        case "/model": store.draft = ""; modelPalette = true
+        case "/model":
+            store.draft = ""
+            if store.usesNativeHarness { store.error = "Native Harness uses the model configured on its host: " + store.modelLabel }
+            else { modelPalette = true }
         case "/new":
             guard store.connected else { return }
             store.draft = ""; creatingTask = true
@@ -38,7 +43,14 @@ struct HarnessView: View {
         guard !commandMatches.isEmpty else { return }
         store.draft = commandMatches[min(commandIndex, commandMatches.count - 1)].0
     }
-    @AppStorage("harness.terminalInput") private var terminalInput = false
+    @AppStorage("harness.terminalInput") private var savedTerminalInput = false
+    private var terminalInput: Bool {
+        get { store.usesNativeHarness ? false : savedTerminalInput }
+        nonmutating set {
+            if store.usesNativeHarness { nativePanelTerminal?.wrappedValue = newValue }
+            else { savedTerminalInput = newValue }
+        }
+    }
     @FocusState private var composerFocused: Bool
     private var desktopComposer: Bool {
         #if targetEnvironment(macCatalyst)
@@ -82,6 +94,7 @@ struct HarnessView: View {
                 Button { connection = true } label: { Label(store.connecting ? "Reconnecting…" : "Not connected · tap to connect", systemImage: "wifi.exclamationmark").font(.caption).padding(10).frame(maxWidth: .infinity) }
                     .background(.orange.opacity(0.1))
             }
+            if store.usesNativeHarness { ContextStatusView() }
             ScrollViewReader { proxy in
                 ScrollView {
                     // Exact heights prevent estimated lazy-row sizes from feeding back
@@ -109,7 +122,7 @@ struct HarnessView: View {
                                 }
                             }
                         }
-                        if store.running {
+                        if store.running && !store.compactingContext {
                             VStack(alignment: .leading, spacing: 8) {
                                 HStack(spacing: 9) { ProgressView().controlSize(.small); Text("Agent is working").font(.caption).foregroundStyle(.secondary) }
                                 if let reasoning = store.liveReasoning {
@@ -149,6 +162,8 @@ struct HarnessView: View {
             if terminalInput { bottomPanel }
 
         }.background { ThemeBackdrop() }
+            .onAppear { if activePane { store.composerFocusRequest = UUID() } }
+            .onChange(of: activePane) { _, active in if active { store.composerFocusRequest = UUID() } }
             #if !targetEnvironment(macCatalyst)
             .navigationTitle(store.selected?.title ?? "New task").navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -201,12 +216,13 @@ struct HarnessView: View {
     }
     private var composer: some View {
         VStack(alignment: .leading, spacing: terminalInput ? 10 : 13) {
+            if store.usesNativeHarness { ShellAttachmentStrip() }
             if terminalInput {
                 HStack(spacing: 8) {
                     Image(systemName: "terminal").foregroundStyle(theme.accent)
                     Text(store.selected?.cwd ?? "~").lineLimit(1).truncationMode(.middle)
                     Spacer(minLength: 4)
-                    Text("DSH").foregroundStyle(theme.accent)
+                    Text(store.usesNativeHarness ? "Native" : "DSH").foregroundStyle(theme.accent)
                 }.font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
             }
             if !commandMatches.isEmpty {
@@ -226,8 +242,8 @@ struct HarnessView: View {
                 }.fontDesign(.monospaced).padding(6).background(theme.surface.opacity(0.6), in: RoundedRectangle(cornerRadius: 8)).frame(maxWidth: 540, alignment: .leading)
             }
             if creatingTask { ProgressView("Creating task…").font(.caption) }
-            ImageComposer()
-            if !desktopComposer { VoiceComposer() }
+            ImageComposer().disabled(store.usesNativeHarness).help(store.usesNativeHarness ? "Native image input is not yet supported" : "Attach images")
+            if !desktopComposer { VoiceComposer().disabled(store.usesNativeHarness) }
             if !terminalInput { promptInput }
             HStack(spacing: 10) {
                 Menu {
@@ -245,7 +261,7 @@ struct HarnessView: View {
                     }
                 } label: {
                     HStack(spacing: 5) { Image(systemName: "cpu"); Text(store.modelLabel).lineLimit(1); Image(systemName: "chevron.down").font(.system(size: 8, weight: .bold)) }.font(.caption).foregroundStyle(.secondary)
-                }.disabled(!store.connected || store.selectingModel)
+                }.disabled(!store.connected || store.selectingModel || store.usesNativeHarness)
                 if store.selectingModel { ProgressView().controlSize(.small) }
                 Spacer(minLength: 0)
                 Button {
@@ -258,13 +274,13 @@ struct HarnessView: View {
                 if store.running {
                     Button { Task { await store.cancel() } } label: { Image(systemName: "stop.fill").font(.system(size: 12)).frame(width: 36, height: 36).background(Color.primary.opacity(0.08), in: Circle()) }.accessibilityLabel("Stop agent").disabled(!store.connected)
                 }
-                if desktopComposer { VoiceComposer(compact: true).fixedSize(horizontal: true, vertical: false) }
+                if desktopComposer { VoiceComposer(compact: true).disabled(store.usesNativeHarness).help(store.usesNativeHarness ? "Native voice input is not yet supported" : "Hold to record").fixedSize(horizontal: true, vertical: false) }
                 Button {
                     sendPrompt()
                 } label: { Image(systemName: "arrow.up").font(.system(size: 18, weight: .semibold)).frame(width: 38, height: 38).background(theme.accent, in: Circle()).foregroundStyle(theme.canvas) }
                     .disabled(!canSend)
                     .opacity(store.draft.isEmpty && store.images.isEmpty ? 0.3 : 1).accessibilityLabel("Send").accessibilityIdentifier("sendPrompt")
-                    .contextMenu { if store.running { Button("Steer current turn") { Task { await store.submit(mode: "steer") } } } }
+                    .contextMenu { if store.running && !store.usesNativeHarness { Button("Steer current turn") { Task { await store.submit(mode: "steer") } } } }
             }
             if terminalInput { promptInput }
         }.padding(terminalInput ? 0 : 16)
@@ -277,7 +293,7 @@ struct HarnessView: View {
             HStack(alignment: .top, spacing: 8) {
             if terminalInput { Text("❯").font(.system(size: 16, weight: .semibold, design: .monospaced)).foregroundStyle(theme.accent).padding(.top, desktopComposer ? 8 : 0).accessibilityHidden(true) }
             if desktopComposer {
-            DesktopPromptEditor(text: $store.draft, focusRequest: $store.composerFocusRequest, collapsed: store.readingMode, ink: theme.ink, monospaced: terminalInput, textSize: theme.messageSize, textShadow: theme.glassSettings.shadow, suggestionsVisible: !commandMatches.isEmpty, moveSuggestion: moveCommand, completeSuggestion: completeCommand, dismissSuggestions: { commandsDismissed = true }, send: sendPrompt)
+            DesktopPromptEditor(text: $store.draft, focusRequest: $store.composerFocusRequest, collapsed: store.readingMode, ink: theme.ink, monospaced: terminalInput, textSize: theme.messageSize, textShadow: theme.glassSettings.shadow, suggestionsVisible: !commandMatches.isEmpty, moveSuggestion: moveCommand, completeSuggestion: completeCommand, dismissSuggestions: { commandsDismissed = true }, sendToAgent: store.currentInteractions.isEmpty ? sendPrompt : nil, send: sendPrompt)
                 .fixedSize(horizontal: false, vertical: true)
             } else {
             TextField(terminalInput ? "Message agent… /model · /view" : "Give your agent a task…", text: $store.draft, axis: .vertical)
@@ -291,6 +307,7 @@ struct HarnessView: View {
 
 }
 struct TranscriptCell: View {
+    @EnvironmentObject private var store: PocketStore
     @Environment(\.harnessTheme) private var theme
     let row: TranscriptRow
     let sessionID: String
@@ -310,6 +327,7 @@ struct TranscriptCell: View {
                 ForEach(Array(row.images.enumerated()), id: \.offset) { _, ref in
                     RemoteAttachment(reference: ref, sessionID: sessionID)
                 }
+                if row.kind == .user && row.id.hasPrefix("native-user-") && !row.detail.isEmpty { ShellSentContext(text: row.detail) }
             }.frame(maxWidth: .infinity, alignment: .leading).fontDesign(.monospaced)
         } else {
             standardContent.fontDesign(terminal ? .monospaced : theme.design)
@@ -321,6 +339,7 @@ struct TranscriptCell: View {
             HStack { Spacer(minLength: 35); VStack(alignment: .leading, spacing: 10) {
                 ForEach(row.images, id: \.pretty) { ref in RemoteAttachment(reference: ref, sessionID: sessionID) }
                 if !row.text.isEmpty { Text(row.text).font(.system(size: theme.messageSize, design: theme.design)).textSelection(.enabled).modifier(HarnessTextLegibility()) }
+                if row.id.hasPrefix("native-user-") && !row.detail.isEmpty { ShellSentContext(text: row.detail) }
             }.padding(13).harnessSurface(radius: 21) }
         case .assistant:
             VStack(alignment: .leading, spacing: 10) {
@@ -328,13 +347,25 @@ struct TranscriptCell: View {
                 ForEach(Array(row.images.enumerated()), id: \.offset) { _, ref in RemoteAttachment(reference: ref, sessionID: sessionID) }
             }.frame(maxWidth: .infinity, alignment: .leading)
         case .reasoning:
-            DisclosureGroup { Text(row.text).font(.system(size: 15, design: terminal ? .monospaced : theme.design)).foregroundStyle(.secondary).textSelection(.enabled) } label: { Label(row.complete ? "Reasoning" : "Thinking…", systemImage: "sparkle").font(.caption).foregroundStyle(.secondary) }
+            if terminal {
+                VStack(alignment: .leading, spacing: 8) {
+                    Label(row.complete ? "Reasoning" : "Thinking…", systemImage: "sparkle").font(.caption).foregroundStyle(.secondary)
+                    Text(row.text).font(.system(size: 14, design: .monospaced)).foregroundStyle(.secondary).textSelection(.enabled)
+                }.frame(maxWidth: .infinity, alignment: .leading)
+            } else {
+                DisclosureGroup { Text(row.text).font(.system(size: 15, design: theme.design)).foregroundStyle(.secondary).textSelection(.enabled) } label: { Label(row.complete ? "Reasoning" : "Thinking…", systemImage: "sparkle").font(.caption).foregroundStyle(.secondary) }
+            }
         case .tool:
             VStack(alignment: .leading, spacing: 10) {
-                DisclosureGroup {
-                    ScrollView(.horizontal) { Text(row.detail).font(.system(size: 12, design: .monospaced)).textSelection(.enabled).padding(.top, 8) }.frame(maxHeight: 250)
-                } label: {
-                    HStack(spacing: 9) { Image(systemName: row.failed ? "exclamationmark.circle" : row.complete ? "checkmark.circle" : "terminal"); Text(row.text).font(.system(size: 13, design: .monospaced)).lineLimit(1) }.foregroundStyle(row.failed ? .orange : .secondary)
+                if terminal {
+                    toolHeading
+                    Text(row.detail).font(.system(size: 13, design: .monospaced)).lineSpacing(3)
+                        .textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
+                        .accessibilityIdentifier("inlineToolOutput")
+                } else {
+                    DisclosureGroup {
+                        ScrollView(.horizontal) { Text(row.detail).font(.system(size: 12, design: .monospaced)).textSelection(.enabled).padding(.top, 8) }.frame(maxHeight: 250)
+                    } label: { toolHeading }
                 }
                 if !row.diffs.isEmpty {
                     Button("View changes", systemImage: "doc.text.magnifyingglass") { showDiff = true }
@@ -346,8 +377,16 @@ struct TranscriptCell: View {
                 }
             }.padding(terminal ? 0 : 13)
                 .background { if !terminal { RoundedRectangle(cornerRadius: 13).fill(theme.surface.opacity(0.65)) } }
+        case .shell:
+            if let block = row.shell { NativeCommandCell(block: block, terminal: terminal) }
         case .notice: Label(row.text, systemImage: "info.circle").font(.caption).foregroundStyle(row.failed ? .orange : .secondary)
         }
+    }
+    private var toolHeading: some View {
+        HStack(spacing: 9) {
+            Image(systemName: row.failed ? "exclamationmark.circle" : row.complete ? "checkmark.circle" : "terminal")
+            Text(row.text).font(.system(size: 13, design: .monospaced))
+        }.foregroundStyle(row.failed ? .orange : .secondary)
     }
 }
 struct InteractionView: View {
@@ -387,10 +426,10 @@ struct InteractionView: View {
                     VStack(alignment: .leading, spacing: 8) {
                         Button("Allow once") { answer(.string("allowed-once")) }.buttonStyle(.borderedProminent)
                         Button("Reject") { answer(.string("rejected")) }.buttonStyle(.bordered)
-                        Button("Full access…") { confirmFullAccess = true }
+                        Button("Full access…") { confirmFullAccess = true }.disabled(!store.supportsFullAccess)
                     }
                 }
-                if activePane { Text("⌘↵ Allow once · ⌘⌫ Reject · ⌘⇧A Full access").font(.caption2).foregroundStyle(.secondary) }
+                if activePane { Text(store.supportsFullAccess ? "⌘↵ Allow once · ⌘⌫ Reject · ⌘⇧A Full access" : "⌘↵ Allow once · ⌘⌫ Reject").font(.caption2).foregroundStyle(.secondary) }
             } else {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 14) {
@@ -420,7 +459,7 @@ struct InteractionView: View {
             if activePane && item.isApproval {
                 Button("") { answer(.string("allowed-once")) }.keyboardShortcut(.return, modifiers: .command).hidden().disabled(busy || !store.connected)
                 Button("") { answer(.string("rejected")) }.keyboardShortcut(.delete, modifiers: .command).hidden().disabled(busy || !store.connected)
-                Button("") { confirmFullAccess = true }.keyboardShortcut("a", modifiers: [.command, .shift]).hidden().disabled(busy || !store.connected)
+                Button("") { confirmFullAccess = true }.keyboardShortcut("a", modifiers: [.command, .shift]).hidden().disabled(busy || !store.connected || !store.supportsFullAccess)
             }
         }
         .alert("Enable full access for this session?", isPresented: $confirmFullAccess) {
@@ -440,13 +479,13 @@ struct InteractionView: View {
         HStack(spacing: 10) {
             Button("Allow once") { answer(.string("allowed-once")) }.buttonStyle(.borderedProminent).tint(theme.accent)
             Button("Reject") { answer(.string("rejected")) }.buttonStyle(.bordered)
-            Button("Full access…") { confirmFullAccess = true }.buttonStyle(.borderless)
+            Button("Full access…") { confirmFullAccess = true }.disabled(!store.supportsFullAccess).buttonStyle(.borderless)
         }
     }
     private func answer(_ value: JSON) { guard !busy, store.connected else { return }; if let decisionHandler { decisionHandler(value); return }; busy = true; Task { await store.answer(item, value: value); busy = false } }
 }
 
-private struct ConversationContentHeight: PreferenceKey {
+struct ConversationContentHeight: PreferenceKey {
     static var defaultValue: CGFloat = 0
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
 }
@@ -468,6 +507,17 @@ struct DesktopPromptEditor: UIViewRepresentable {
     var moveSuggestion: (Int) -> Void = { _ in }
     var completeSuggestion: () -> Void = {}
     var dismissSuggestions: () -> Void = {}
+    var accessibilityName = "Give your agent a task"
+    var accessibilityID = "composer"
+    var sendToAgent: (() -> Void)? = nil
+    var interruptCommand: (() -> Void)? = nil
+    var yieldFocusOnSend = false
+    var allowsRequestedFocus = true
+    var shellCompletion: ((String, NSRange) -> Void)? = nil
+    var shellHistory: ((Int, String, NSRange) -> ShellEditorEdit?)? = nil
+    var shellSelectionChanged: ((String, NSRange) -> Void)? = nil
+    var shellEdit: ShellEditorEdit? = nil
+    var shellSuggestion: ((String) -> String?)? = nil
     let send: () -> Void
     func makeCoordinator() -> Coordinator { Coordinator(self) }
     func makeUIView(context: Context) -> DesktopPromptTextView {
@@ -476,14 +526,22 @@ struct DesktopPromptEditor: UIViewRepresentable {
         view.font = .systemFont(ofSize: 16)
         view.textContainerInset = UIEdgeInsets(top: 8, left: 0, bottom: 8, right: 0)
         view.delegate = context.coordinator
-        view.accessibilityIdentifier = "composer"
-        view.accessibilityLabel = "Give your agent a task"
+        view.accessibilityIdentifier = accessibilityID
+        view.accessibilityLabel = accessibilityName
         view.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         return view
     }
     func updateUIView(_ view: DesktopPromptTextView, context: Context) {
         context.coordinator.parent = self
         view.sendPrompt = send
+        view.sendToAgent = sendToAgent
+        view.interruptCommand = interruptCommand
+        view.yieldFocusOnSend = yieldFocusOnSend
+        view.allowsRequestedFocus = allowsRequestedFocus
+        view.shellCompletion = shellCompletion
+        view.shellHistory = shellHistory
+        view.shellSuggestion = shellSuggestion
+        if !allowsRequestedFocus { view.pendingInitialFocus = false }
         view.suggestionsVisible = suggestionsVisible
         view.moveSuggestion = moveSuggestion
         view.completeSuggestion = completeSuggestion
@@ -491,18 +549,29 @@ struct DesktopPromptEditor: UIViewRepresentable {
         if collapsed && view.isFirstResponder { view.resignFirstResponder() }
         let font: UIFont = monospaced ? .monospacedSystemFont(ofSize: textSize, weight: .regular) : .systemFont(ofSize: textSize)
         if view.font != font { view.font = font }
+        view.smartQuotesType = monospaced ? .no : .default
+        view.smartDashesType = monospaced ? .no : .default
+        view.autocorrectionType = monospaced ? .no : .default
+        view.spellCheckingType = monospaced ? .no : .default
         view.layer.shadowColor = UIColor.black.cgColor
         view.layer.shadowOpacity = Float(textShadow)
         view.layer.shadowRadius = textShadow > 0 ? 2 : 0
         view.layer.shadowOffset = CGSize(width: 0, height: 1)
         view.textColor = UIColor(ink)
+        if let edit = shellEdit, view.lastShellEdit != edit.id {
+            view.lastShellEdit = edit.id
+            if view.text == edit.original && view.selectedRange == edit.selection {
+                view.text = edit.text; view.selectedRange = NSRange(location: edit.cursor, length: 0)
+            }
+        }
         if view.text != text { view.text = text }
-        if let focusRequest, view.lastFocusRequest != focusRequest {
+        if allowsRequestedFocus, let focusRequest, view.lastFocusRequest != focusRequest {
             view.focusApplied = { if self.focusRequest == focusRequest { self.focusRequest = nil } }
             view.lastFocusRequest = focusRequest
             view.pendingInitialFocus = true
             view.applyPendingFocus()
         }
+        view.refreshAutosuggestion()
     }
     func sizeThatFits(_ proposal: ProposedViewSize, uiView: DesktopPromptTextView, context: Context) -> CGSize? {
         guard let width = proposal.width, width > 0 else { return nil }
@@ -512,12 +581,41 @@ struct DesktopPromptEditor: UIViewRepresentable {
     class Coordinator: NSObject, UITextViewDelegate {
         var parent: DesktopPromptEditor
         init(_ parent: DesktopPromptEditor) { self.parent = parent }
-        func textViewDidBeginEditing(_ textView: UITextView) { parent.activatePane() }
-        func textViewDidChange(_ textView: UITextView) { parent.text = textView.text }
+        func textViewDidBeginEditing(_ textView: UITextView) { parent.activatePane(); (textView as? DesktopPromptTextView)?.refreshAutosuggestion() }
+        func textViewDidEndEditing(_ textView: UITextView) { (textView as? DesktopPromptTextView)?.refreshAutosuggestion() }
+        func textViewDidChange(_ textView: UITextView) {
+            parent.text = textView.text
+            (textView as? DesktopPromptTextView)?.refreshAutosuggestion()
+        }
+        func textViewDidChangeSelection(_ textView: UITextView) {
+            parent.shellSelectionChanged?(textView.text, textView.selectedRange)
+            (textView as? DesktopPromptTextView)?.refreshAutosuggestion()
+        }
     }
 }
 final class DesktopPromptTextView: UITextView {
     var sendPrompt: (() -> Void)?
+    var sendToAgent: (() -> Void)?
+    var interruptCommand: (() -> Void)?
+    var yieldFocusOnSend = false
+    var allowsRequestedFocus = true
+    var shellCompletion: ((String, NSRange) -> Void)?
+    var shellHistory: ((Int, String, NSRange) -> ShellEditorEdit?)?
+    var lastShellEdit: UUID?
+    var shellSuggestion: ((String) -> String?)?
+    private var suggestedSuffix: String?
+    private var dismissedSuggestionPrefix: String?
+    private lazy var ghost: UIButton = {
+        let button = UIButton(type: .custom)
+        button.contentHorizontalAlignment = .left
+        button.titleLabel?.lineBreakMode = .byTruncatingTail
+        button.accessibilityIdentifier = "shellHistorySuggestion"
+        button.accessibilityHint = "Inserts the suggested history text without running it"
+        button.addTarget(self, action: #selector(acceptAutosuggestion), for: .touchUpInside)
+        button.isHidden = true
+        addSubview(button)
+        return button
+    }()
     var suggestionsVisible = false
     var moveSuggestion: ((Int) -> Void)?
     var completeSuggestion: (() -> Void)?
@@ -529,11 +627,60 @@ final class DesktopPromptTextView: UITextView {
         super.didMoveToWindow()
         applyPendingFocus()
     }
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        refreshAutosuggestion()
+    }
+    func refreshAutosuggestion() {
+        if let dismissedSuggestionPrefix, dismissedSuggestionPrefix != text { self.dismissedSuggestionPrefix = nil }
+        guard let shellSuggestion, isFirstResponder, window != nil, isEditable,
+              !suggestionsVisible, markedTextRange == nil, selectedRange.length == 0,
+              selectedRange.location == text.utf16.count, text != dismissedSuggestionPrefix,
+              let suffix = shellSuggestion(text), !suffix.isEmpty,
+              baseWritingDirection(for: endOfDocument, in: .backward) != .rightToLeft else {
+            hideGhost(); return
+        }
+        let caret = caretRect(for: endOfDocument)
+        let width = bounds.maxX - textContainerInset.right - textContainer.lineFragmentPadding - caret.maxX - 1
+        // Keep the editor's layout and scroll extent determined by actual input.
+        guard width >= 16, caret.maxY > bounds.minY, caret.minY < bounds.maxY else {
+            hideGhost(); return
+        }
+        suggestedSuffix = suffix
+        ghost.titleLabel?.font = font
+        ghost.setTitleColor((textColor ?? .label).withAlphaComponent(0.42), for: .normal)
+        ghost.setTitle(suffix, for: .normal)
+        ghost.accessibilityLabel = "History suggestion: " + suffix
+        ghost.frame = CGRect(x: caret.maxX + 1, y: caret.minY, width: width, height: caret.height)
+        ghost.isAccessibilityElement = true; ghost.accessibilityElementsHidden = false; ghost.isEnabled = true
+        ghost.isHidden = false
+    }
+    @objc private func acceptAutosuggestion() { insertSuggestion(word: false) }
+    @objc private func acceptSuggestionWord() { insertSuggestion(word: true) }
+    private func insertSuggestion(word: Bool) {
+        refreshAutosuggestion()
+        guard let suffix = suggestedSuffix else { return }
+        let addition = word ? ShellHistorySuggestion.nextWord(prefix: text, suffix: suffix) : suffix
+        guard !addition.isEmpty else { return }
+        insertText(addition) // Native edit/undo; the suggestion itself never enters textStorage.
+        dismissedSuggestionPrefix = word ? nil : text
+        delegate?.textViewDidChange?(self)
+        refreshAutosuggestion()
+    }
+    @objc private func dismissAutosuggestion() {
+        dismissedSuggestionPrefix = text; hideGhost()
+    }
+    private func hideGhost() {
+        suggestedSuffix = nil
+        ghost.isHidden = true; ghost.isEnabled = false
+        ghost.isAccessibilityElement = false; ghost.accessibilityElementsHidden = true
+        ghost.accessibilityLabel = nil; ghost.setTitle(nil, for: .normal)
+    }
     func applyPendingFocus() {
         guard pendingInitialFocus, window != nil else { return }
         // Run after SwiftUI finishes mounting the editor and dismissing the sheet.
         DispatchQueue.main.async { [weak self] in
-            guard let self, self.pendingInitialFocus, self.window != nil else { return }
+            guard let self, self.allowsRequestedFocus, self.pendingInitialFocus, self.window != nil else { return }
             self.pendingInitialFocus = false
             if self.becomeFirstResponder() { self.focusApplied?() }
         }
@@ -544,20 +691,92 @@ final class DesktopPromptTextView: UITextView {
         let newline = UIKeyCommand(input: "\r", modifierFlags: [.shift], action: #selector(insertNewline))
         newline.wantsPriorityOverSystemBehavior = true
         var shortcuts = [send, newline]
+        if interruptCommand != nil {
+            for input in ["c", "с"] {
+                let interrupt = UIKeyCommand(input: input, modifierFlags: .control, action: #selector(interruptFromKeyboard))
+                interrupt.wantsPriorityOverSystemBehavior = true; shortcuts.append(interrupt)
+            }
+        }
+        if sendToAgent != nil {
+            let agent = UIKeyCommand(input: "\r", modifierFlags: [.command], action: #selector(sendAgentFromKeyboard))
+            agent.wantsPriorityOverSystemBehavior = true; shortcuts.append(agent)
+        }
         if suggestionsVisible {
             for (input, action) in [(UIKeyCommand.inputUpArrow, #selector(previousSuggestion)), (UIKeyCommand.inputDownArrow, #selector(nextSuggestion)), ("\t", #selector(completeCurrentSuggestion)), (UIKeyCommand.inputEscape, #selector(hideSuggestions))] {
                 let key = UIKeyCommand(input: input, modifierFlags: [], action: action)
                 key.wantsPriorityOverSystemBehavior = true; shortcuts.append(key)
             }
+        } else if shellHistory != nil || shellCompletion != nil {
+            for (input, action) in [(UIKeyCommand.inputUpArrow, #selector(historyPrevious)), (UIKeyCommand.inputDownArrow, #selector(historyNext)), ("\t", #selector(shellComplete))] {
+                let key = UIKeyCommand(input: input, modifierFlags: [], action: action)
+                key.wantsPriorityOverSystemBehavior = true; shortcuts.append(key)
+            }
+        }
+        if suggestionsVisible && shellCompletion != nil {
+            let previous = UIKeyCommand(input: "\t", modifierFlags: .shift, action: #selector(previousSuggestion))
+            previous.wantsPriorityOverSystemBehavior = true; shortcuts.append(previous)
+        }
+        if suggestedSuffix != nil {
+            for (input, modifiers, action) in [
+                (UIKeyCommand.inputRightArrow, UIKeyModifierFlags(), #selector(acceptAutosuggestion)),
+                (UIKeyCommand.inputRightArrow, .alternate, #selector(acceptSuggestionWord)),
+                (UIKeyCommand.inputEscape, UIKeyModifierFlags(), #selector(dismissAutosuggestion))
+            ] {
+                let command = UIKeyCommand(input: input, modifierFlags: modifiers, action: action)
+                command.wantsPriorityOverSystemBehavior = true; shortcuts.append(command)
+            }
         }
         return shortcuts + (super.keyCommands ?? [])
+    }
+    @objc private func sendAgentFromKeyboard() { if markedTextRange == nil { sendToAgent?() } }
+    @objc private func interruptFromKeyboard() { interruptCommand?() }
+    override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        if let interruptCommand, presses.contains(where: { $0.key?.keyCode == .keyboardC && $0.key?.modifierFlags.contains(.control) == true }) {
+            interruptCommand(); return
+        }
+        let remaining = Set(presses.filter { press in
+            guard let key = press.key, suggestedSuffix != nil else { return true }
+            let flags = key.modifierFlags.intersection([.command, .alternate, .control, .shift])
+            if key.keyCode == .keyboardRightArrow && (flags.isEmpty || flags == .alternate) {
+                insertSuggestion(word: flags == .alternate); return false
+            }
+            if key.keyCode == .keyboardEscape && flags.isEmpty { dismissAutosuggestion(); return false }
+            return true
+        })
+        if !remaining.isEmpty { super.pressesBegan(remaining, with: event) }
     }
     @objc private func previousSuggestion() { if markedTextRange == nil { moveSuggestion?(-1) } }
     @objc private func nextSuggestion() { if markedTextRange == nil { moveSuggestion?(1) } }
     @objc private func completeCurrentSuggestion() { if markedTextRange == nil { completeSuggestion?() } }
     @objc private func hideSuggestions() { dismissSuggestions?() }
+    @objc private func shellComplete() { if markedTextRange == nil { dismissAutosuggestion(); shellCompletion?(text, selectedRange) } }
+    @objc private func historyPrevious() { moveHistory(-1) }
+    @objc private func historyNext() { moveHistory(1) }
+    private func moveHistory(_ direction: Int) {
+        guard markedTextRange == nil else { return }
+        // Preserve ordinary vertical caret movement in multiline/wrapped input.
+        guard selectedRange.length == 0, let selectedTextRange else { return }
+        let edge = direction < 0 ? beginningOfDocument : endOfDocument
+        let caret = caretRect(for: selectedTextRange.start), boundary = caretRect(for: edge)
+        if abs(caret.midY - boundary.midY) > 2 {
+            if let position = position(from: selectedTextRange.start, in: direction < 0 ? .up : .down, offset: 1) {
+                self.selectedTextRange = textRange(from: position, to: position)
+            }
+            return
+        }
+        if let edit = shellHistory?(direction, text, selectedRange) {
+            dismissedSuggestionPrefix = edit.text
+            text = edit.text; self.selectedRange = NSRange(location: edit.cursor, length: 0)
+            delegate?.textViewDidChange?(self)
+        }
+    }
     @objc private func sendFromKeyboard() {
         guard markedTextRange == nil else { return }
+        if suggestionsVisible && shellCompletion != nil { completeSuggestion?(); return }
+        if yieldFocusOnSend && !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            pendingInitialFocus = false
+            resignFirstResponder()
+        }
         sendPrompt?()
     }
     @objc private func insertNewline() { insertText("\n") }
@@ -592,7 +811,7 @@ struct ToolDiffView: View {
     }
 }
 
-private struct ReadingScrollObserver: ViewModifier {
+struct ReadingScrollObserver: ViewModifier {
     let onScroll: () -> Void
     let onBottom: () -> Void
     @State private var atBottom = false

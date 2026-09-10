@@ -1,0 +1,2 @@
+# Keep bundled upstream libraries collapsed in code review and language stats.
+Vendor/** linguist-vendored

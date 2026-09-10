@@ -107,8 +107,44 @@ struct Interaction: Identifiable {
     var isApproval: Bool { raw["event"].string == "approval/request" }
     var request: JSON { raw["request"] }
 }
+struct NativeStyledRun: Equatable {
+    var text: String
+    var foreground: Int?
+    var background: Int?
+    // Preserve ANSI palette references so retained output can follow the theme.
+    // RGB values above are only for explicit 256/truecolor output.
+    var foregroundIndex: Int?
+    var backgroundIndex: Int?
+    var bold = false
+    var underline = false
+    var dim = false
+    var italic = false
+    var crossedOut = false
+    var inverse = false
+
+    func hasSameStyle(as other: Self) -> Bool {
+        foreground == other.foreground && background == other.background &&
+        foregroundIndex == other.foregroundIndex && backgroundIndex == other.backgroundIndex &&
+        bold == other.bold && underline == other.underline && dim == other.dim &&
+        italic == other.italic && crossedOut == other.crossedOut && inverse == other.inverse
+    }
+}
+
+struct NativeBlock: Identifiable, Equatable {
+    let id: String
+    var command: String
+    var directory: String
+    var output = Data()
+    var preview = ""
+    var styledOutput: [NativeStyledRun] = []
+    var exitCode: Int?
+    var finished = false
+    var interrupted = false
+    var truncated = false
+}
+
 struct TranscriptRow: Identifiable, Equatable {
-    enum Kind { case user, assistant, reasoning, tool, notice }
+    enum Kind { case user, assistant, reasoning, tool, shell, notice }
     var id: String
     var kind: Kind
     var text: String
@@ -117,6 +153,7 @@ struct TranscriptRow: Identifiable, Equatable {
     var failed = false
     var images: [JSON] = []
     var diffs: [JSON] = []
+    var shell: NativeBlock?
 }
 
 // Fold the human transcript, preserving historical messages across compaction.
@@ -194,5 +231,53 @@ struct Transcript {
             }
         }
         return rows.filter { !$0.text.isEmpty || !$0.images.isEmpty }
+    }
+}
+
+// DSH alpha.2 separates live presentation frames from the durable transcript.
+struct AssistantLiveStream {
+    private var attempt = ""
+    private var nextIndex = 0
+    private var turn = 0
+    private var step = 0
+    private(set) var rows: [TranscriptRow] = []
+    mutating func baseline(_ value: JSON) {
+        self = AssistantLiveStream()
+        let active = value["activeAttempt"]
+        guard active != .null else { return }
+        attempt = active["attemptId"].string; turn = active["turn"].int; step = active["step"].int
+        nextIndex = active["nextIndex"].int
+        for item in active["stream"].array {
+            if item["type"].string == "chunk" { chunk(item["chunk"]) }
+            else if ["text-chunks", "reasoning-chunks"].contains(item["type"].string) {
+                chunk(.object(["type": .string(item["type"].string == "text-chunks" ? "text-delta" : "reasoning-delta"), "index": item["index"], "text": .string(item["texts"].array.map(\.string).joined())]))
+            }
+        }
+    }
+    mutating func receive(_ frame: JSON) -> Bool {
+        switch frame["type"].string {
+        case "start":
+            self = AssistantLiveStream(); attempt = frame["attemptId"].string
+            turn = frame["turn"].int; step = frame["step"].int
+        case "chunk":
+            guard frame["attemptId"].string == attempt else { return false }
+            let index = frame["index"].int
+            if index < nextIndex { return true }
+            guard index == nextIndex else { return false }
+            nextIndex += 1; chunk(frame["chunk"])
+        case "end":
+            if frame["attemptId"].string == attempt { rows = [] }
+        default: break
+        }
+        return true
+    }
+    private mutating func chunk(_ c: JSON) {
+        guard ["text-delta", "reasoning-delta"].contains(c["type"].string) else { return }
+        let id = "a-\(turn)-\(step)-\(c["index"].int)"
+        if let i = rows.firstIndex(where: { $0.id == id }) { rows[i].text += c["text"].string }
+        else { rows.append(TranscriptRow(id: id, kind: c["type"].string == "text-delta" ? .assistant : .reasoning, text: c["text"].string, complete: false)) }
+    }
+    func merged(with durable: [TranscriptRow]) -> [TranscriptRow] {
+        let ids = Set(durable.map(\.id)); return durable + rows.filter { !ids.contains($0.id) }
     }
 }

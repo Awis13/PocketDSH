@@ -35,6 +35,17 @@ struct PocketDSHApp: App {
                 .task {
                     guard !started else { return }; started = true
                     #if DEBUG
+                    // Device setup via USB: import a second server without switching the current pane.
+                    let connectionSeed = URL.documentsDirectory.appending(path: "debug-native-connection")
+                    if let input = try? String(contentsOf: connectionSeed, encoding: .utf8) {
+                        try? FileManager.default.removeItem(at: connectionSeed)
+                        do {
+                            let (url, token) = try NativeChatConnection.parse(input)
+                            guard let token, token.utf8.count >= 32 else { throw HarnessError(message: "Native connection seed is missing its host token.") }
+                            try SecureConnection.write(token, key: "native:" + url.absoluteString)
+                            SavedConnections.remember(url.absoluteString)
+                        } catch { store.error = error.localizedDescription }
+                    }
                     let seed = URL.documentsDirectory.appending(path: "debug-login-url")
                     let login = ProcessInfo.processInfo.environment["DSH_LOGIN_URL"] ?? (try? String(contentsOf: seed, encoding: .utf8))
                     if FileManager.default.fileExists(atPath: seed.path) { try? FileManager.default.removeItem(at: seed) }
@@ -51,6 +62,7 @@ struct PocketDSHApp: App {
                     notifications.destination = nil
                 }
                 .onChange(of: scenePhase) { _, phase in
+                    guard !store.workspaceDetached else { return }
                     #if targetEnvironment(macCatalyst)
                     if phase == .active && !store.connected && !store.connecting { Task { await store.connect() } }
                     #else

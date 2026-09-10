@@ -7,16 +7,28 @@ options:
 configFiles:
   Debug: Config/Build.xcconfig
   Release: Config/Build.xcconfig
+packages:
+  SwiftTerm:
+    path: Vendor/SwiftTerm
 targets:
   PocketDSH:
     type: application
     platform: iOS
-    sources: [PocketDSH]
+    sources:
+      - PocketDSH
+      - Shared
+      - path: Vendor/NerdFonts/SymbolsNerdFontMono-Regular.ttf
+        buildPhase: resources
+      - path: Vendor/THIRD-PARTY-NOTICES.txt
+        buildPhase: resources
+    dependencies:
+      - package: SwiftTerm
     info:
       path: PocketDSH/Info.plist
       properties:
-        CFBundleShortVersionString: "1.0.1"
-        CFBundleVersion: "2"
+        CFBundleShortVersionString: "1.0.2"
+        CFBundleVersion: "4"
+        UIAppFonts: [SymbolsNerdFontMono-Regular.ttf]
         BGTaskSchedulerPermittedIdentifiers: ["dev.awis.PocketDSH.turn.*"]
         UIBackgroundModes: [processing]
         UISupportedInterfaceOrientations~ipad: [UIInterfaceOrientationPortrait, UIInterfaceOrientationPortraitUpsideDown, UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
@@ -25,8 +37,8 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.awis.PocketDSH
-        MARKETING_VERSION: 1.0.1
-        CURRENT_PROJECT_VERSION: 2
+        MARKETING_VERSION: 1.0.2
+        CURRENT_PROJECT_VERSION: 4
         INFOPLIST_KEY_CFBundleShortVersionString: "$(MARKETING_VERSION)"
         INFOPLIST_KEY_CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
         GENERATE_INFOPLIST_FILE: YES
