@@ -187,7 +187,9 @@ private actor NativeHostSession {
             case .reasoning(let text): sink.send(NativeEvent(op: "reasoning", session: id, text: text))
             case .tool: break
             case .toolCall(let call): sink.send(NativeEvent(op: "toolCall", session: id, id: call.id, text: call.name, arguments: call.arguments))
-            case .toolResult(let callID, let output, let failed, _): sink.send(NativeEvent(op: "toolResult", session: id, id: callID, text: output, failed: failed))
+            case .toolResult(let callID, let output, let failed, let diffs):
+                let inline = diffs.isEmpty ? nil : diffs.map { NativeInlineDiffHunk(path: $0.path, oldText: $0.oldText, newText: $0.newText) }
+                sink.send(NativeEvent(op: "toolResult", session: id, id: callID, text: output, failed: failed, toolDiffs: inline))
             case .compaction(let receipt):
                 if let info = try? NativeCompactionInfo(encoding: receipt) {
                     sink.send(NativeEvent(op: "compaction", session: id, id: info.id, compaction: info))
