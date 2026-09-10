@@ -539,13 +539,13 @@ final class PocketStore: ObservableObject {
     func steerQueued(_ id: String) async { await queueAction("steer", itemID: id) }
     /// Fetches the full stored prompt for one queued item on demand. The dock's
     /// list preview stays clipped, so editing a long request never needs retyping.
-    func loadQueuedText(_ id: String, completion: @escaping (String) -> Void) {
-        guard canControlQueue, let native, let session = selectedID else { return }
+    func loadQueuedText(_ id: String, completion: @escaping (String?) -> Void) {
+        guard canControlQueue, let native, let session = selectedID else { completion(nil); return }
         queueTextHandlers[id] = completion
         Task {
             do { try await native.send(NativeCommand(op: "queue", session: session, id: UUID().uuidString, action: "text", itemID: id)) }
             catch {
-                queueTextHandlers.removeValue(forKey: id)
+                queueTextHandlers.removeValue(forKey: id)?(nil)
                 self.error = error.localizedDescription
             }
         }
@@ -687,7 +687,12 @@ extension PocketStore {
             UserDefaults.standard.removeObject(forKey: nativeRequestKey(submission.session))
         }
         if event.op == "completion" { nativeShell?.receive(event); return }
-        if event.op == "queueRejected" { error = NativeQueueInfo.rejectionDetail(event.text ?? ""); return }
+        if event.op == "queueRejected" {
+            // Clear the pending full-text fetch for this item (if any) before
+            // surfacing the failure so the editor never keeps spinning.
+            queueTextHandlers.removeValue(forKey: event.id ?? "")?(nil)
+            error = NativeQueueInfo.rejectionDetail(event.text ?? ""); return
+        }
         if event.op == "queueText", let itemID = event.id, let text = event.text {
             queueTextHandlers.removeValue(forKey: itemID)?(text)
             return

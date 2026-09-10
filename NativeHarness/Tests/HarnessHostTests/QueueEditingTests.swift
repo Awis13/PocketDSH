@@ -16,4 +16,24 @@ final class QueueEditingTests: XCTestCase {
         XCTAssertFalse(NativeQueueEditing.reemitsUser(admitted: ["q1"], itemID: "q1", edited: false, previousPrompt: nil, updatedPrompt: "new"),
                        "A failed edit (already consumed/cancelled) must not re-emit")
     }
+
+    /// The full-text fetch and *both* rejection paths carry the queue item id,
+    /// which is what the client keys its editor handler on. The previous
+    /// request-id rejection left the editor spinning forever.
+    func testTextFetchAndRejectionsCarryTheItemIdentity() {
+        let found = NativeQueueEditing.textResult(session: "s", itemID: "item-1", prompt: "full text")
+        XCTAssertEqual(found.op, "queueText")
+        XCTAssertEqual(found.id, "item-1")
+        XCTAssertEqual(found.text, "full text")
+
+        let missing = NativeQueueEditing.textResult(session: "s", itemID: "item-1", prompt: nil)
+        XCTAssertEqual(missing.op, "queueRejected")
+        XCTAssertEqual(missing.id, "item-1")
+        XCTAssertEqual(missing.text, "queue-item-not-found")
+
+        let failure = NativeQueueEditing.textFailure(session: "s", itemID: "item-1")
+        XCTAssertEqual(failure.op, "queueRejected")
+        XCTAssertEqual(failure.id, "item-1")
+        XCTAssertEqual(failure.text, "queue-unavailable")
+    }
 }

@@ -83,7 +83,7 @@ struct QueueDockView: View {
             // Ignore a late reply for a different item: the shared editor state
             // belongs to whatever sheet is currently open.
             guard editing?.id == item.id else { return }
-            editText = text
+            if let text { editText = text }
             loadingEdit = false
         }
     }

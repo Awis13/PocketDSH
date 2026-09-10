@@ -116,6 +116,16 @@ enum NativeQueueEditing {
     static func reemitsUser(admitted: Set<String>, itemID: String, edited: Bool, previousPrompt: String?, updatedPrompt: String) -> Bool {
         edited && admitted.contains(itemID) && previousPrompt != updatedPrompt
     }
+
+    /// The full-text fetch and its rejection are both keyed by the queue item id
+    /// so the client can retire the matching editor handler, even on failure.
+    static func textResult(session: String, itemID: String, prompt: String?) -> NativeEvent {
+        guard let prompt else { return NativeEvent(op: "queueRejected", session: session, id: itemID, text: "queue-item-not-found") }
+        return NativeEvent(op: "queueText", session: session, id: itemID, text: prompt)
+    }
+    static func textFailure(session: String, itemID: String) -> NativeEvent {
+        NativeEvent(op: "queueRejected", session: session, id: itemID, text: "queue-unavailable")
+    }
 }
 
 private actor NativeHostSession {
@@ -298,15 +308,13 @@ private actor NativeHostSession {
             guard let itemID = command.itemID, Self.validIdentifier(itemID) else { throw HarnessError.invalid("Missing or invalid queue item ID") }
             if action == "text" {
                 // Bounded on-demand full text for the single item being edited;
-                // the list preview stays clipped.
+                // the list preview stays clipped. Fetch and rejection both carry
+                // the item id, which is what the client keys its editor on.
                 do {
-                    if let target = try await engine.pending().first(where: { $0.id == itemID }) {
-                        peer.send(NativeEvent(op: "queueText", session: id, id: itemID, text: target.prompt))
-                    } else {
-                        peer.send(NativeEvent(op: "queueRejected", session: id, id: requestID, text: "queue-item-not-found"))
-                    }
+                    let target = try await engine.pending().first(where: { $0.id == itemID })
+                    peer.send(NativeQueueEditing.textResult(session: id, itemID: itemID, prompt: target?.prompt))
                 } catch {
-                    peer.send(NativeEvent(op: "queueRejected", session: id, id: requestID, text: "queue-unavailable"))
+                    peer.send(NativeQueueEditing.textFailure(session: id, itemID: itemID))
                 }
                 return
             }
