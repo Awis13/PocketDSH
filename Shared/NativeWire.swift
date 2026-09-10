@@ -351,6 +351,7 @@ struct NativeQueueInfo: Codable, Sendable, Equatable {
         switch code {
         case "queue-item-not-found": return "That pending request is no longer queued."
         case "steer-unavailable": return "Steering is only available while a turn is running."
+        case "queue-unavailable": return "The host could not read the pending queue. Try again."
         case "BUSY": return "Wait for the current operation to finish, or use Stop."
         default: return NativeRequestInfo.label(code)
         }

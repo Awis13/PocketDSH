@@ -193,17 +193,28 @@ private actor NativeHostSession {
             peer.send(NativeEvent(op: "approval", session: id, approval: NativeApproval(id: request.id, name: request.call.name, arguments: request.call.arguments, workspace: request.workspace)))
         }
         // Recomputed from the inbox, never replayed from a stale journal copy.
-        await sendQueueSnapshot(to: peer)
+        try await sendQueueSnapshot(to: peer)
     }
 
-    private func queueSnapshot() async -> NativeEvent {
-        let pending = (try? await engine.pending()) ?? []
+    /// A failed inbox read must never be published as an empty queue: that would
+    /// clear the client's dock and retire its optimistic echo. Propagate instead
+    /// so the caller emits a real error event and the last-known state survives.
+    private func queueSnapshot() async throws -> NativeEvent {
+        let pending = try await engine.pending()
         return NativeEvent(op: "queue", session: id, queue: NativeQueueProjection.snapshot(pending))
     }
 
-    private func sendQueueSnapshot(to peer: NativePeer) async {
-        peer.send(await queueSnapshot())
+    private func sendQueueSnapshot(to peer: NativePeer) async throws {
+        peer.send(try await queueSnapshot())
     }
+
+    /// Control identifiers are bounded exactly like `EventStore.enqueue`'s IDs so
+    /// one client cannot grow the receipt map without limit.
+    private static func validIdentifier(_ value: String) -> Bool {
+        !value.isEmpty && value.utf8.count <= 128 && !value.contains("\0")
+    }
+
+    private static let queueActions: Set<String> = ["edit", "remove", "steer", "text"]
 
     /// Queue acknowledgements are ephemeral and bounded, keyed by the client's
     /// request ID so a retry after a dropped frame returns the same outcome.
@@ -246,7 +257,7 @@ private actor NativeHostSession {
             }
         case "interrupt": try pty.interrupt()
         case "prompt":
-            guard let text = command.text, let requestID = command.id else { throw HarnessError.invalid("Missing prompt or request ID") }
+            guard let text = command.text, let requestID = command.id, Self.validIdentifier(requestID) else { throw HarnessError.invalid("Missing prompt or invalid request ID") }
             let mode: DeliveryMode
             if let raw = command.mode {
                 guard let parsed = DeliveryMode(rawValue: raw) else { throw HarnessError.invalid("Unknown delivery mode") }
@@ -267,18 +278,40 @@ private actor NativeHostSession {
             try sink.checkStorage()
             if receipt.state == .pending { await driver.resume() }
             sink.send(NativeEvent(op: "accepted", session: id, id: requestID, text: text))
-            await sendQueueSnapshot(to: peer)
+            try await sendQueueSnapshot(to: peer)
         case "queue":
-            guard let requestID = command.id, !requestID.isEmpty else { throw HarnessError.invalid("Missing queue request ID") }
+            guard let requestID = command.id, Self.validIdentifier(requestID) else { throw HarnessError.invalid("Missing or invalid queue request ID") }
             if let previous = queueReceipts[requestID] { peer.send(previous); return }
-            guard let action = command.action, let itemID = command.itemID, !itemID.isEmpty else {
-                throw HarnessError.invalid("Missing queue action or item ID")
+            guard let action = command.action, Self.queueActions.contains(action) else { throw HarnessError.invalid("Unknown queue action") }
+            guard let itemID = command.itemID, Self.validIdentifier(itemID) else { throw HarnessError.invalid("Missing or invalid queue item ID") }
+            if action == "text" {
+                // Bounded on-demand full text for the single item being edited;
+                // the list preview stays clipped.
+                do {
+                    if let target = try await engine.pending().first(where: { $0.id == itemID }) {
+                        peer.send(NativeEvent(op: "queueText", session: id, id: itemID, text: target.prompt))
+                    } else {
+                        peer.send(NativeEvent(op: "queueRejected", session: id, id: requestID, text: "queue-item-not-found"))
+                    }
+                } catch {
+                    peer.send(NativeEvent(op: "queueRejected", session: id, id: requestID, text: "queue-unavailable"))
+                }
+                return
             }
             let rejected: String?
             switch action {
             case "edit":
                 guard let text = command.text else { throw HarnessError.invalid("Missing prompt for queue edit") }
-                rejected = (try? await engine.editPending(commandID: itemID, prompt: text)) == true ? nil : "queue-item-not-found"
+                let previous = try await engine.pending().first(where: { $0.id == itemID })
+                // Only a false RETURN is "not found"; storage/invalid faults
+                // propagate as their own error event instead of hiding as benign.
+                let edited = try await engine.editPending(commandID: itemID, prompt: text)
+                rejected = edited ? nil : "queue-item-not-found"
+                // Re-publish the prompt under the same request identity so the chat
+                // row and replayed transcript show the edited text, not the stale one.
+                if edited, previous?.prompt != text {
+                    sink.send(NativeEvent(op: "user", session: id, id: itemID, text: text))
+                }
             case "remove":
                 rejected = try await engine.removePending(commandID: itemID) ? nil : "queue-item-not-found"
             case "steer":
@@ -290,7 +323,7 @@ private actor NativeHostSession {
             let receipt = rejected.map { NativeEvent(op: "queueRejected", session: id, id: requestID, text: $0) }
                 ?? NativeEvent(op: "queueAccepted", session: id, id: requestID)
             publishQueueReceipt(receipt, requestID: requestID, to: peer)
-            await sendQueueSnapshot(to: peer)
+            try await sendQueueSnapshot(to: peer)
         case "watch":
             guard let requestID = command.id else { throw HarnessError.invalid("Missing request ID") }
             _ = try await driver.submit(prompt: "Observe terminal \(observation.id) using terminal_inspect/read/wait. Read the current output, then wait for new output. Report what actually changes. Do not type into the terminal or run shell commands. Distinguish whole-PTY exit from completion of a command. Ask the user if a decision is needed.", commandID: requestID)
@@ -328,7 +361,7 @@ private actor NativeHostSession {
             let status = try await driver.status()
             peer.send(NativeEvent(op: "status", session: id, text: status.errorCode, running: status.running || maintenance != nil,
                 compaction: sink.compactionInfo()))
-            await sendQueueSnapshot(to: peer)
+            try await sendQueueSnapshot(to: peer)
         case "cancel": maintenance?.cancel(); await driver.stop()
         case "approval":
             guard let id = command.id, let allow = command.allow else { throw HarnessError.invalid("Missing approval") }

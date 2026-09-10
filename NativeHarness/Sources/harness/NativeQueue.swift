@@ -9,13 +9,13 @@ enum NativeQueueProjection {
     static let previewLimit = 512
 
     static func snapshot(_ commands: [PendingCommand], limit: Int = itemLimit,
-                         previewLimit: Int = previewLimit) -> NativeQueueInfo {
-        let shown = commands.prefix(max(0, limit)).map { item($0, previewLimit: previewLimit) }
+                         previewBytes: Int = previewLimit) -> NativeQueueInfo {
+        let shown = commands.prefix(max(0, limit)).map { item($0, previewBytes: previewBytes) }
         return NativeQueueInfo(items: shown, omitted: max(0, commands.count - shown.count))
     }
 
-    static func item(_ command: PendingCommand, previewLimit: Int = previewLimit) -> NativeQueueItem {
-        let (preview, clipped) = clip(command.prompt, bytes: previewLimit)
+    static func item(_ command: PendingCommand, previewBytes: Int = previewLimit) -> NativeQueueItem {
+        let (preview, clipped) = clip(command.prompt, bytes: previewBytes)
         return NativeQueueItem(id: command.id, preview: preview,
             placement: command.mode == .steer ? NativeQueueItem.steering : NativeQueueItem.queued,
             truncated: clipped)

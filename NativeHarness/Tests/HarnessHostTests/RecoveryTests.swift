@@ -54,7 +54,7 @@ final class RecoveryTests: XCTestCase {
         _ = try await store.enqueue(session: "s", id: "a", prompt: "short", mode: .queue)
         _ = try await store.enqueue(session: "s", id: "b", prompt: String(repeating: "x", count: 1000), mode: .steer)
         _ = try await store.enqueue(session: "s", id: "c", prompt: "third", mode: .queue)
-        let snapshot = NativeQueueProjection.snapshot(try await store.pending(session: "s"), limit: 2, previewLimit: 8)
+        let snapshot = NativeQueueProjection.snapshot(try await store.pending(session: "s"), limit: 2, previewBytes: 8)
         XCTAssertEqual(snapshot.items.map { $0.id }, ["a", "b"])
         XCTAssertEqual(snapshot.omitted, 1)
         XCTAssertEqual(snapshot.count, 3)
