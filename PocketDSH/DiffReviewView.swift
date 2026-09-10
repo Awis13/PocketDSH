@@ -42,18 +42,29 @@ struct DiffReviewView: View {
                         .disabled(store.nativeDiffLoading).accessibilityLabel("Reload diff")
                 }
             }
-            .onAppear { if store.nativeDiff == nil { load() } }
-            .onChange(of: base) { _, _ in load() }
+            .onAppear {
+                // A reopened sheet must never show the previous base's diff.
+                store.nativeDiff = nil
+                if base != "branch" { load() }
+            }
+            .onDisappear { store.nativeDiff = nil }
+            .onChange(of: base) { _, _ in
+                // The Branch preset waits for the Load button so an empty ref
+                // never fires a request.
+                if base != "branch" { load() }
+            }
             .onChange(of: store.selectedID) { _, _ in dismiss() }
         }
         .frame(minWidth: 340, minHeight: 320)
     }
 
     private func load() {
-        guard NativeDiffInfo.isValidBase(effectiveBase) else {
-            store.error = "Enter a valid base: worktree, staged, HEAD or a branch name."; return
+        let target = effectiveBase
+        guard !target.isEmpty, NativeDiffInfo.isValidBase(target) else {
+            if !target.isEmpty { store.error = "Enter a valid base: worktree, staged, HEAD or a branch name." }
+            return
         }
-        Task { await store.reviewDiff(base: effectiveBase) }
+        Task { await store.reviewDiff(base: target) }
     }
 
     @ViewBuilder private var content: some View {
@@ -68,7 +79,7 @@ struct DiffReviewView: View {
                     } else if diff.files.isEmpty {
                         notice("No changes against this base.", color: .secondary)
                     } else {
-                        ForEach(diff.files, id: \.path) { file in fileView(file, base: diff.base) }
+                        ForEach(Array(diff.files.enumerated()), id: \.offset) { _, file in fileView(file, base: diff.base) }
                     }
                     if diff.truncated {
                         notice("Preview truncated by the host's size limits.", color: .orange)

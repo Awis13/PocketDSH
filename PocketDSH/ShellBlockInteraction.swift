@@ -162,20 +162,12 @@ struct ShellContextAttachment: Identifiable, Codable, Equatable {
 
     init(block: NativeBlock) {
         blockID = block.id
-        command = Self.prefix(block.command, bytes: 2048)
-        directory = Self.prefix(block.directory, bytes: 1024)
+        command = NativeDiffInfo.prefixText(block.command, bytes: 2048)
+        directory = NativeDiffInfo.prefixText(block.directory, bytes: 1024)
         output = Self.tail(block.preview, bytes: 4096)
         exitCode = block.exitCode
         running = !block.finished
         clipped = block.truncated || output != block.preview || command != block.command || directory != block.directory
-    }
-    private static func prefix(_ text: String, bytes: Int) -> String {
-        var end = text.startIndex, count = 0
-        while end < text.endIndex {
-            let next = text.index(after: end), size = text[end..<next].utf8.count
-            guard count + size <= bytes else { break }; count += size; end = next
-        }
-        return String(text[..<end])
     }
     private static func tail(_ text: String, bytes: Int) -> String {
         var start = text.endIndex, count = 0
@@ -199,21 +191,12 @@ struct ShellDiffAttachment: Identifiable, Codable, Equatable {
     let clipped: Bool
 
     init(path: String, header: String, oldText: String, newText: String, base: String) {
-        self.path = Self.prefix(path, bytes: 1024)
-        self.header = Self.prefix(header, bytes: 256)
-        self.oldText = Self.prefix(oldText, bytes: 8192)
-        self.newText = Self.prefix(newText, bytes: 8192)
-        self.base = Self.prefix(base, bytes: 64)
+        self.path = NativeDiffInfo.prefixText(path, bytes: 1024)
+        self.header = NativeDiffInfo.prefixText(header, bytes: 256)
+        self.oldText = NativeDiffInfo.prefixText(oldText, bytes: 8192)
+        self.newText = NativeDiffInfo.prefixText(newText, bytes: 8192)
+        self.base = NativeDiffInfo.prefixText(base, bytes: 64)
         clipped = self.path != path || self.header != header || self.oldText != oldText || self.newText != newText || self.base != base
-    }
-    private static func prefix(_ text: String, bytes: Int) -> String {
-        var end = text.startIndex, count = 0
-        while end < text.endIndex {
-            let next = text.index(after: end), size = text[end..<next].utf8.count
-            guard count + size <= bytes else { break }
-            count += size; end = next
-        }
-        return String(text[..<end])
     }
     var readable: String {
         var text = "Diff " + path + " · base " + base
@@ -285,16 +268,22 @@ struct ShellPromptContent {
     static func parse(_ text: String) -> ShellPromptContent {
         guard let boundary = text.range(of: delimiter, options: .backwards) else { return Self(question: text, attachments: []) }
         let payload = Data(text[boundary.upperBound...].utf8)
-        if let attachments = try? JSONDecoder().decode([ShellContextAttachment].self, from: payload),
-           !attachments.isEmpty, attachments.count <= 4 {
-            return Self(question: String(text[..<boundary.lowerBound]), attachments: attachments)
+        // Legacy shape: a bare array of terminal blocks. Preserve the historical
+        // contract, including dropping the whole array when it carries more than
+        // four entries, so an oversized payload is never silently truncated.
+        if let legacy = try? JSONDecoder().decode([ShellContextAttachment].self, from: payload), !legacy.isEmpty {
+            guard legacy.count <= 4 else { return Self(question: text, attachments: [], diffs: []) }
+            return Self(question: String(text[..<boundary.lowerBound]), attachments: legacy)
         }
         if let combined = try? JSONDecoder().decode([ShellAttachment].self, from: payload) {
+            // Unknown kinds decode to `.unsupported` and are intentionally
+            // dropped here: this value model has no representation for a future
+            // payload, but an unknown element must never fail the whole prompt.
             let attachments = combined.compactMap(\.terminal)
             let diffs = combined.compactMap(\.diff)
             if !attachments.isEmpty || !diffs.isEmpty {
-                return Self(question: String(text[..<boundary.lowerBound]),
-                            attachments: Array(attachments.prefix(4)), diffs: Array(diffs.prefix(4)))
+                guard attachments.count <= 4, diffs.count <= 4 else { return Self(question: text, attachments: [], diffs: []) }
+                return Self(question: String(text[..<boundary.lowerBound]), attachments: attachments, diffs: diffs)
             }
         }
         return Self(question: text, attachments: [], diffs: [])

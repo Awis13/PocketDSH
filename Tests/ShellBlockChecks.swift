@@ -127,6 +127,20 @@ import Foundation
         let unknownParsed = ShellPromptContent.parse(unknown)
         precondition(unknownParsed.attachments.count == 1 && unknownParsed.attachments.first?.command == "ls" && unknownParsed.diffs.isEmpty,
                      "An unknown attachment kind is skipped, not fatal")
-        print("PASS diff hunk attachment: round-trip, diff-only, bounds, unknown kinds and legacy prompt back-compat")
+
+        func legacyPayload(count: Int) -> String {
+            let elements = (0..<count).map { index in
+                #"{"blockID":"b\#(index)","command":"echo","directory":"/","output":"x","exitCode":0,"running":false,"clipped":false,"id":"\#(index)"}"#
+            }
+            return "Legacy" + ShellPromptContent.delimiter + "[" + elements.joined(separator: ",") + "]"
+        }
+        let fourLegacy = ShellPromptContent.parse(legacyPayload(count: 4))
+        precondition(fourLegacy.attachments.count == 4 && fourLegacy.diffs.isEmpty,
+                     "A legacy bare array at the cap still parses")
+        let fiveLegacy = legacyPayload(count: 5)
+        let fiveParsed = ShellPromptContent.parse(fiveLegacy)
+        precondition(fiveParsed.question == fiveLegacy && fiveParsed.attachments.isEmpty && fiveParsed.diffs.isEmpty,
+                     "A legacy payload above the cap is dropped whole, never silently truncated")
+        print("PASS diff hunk attachment: round-trip, diff-only, bounds, unknown kinds, legacy back-compat and the legacy over-cap drop")
     }
 }

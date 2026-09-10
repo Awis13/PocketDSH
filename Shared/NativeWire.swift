@@ -481,12 +481,17 @@ struct NativeDiffInfo: Codable, Sendable, Equatable {
         copy.error = error.map { NativeDiffInfo.prefixText($0, bytes: 400) }
         var total = 0, clamped = truncated
         var result: [NativeDiffFile] = []
-        for var file in files {
+        for incoming in files {
             guard result.count < maximumFiles else { clamped = true; break }
+            var file = incoming
             file.path = NativeDiffInfo.prefixText(file.path, bytes: 1024)
             file.oldPath = file.oldPath.map { NativeDiffInfo.prefixText($0, bytes: 1024) }
             file.additions = max(0, file.additions)
             file.deletions = max(0, file.deletions)
+            // A malformed host payload can carry an empty path; it has no
+            // renderable identity, so drop it rather than emit a blank row.
+            guard !file.path.isEmpty else { clamped = true; continue }
+            let hadHunks = !file.hunks.isEmpty
             var hunks: [NativeDiffHunk] = []
             for hunk in file.hunks {
                 guard hunks.count < maximumHunksPerFile else { file.truncated = true; clamped = true; break }
@@ -497,7 +502,15 @@ struct NativeDiffInfo: Codable, Sendable, Equatable {
                 if clampedHunk != hunk { clamped = true }
                 hunks.append(clampedHunk)
             }
+            if hadHunks && hunks.isEmpty {
+                file.truncated = true; clamped = true
+                continue
+            }
             file.hunks = hunks
+            if hadHunks {
+                file.additions = hunks.reduce(0) { $0 + NativeDiffInfo.lineCount($1.newText) }
+                file.deletions = hunks.reduce(0) { $0 + NativeDiffInfo.lineCount($1.oldText) }
+            }
             if file.truncated { clamped = true }
             result.append(file)
         }
@@ -533,6 +546,11 @@ struct NativeDiffInfo: Codable, Sendable, Equatable {
             count += size; end = next
         }
         return String(text[..<end])
+    }
+
+    static func lineCount(_ text: String) -> Int {
+        guard !text.isEmpty else { return 0 }
+        return text.split(separator: "\n", omittingEmptySubsequences: false).count - (text.hasSuffix("\n") ? 1 : 0)
     }
 }
 
