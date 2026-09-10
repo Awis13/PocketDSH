@@ -78,22 +78,14 @@ import UIKit
 
 @MainActor
 private enum PaneCommands {
-    struct Handlers {
-        var close: () -> Void
-        var focus: (PaneFocusDirection) -> Void
-        var maximize: () -> Void
-    }
-    static var handlers: [ObjectIdentifier: Handlers] = [:]
+    static var handlers: [ObjectIdentifier: () -> Void] = [:]
     private static func keyWindow() -> UIWindow? {
         UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.flatMap(\.windows).first(where: \.isKeyWindow)
     }
-    private static func current() -> Handlers? {
-        guard let window = keyWindow() else { return nil }
-        return handlers[ObjectIdentifier(window)]
+    static func closeActivePane() {
+        guard let window = keyWindow() else { return }
+        handlers[ObjectIdentifier(window)]?()
     }
-    static func closeActivePane() { current()?.close() }
-    static func moveFocus(_ direction: PaneFocusDirection) { current()?.focus(direction) }
-    static func toggleMaximize() { current()?.maximize() }
 }
 final class PocketMacAppDelegate: UIResponder, UIApplicationDelegate {
     override func buildMenu(with builder: UIMenuBuilder) {
@@ -101,51 +93,29 @@ final class PocketMacAppDelegate: UIResponder, UIApplicationDelegate {
         guard builder.system == .main else { return }
         // Remove the system Close Window command instead of competing with it.
         builder.remove(menu: .close)
+        // `⌘W` needs the per-window key-window bridge because the focused pane
+        // lives in a scene-specific view tree. Directional focus and maximize
+        // are owned solely by the hidden SwiftUI shortcuts in `NativeShellPane`
+        // so Mac Catalyst and iPad register each chord exactly once.
         let close = UIKeyCommand(title: "Close Active Pane", action: #selector(closePane), input: "w", modifierFlags: .command)
         close.wantsPriorityOverSystemBehavior = true
         builder.insertChild(UIMenu(title: "", identifier: UIMenu.Identifier("dev.awis.close-pane"), options: .displayInline, children: [close]), atStartOfMenu: .file)
-        // Directional pane focus and maximize must be claimed before the
-        // focused terminal turns the same chords into PTY bytes.
-        let focus = [
-            UIKeyCommand(title: "Focus Pane Left", action: #selector(focusPane(_:)), input: UIKeyCommand.inputLeftArrow, modifierFlags: [.control, .alternate]),
-            UIKeyCommand(title: "Focus Pane Right", action: #selector(focusPane(_:)), input: UIKeyCommand.inputRightArrow, modifierFlags: [.control, .alternate]),
-            UIKeyCommand(title: "Focus Pane Above", action: #selector(focusPane(_:)), input: UIKeyCommand.inputUpArrow, modifierFlags: [.control, .alternate]),
-            UIKeyCommand(title: "Focus Pane Below", action: #selector(focusPane(_:)), input: UIKeyCommand.inputDownArrow, modifierFlags: [.control, .alternate])
-        ]
-        let maximize = UIKeyCommand(title: "Maximize or Restore Pane", action: #selector(toggleMaximizePane), input: "m", modifierFlags: [.command, .shift])
-        (focus + [maximize]).forEach { $0.wantsPriorityOverSystemBehavior = true }
-        builder.insertChild(UIMenu(title: "", identifier: UIMenu.Identifier("dev.awis.pane-focus"), options: .displayInline, children: focus + [maximize]), atStartOfMenu: .view)
     }
     @objc private func closePane(_ sender: UIKeyCommand) { PaneCommands.closeActivePane() }
-    @objc private func focusPane(_ sender: UIKeyCommand) {
-        let direction: PaneFocusDirection
-        switch sender.input {
-        case UIKeyCommand.inputLeftArrow: direction = .left
-        case UIKeyCommand.inputRightArrow: direction = .right
-        case UIKeyCommand.inputUpArrow: direction = .up
-        default: direction = .down
-        }
-        PaneCommands.moveFocus(direction)
-    }
-    @objc private func toggleMaximizePane(_ sender: UIKeyCommand) { PaneCommands.toggleMaximize() }
 }
-/// Registers the key-window handlers for pane commands (close, directional
-/// focus and maximize). The Mac menu dispatches to them; iPad uses the hidden
-/// SwiftUI shortcuts in `NativeShellPane`.
+/// Registers the per-window close handler for the `⌘W` menu command. Pane
+/// focus and maximize use the SwiftUI shortcuts in `NativeShellPane`; the Mac
+/// menu does not duplicate them.
 struct PaneCommandBridge: UIViewRepresentable {
     let onClose: () -> Void
-    var onFocus: ((PaneFocusDirection) -> Void)? = nil
-    var onMaximize: (() -> Void)? = nil
     func makeUIView(context: Context) -> PaneCommandView { PaneCommandView() }
     func updateUIView(_ view: PaneCommandView, context: Context) {
-        view.onClose = onClose; view.onFocus = onFocus; view.onMaximize = onMaximize; view.registerWindow()
+        view.onClose = onClose; view.registerWindow()
     }
     static func dismantleUIView(_ view: PaneCommandView, coordinator: ()) { view.unregisterWindow() }
 }
 final class PaneCommandView: UIView {
     var onClose: (() -> Void)?
-    var onFocus: ((PaneFocusDirection) -> Void)?
-    var onMaximize: (() -> Void)?
     private var registeredWindow: ObjectIdentifier?
     override func didMoveToWindow() { super.didMoveToWindow(); registerWindow() }
     func unregisterWindow() {
@@ -157,6 +127,6 @@ final class PaneCommandView: UIView {
         guard let window, let onClose else { return }
         let key = ObjectIdentifier(window)
         registeredWindow = key
-        PaneCommands.handlers[key] = PaneCommands.Handlers(close: onClose, focus: onFocus ?? { _ in }, maximize: onMaximize ?? {})
+        PaneCommands.handlers[key] = onClose
     }
 }

@@ -526,7 +526,7 @@ struct DesktopHomeView: View {
                 .padding(.horizontal, 16).frame(minHeight: 44).padding(.vertical, 4)
             if let layout = workspace.layout { render(workspace.maximized ? .pane(workspace.active ?? layout.first) : layout) }
         }.background { ThemeBackdrop() }
-            .background { PaneCommandBridge(onClose: { workspace.close() }, onFocus: { workspace.moveFocus($0) }, onMaximize: { workspace.toggleMaximize() }).frame(width: 0, height: 0) }
+            .background { PaneCommandBridge(onClose: { workspace.close() }).frame(width: 0, height: 0) }
             .onPreferenceChange(AgentPaneSizes.self) { if workspace.sizes != $0 { workspace.sizes = $0 } }
             .onAppear { workspace.prepare(store) }
             .onChange(of: phase) { _, phase in

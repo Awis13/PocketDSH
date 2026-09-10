@@ -174,7 +174,12 @@ struct NativeShellPane: View {
     }
     private var isExpanded: Bool { client.presentation.isExpanded }
     private var inlineTerminalHeight: CGFloat { max(300, min(560, viewportHeight * 0.6)) }
-    private var terminalHeight: CGFloat { isExpanded ? max(320, viewportHeight - 48) : inlineTerminalHeight }
+    /// Expanded terminals are pinned below the full-screen banner and keep the
+    /// command header and transcript padding above them. Reserve that chrome
+    /// (banner, content padding, block header plus stack spacing) so the bottom
+    /// of the emulator and its prompt are not clipped while scrolling is off.
+    private var expandedChromeHeight: CGFloat { 48 + 24 + 56 }
+    private var terminalHeight: CGFloat { isExpanded ? max(200, viewportHeight - expandedChromeHeight) : inlineTerminalHeight }
 
     var body: some View {
         VStack(spacing: 0) {
