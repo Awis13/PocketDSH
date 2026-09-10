@@ -77,13 +77,23 @@ struct PocketDSHApp: App {
 import UIKit
 
 @MainActor
-private enum PaneCloseCommands {
-    static var handlers: [ObjectIdentifier: () -> Void] = [:]
-    static func closeActivePane() {
-        let windows = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.flatMap(\.windows)
-        guard let window = windows.first(where: \.isKeyWindow) else { return }
-        handlers[ObjectIdentifier(window)]?()
+private enum PaneCommands {
+    struct Handlers {
+        var close: () -> Void
+        var focus: (PaneFocusDirection) -> Void
+        var maximize: () -> Void
     }
+    static var handlers: [ObjectIdentifier: Handlers] = [:]
+    private static func keyWindow() -> UIWindow? {
+        UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.flatMap(\.windows).first(where: \.isKeyWindow)
+    }
+    private static func current() -> Handlers? {
+        guard let window = keyWindow() else { return nil }
+        return handlers[ObjectIdentifier(window)]
+    }
+    static func closeActivePane() { current()?.close() }
+    static func moveFocus(_ direction: PaneFocusDirection) { current()?.focus(direction) }
+    static func toggleMaximize() { current()?.maximize() }
 }
 final class PocketMacAppDelegate: UIResponder, UIApplicationDelegate {
     override func buildMenu(with builder: UIMenuBuilder) {
@@ -94,27 +104,56 @@ final class PocketMacAppDelegate: UIResponder, UIApplicationDelegate {
         let close = UIKeyCommand(title: "Close Active Pane", action: #selector(closePane), input: "w", modifierFlags: .command)
         close.wantsPriorityOverSystemBehavior = true
         builder.insertChild(UIMenu(title: "", identifier: UIMenu.Identifier("dev.awis.close-pane"), options: .displayInline, children: [close]), atStartOfMenu: .file)
+        // Directional pane focus and maximize must be claimed before the
+        // focused terminal turns the same chords into PTY bytes.
+        let focus = [
+            UIKeyCommand(title: "Focus Pane Left", action: #selector(focusPane(_:)), input: UIKeyCommand.inputLeftArrow, modifierFlags: [.command, .alternate]),
+            UIKeyCommand(title: "Focus Pane Right", action: #selector(focusPane(_:)), input: UIKeyCommand.inputRightArrow, modifierFlags: [.command, .alternate]),
+            UIKeyCommand(title: "Focus Pane Above", action: #selector(focusPane(_:)), input: UIKeyCommand.inputUpArrow, modifierFlags: [.command, .alternate]),
+            UIKeyCommand(title: "Focus Pane Below", action: #selector(focusPane(_:)), input: UIKeyCommand.inputDownArrow, modifierFlags: [.command, .alternate])
+        ]
+        let maximize = UIKeyCommand(title: "Maximize or Restore Pane", action: #selector(toggleMaximizePane), input: "m", modifierFlags: [.command, .shift])
+        (focus + [maximize]).forEach { $0.wantsPriorityOverSystemBehavior = true }
+        builder.insertChild(UIMenu(title: "", identifier: UIMenu.Identifier("dev.awis.pane-focus"), options: .displayInline, children: focus + [maximize]), atStartOfMenu: .view)
     }
-    @objc private func closePane(_ sender: UIKeyCommand) { PaneCloseCommands.closeActivePane() }
+    @objc private func closePane(_ sender: UIKeyCommand) { PaneCommands.closeActivePane() }
+    @objc private func focusPane(_ sender: UIKeyCommand) {
+        let direction: PaneFocusDirection
+        switch sender.input {
+        case UIKeyCommand.inputLeftArrow: direction = .left
+        case UIKeyCommand.inputRightArrow: direction = .right
+        case UIKeyCommand.inputUpArrow: direction = .up
+        default: direction = .down
+        }
+        PaneCommands.moveFocus(direction)
+    }
+    @objc private func toggleMaximizePane(_ sender: UIKeyCommand) { PaneCommands.toggleMaximize() }
 }
 struct PaneCloseCommandBridge: UIViewRepresentable {
     let onClose: () -> Void
+    var onFocus: ((PaneFocusDirection) -> Void)? = nil
+    var onMaximize: (() -> Void)? = nil
     func makeUIView(context: Context) -> PaneCloseCommandView { PaneCloseCommandView() }
-    func updateUIView(_ view: PaneCloseCommandView, context: Context) { view.onClose = onClose; view.registerWindow() }
+    func updateUIView(_ view: PaneCloseCommandView, context: Context) {
+        view.onClose = onClose; view.onFocus = onFocus; view.onMaximize = onMaximize; view.registerWindow()
+    }
     static func dismantleUIView(_ view: PaneCloseCommandView, coordinator: ()) { view.unregisterWindow() }
 }
 final class PaneCloseCommandView: UIView {
     var onClose: (() -> Void)?
+    var onFocus: ((PaneFocusDirection) -> Void)?
+    var onMaximize: (() -> Void)?
     private var registeredWindow: ObjectIdentifier?
     override func didMoveToWindow() { super.didMoveToWindow(); registerWindow() }
     func unregisterWindow() {
-        if let registeredWindow { PaneCloseCommands.handlers.removeValue(forKey: registeredWindow) }
+        if let registeredWindow { PaneCommands.handlers.removeValue(forKey: registeredWindow) }
         registeredWindow = nil
     }
     func registerWindow() {
         unregisterWindow()
         guard let window, let onClose else { return }
         let key = ObjectIdentifier(window)
-        registeredWindow = key; PaneCloseCommands.handlers[key] = onClose
+        registeredWindow = key
+        PaneCommands.handlers[key] = PaneCommands.Handlers(close: onClose, focus: onFocus ?? { _ in }, maximize: onMaximize ?? {})
     }
 }

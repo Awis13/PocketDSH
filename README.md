@@ -57,6 +57,8 @@ This backend is an early preview. Images, voice, model selection, full-access po
 | Send / insert newline | Enter / Shift+Enter |
 | Split side by side | ⌘D |
 | Split top and bottom | ⌘⇧D |
+| Move focus between panes | ⌘⌥ arrow keys |
+| Maximize / restore active pane | ⌘⇧M |
 | Close active pane | ⌘W |
 | Choose a model | `/model` |
 | Switch chat / terminal | `/view` |

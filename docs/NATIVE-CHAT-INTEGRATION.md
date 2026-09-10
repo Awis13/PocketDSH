@@ -31,7 +31,7 @@ Native image input, voice transcription, model switching, full-access policy, st
 
 - `swift test --package-path NativeHarness`: 60 tests passed, including presentation durability and recovery tests.
 - `Tests/NativeChatChecks.swift`: deterministic transcript folding/replay checks, plus optional live host checks for Qwen reasoning, file read, tool results, allow/reject, cancellation and replay.
-- Compile the check with `swiftc -parse-as-library PocketDSH/HarnessProtocol.swift PocketDSH/HarnessAPI.swift Shared/NativeWire.swift PocketDSH/ShellBlockInteraction.swift PocketDSH/NativeChatConnection.swift Tests/NativeChatChecks.swift -o output/native-chat/checks`.
+- Compile the check with `swiftc -parse-as-library PocketDSH/HarnessProtocol.swift PocketDSH/HarnessAPI.swift Shared/NativeWire.swift PocketDSH/ShellBlockInteraction.swift PocketDSH/NativeChatConnection.swift PocketDSH/TerminalPresentation.swift PocketDSH/PaneFocusNavigator.swift Tests/NativeChatChecks.swift -o output/native-chat/checks`.
 - Run without arguments for offline checks, or with a local JSON config path containing `endpoint` and `token` for live checks. The live check executes approved test-only `printf` commands inside the test workspace and consumes one host session slot.
 - Build logs and local runtime evidence are retained under ignored `output/native-chat*` paths; credentials are not committed.
 
@@ -82,7 +82,7 @@ Shell now has an explicit selected command block, a compact action bar, and a co
 
 | Action | Shortcut |
 | --- | --- |
-| Previous / next command block | ⌘⌥↑ / ⌘⌥↓ |
+| Previous / next command block | ⌘⇧↑ / ⌘⇧↓ |
 | Find in selected output (last block if none selected) | ⌘F |
 | Next / previous match | ⌘G / ⌘⇧G |
 | Close Find and return to input | Escape |
@@ -93,6 +93,8 @@ Shell now has an explicit selected command block, a compact action bar, and a co
 | Ask the agent in Shell | ⌘Enter |
 
 Search is literal and case-insensitive, including Unicode. It searches the retained output preview (up to 64 KiB), highlights matches, and navigates both vertically and horizontally to the current match. The display caps at 500 matches and shows `500+` when more exist. Ordinary editor selection and copy shortcuts are unchanged. Block shortcuts are intercepted before SwiftTerm can translate modified arrows into PTY input.
+
+When a full-screen program enables the alternate buffer, the one live terminal surface expands to fill the active pane and a "Return to transcript" control appears; the transcript stays mounted behind it. Leaving the program (q, exit, Ctrl+C or DECRST 1047/1049) collapses the surface automatically and scrolls the transcript back to the command block that owned it. The terminal is never reparented between containers — only its height changes — and neighbouring panes are untouched.
 
 The bundled `Vendor/SwiftTerm` package retains upstream 1.5.1 library sources and license, with a shortcut access hook and small symbol-font/dim-style rendering patches. Terminal parsing is unchanged. The library-only manifest omits upstream's CLI products and ArgumentParser dependency. See its README for the exact upstream commit, local changes and upgrade procedure.
 
@@ -105,7 +107,7 @@ Offline checks:
 ```sh
 xcrun swiftc -parse-as-library PocketDSH/HarnessProtocol.swift PocketDSH/ShellBlockInteraction.swift Tests/ShellBlockChecks.swift -o output/native-chat/block-checks
 output/native-chat/block-checks
-xcrun swiftc -parse-as-library PocketDSH/HarnessProtocol.swift PocketDSH/HarnessAPI.swift Shared/NativeWire.swift PocketDSH/ShellBlockInteraction.swift PocketDSH/NativeChatConnection.swift Tests/NativeChatChecks.swift -o output/native-chat/terminal-fold-checks
+xcrun swiftc -parse-as-library PocketDSH/HarnessProtocol.swift PocketDSH/HarnessAPI.swift Shared/NativeWire.swift PocketDSH/ShellBlockInteraction.swift PocketDSH/NativeChatConnection.swift PocketDSH/TerminalPresentation.swift PocketDSH/PaneFocusNavigator.swift Tests/NativeChatChecks.swift -o output/native-chat/terminal-fold-checks
 output/native-chat/terminal-fold-checks
 ```
 

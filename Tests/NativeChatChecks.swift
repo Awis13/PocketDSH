@@ -181,6 +181,38 @@ import Foundation
         precondition(reset == TerminalPresentation(), "Reset clears every presentation field")
         print("PASS terminal presentation: alternate-buffer transitions, one-shot return anchor and reset")
 
+        let single = PaneFocusNavigator.Node.pane("a")
+        precondition(PaneFocusNavigator.next(from: "a", direction: .left, in: single) == nil)
+        precondition(PaneFocusNavigator.next(from: "missing", direction: .right, in: single) == nil)
+        let horizontal = PaneFocusNavigator.Node.split(.horizontal, .pane("a"), .pane("b"))
+        precondition(PaneFocusNavigator.next(from: "a", direction: .right, in: horizontal) == "b")
+        precondition(PaneFocusNavigator.next(from: "b", direction: .left, in: horizontal) == "a")
+        precondition(PaneFocusNavigator.next(from: "a", direction: .left, in: horizontal) == nil)
+        precondition(PaneFocusNavigator.next(from: "b", direction: .right, in: horizontal) == nil)
+        precondition(PaneFocusNavigator.next(from: "a", direction: .up, in: horizontal) == nil,
+                     "A perpendicular direction inside a lone split has no target")
+        let vertical = PaneFocusNavigator.Node.split(.vertical, .pane("a"), .pane("b"))
+        precondition(PaneFocusNavigator.next(from: "a", direction: .down, in: vertical) == "b")
+        precondition(PaneFocusNavigator.next(from: "b", direction: .up, in: vertical) == "a")
+        precondition(PaneFocusNavigator.next(from: "a", direction: .up, in: vertical) == nil)
+        let row = PaneFocusNavigator.Node.split(.horizontal, .pane("a"), .split(.horizontal, .pane("b"), .pane("c")))
+        precondition(row.panes == ["a", "b", "c"] && row.contains("c"))
+        precondition(PaneFocusNavigator.next(from: "a", direction: .right, in: row) == "b")
+        precondition(PaneFocusNavigator.next(from: "b", direction: .left, in: row) == "a")
+        precondition(PaneFocusNavigator.next(from: "b", direction: .right, in: row) == "c")
+        precondition(PaneFocusNavigator.next(from: "c", direction: .right, in: row) == nil)
+        let grid = PaneFocusNavigator.Node.split(.horizontal, .pane("left"), .split(.vertical, .pane("top"), .pane("bottom")))
+        precondition(PaneFocusNavigator.next(from: "top", direction: .left, in: grid) == "left")
+        precondition(PaneFocusNavigator.next(from: "bottom", direction: .left, in: grid) == "left")
+        precondition(PaneFocusNavigator.next(from: "left", direction: .right, in: grid) == "top",
+                     "Returning into a column prefers its first pane")
+        precondition(PaneFocusNavigator.next(from: "top", direction: .down, in: grid) == "bottom")
+        precondition(PaneFocusNavigator.next(from: "top", direction: .up, in: grid) == nil)
+        let stackedRow = PaneFocusNavigator.Node.split(.vertical, .split(.horizontal, .pane("a"), .pane("b")), .pane("c"))
+        precondition(PaneFocusNavigator.next(from: "c", direction: .up, in: stackedRow) == "b",
+                     "Moving into a row prefers the pane nearest the positive edge")
+        print("PASS pane focus navigator: single, horizontal, vertical, nested row, grid and edge tie-breaks")
+
         guard CommandLine.arguments.count > 1 else { return }
         let config = try JSONDecoder().decode([String:String].self, from: Data(contentsOf: URL(fileURLWithPath: CommandLine.arguments[1])))
         let id = UUID().uuidString

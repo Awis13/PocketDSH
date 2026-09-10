@@ -382,6 +382,14 @@ indirect enum AgentLayout: Codable {
     var panes: [UUID] {
         switch self { case .pane(let id): return [id]; case .split(_, _, let a, let b): return a.panes + b.panes }
     }
+    /// Shape-only mirror used by the pure directional focus navigator.
+    var focusTree: PaneFocusNavigator.Node {
+        switch self {
+        case .pane(let id): return .pane(id.uuidString)
+        case .split(_, let stacked, let a, let b):
+            return .split(stacked ? .vertical : .horizontal, a.focusTree, b.focusTree)
+        }
+    }
 }
 @MainActor
 private final class AgentWorkspace: ObservableObject {
@@ -389,6 +397,7 @@ private final class AgentWorkspace: ObservableObject {
     @Published var active: UUID? { didSet { save() } }
     @Published var fractions: [UUID: Double] = [:] { didSet { save() } }
     @Published var sizes: [UUID: CGSize] = [:]
+    @Published var maximized = false
     func canSplit(stacked: Bool) -> Bool {
         guard UIDevice.current.userInterfaceIdiom == .pad else { return true }
         guard let active, let size = sizes[active] else { return false }
@@ -441,6 +450,7 @@ private final class AgentWorkspace: ObservableObject {
         stores[id] = store
         self.layout = layout.splitting(active, new: id, stacked: stacked)
         self.active = id
+        maximized = false
         let endpoint = source.endpoint
         Task {
             await store.connect(input: endpoint)
@@ -452,6 +462,17 @@ private final class AgentWorkspace: ObservableObject {
         stores.removeValue(forKey: active)?.detachPane()
         if active == initial { initial = next.first }
         layout = next; self.active = next.first
+        maximized = false
+    }
+    func toggleMaximize() {
+        guard stores.count > 1 else { return }
+        maximized.toggle()
+    }
+    func moveFocus(_ direction: PaneFocusDirection) {
+        guard let layout, let active,
+              let next = PaneFocusNavigator.next(from: active.uuidString, direction: direction, in: layout.focusTree),
+              let id = UUID(uuidString: next) else { return }
+        self.active = id
     }
 }
 struct DesktopHomeView: View {
@@ -468,6 +489,11 @@ struct DesktopHomeView: View {
                     .keyboardShortcut("d", modifiers: .command).accessibilityIdentifier("splitVertical").disabled(!workspace.canSplit(stacked: false))
                 Button { workspace.split(stacked: true) } label: { Label("Split top and bottom", systemImage: "rectangle.split.1x2").frame(minWidth: 32, minHeight: 32) }
                     .keyboardShortcut("d", modifiers: [.command, .shift]).accessibilityIdentifier("splitHorizontal").disabled(!workspace.canSplit(stacked: true))
+                Button { workspace.toggleMaximize() } label: { Image(systemName: workspace.maximized ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right").frame(minWidth: 32, minHeight: 32) }
+                    .accessibilityIdentifier("toggleMaximize")
+                    .accessibilityLabel(workspace.maximized ? "Restore panes" : "Maximize active pane")
+                    .help(workspace.maximized ? "Restore panes (⌘⇧M)" : "Maximize active pane (⌘⇧M)")
+                    .disabled(workspace.stores.count < 2)
                 Button { workspace.close() } label: { Image(systemName: "xmark") }
                     .opacity(workspace.stores.count > 1 ? 1 : 0.35)
                     .help(workspace.stores.count > 1 ? "Close active pane (⌘W); the agent continues on the server" : "The last pane stays open")
@@ -482,9 +508,9 @@ struct DesktopHomeView: View {
                 .labelStyle(.iconOnly)
                 #endif
                 .padding(.horizontal, 16).frame(minHeight: 44).padding(.vertical, 4)
-            if let layout = workspace.layout { render(layout) }
+            if let layout = workspace.layout { render(workspace.maximized ? .pane(workspace.active ?? layout.first) : layout) }
         }.background { ThemeBackdrop() }
-            .background { PaneCloseCommandBridge(onClose: { workspace.close() }).frame(width: 0, height: 0) }
+            .background { PaneCloseCommandBridge(onClose: { workspace.close() }, onFocus: { workspace.moveFocus($0) }, onMaximize: { workspace.toggleMaximize() }).frame(width: 0, height: 0) }
             .onPreferenceChange(AgentPaneSizes.self) { if workspace.sizes != $0 { workspace.sizes = $0 } }
             .onAppear { workspace.prepare(store) }
             .onChange(of: phase) { _, phase in
