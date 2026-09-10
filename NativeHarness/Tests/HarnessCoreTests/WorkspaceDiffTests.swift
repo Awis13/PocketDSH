@@ -81,6 +81,30 @@ final class WorkspaceDiffTests: XCTestCase, @unchecked Sendable {
         XCTAssertFalse(staged.files.contains { $0.path == "new.txt" }, "Untracked files are not staged")
     }
 
+    func testEmptyUntrackedFileIsListedAlongsideNonEmptyOne() async throws {
+        let root = try await makeRepo(); defer { try? FileManager.default.removeItem(at: root) }
+        try write("seed\n", to: root, "seed.txt")
+        _ = try await git(["add", "seed.txt"], at: root)
+        _ = try await git(["commit", "-qm", "init"], at: root)
+        try Data().write(to: root.appendingPathComponent("empty.txt"))
+        try write("content\n", to: root, "full.txt")
+        let worktree = try await WorkspaceDiffEngine.generate(base: .worktree, workspace: root.path)
+        XCTAssertNil(worktree.error)
+        XCTAssertEqual(Set(worktree.files.map(\.path)), ["empty.txt", "full.txt"],
+                       "A zero-byte untracked file must still be listed")
+        let empty = try XCTUnwrap(worktree.files.first { $0.path == "empty.txt" })
+        XCTAssertEqual(empty.status, "untracked")
+        XCTAssertFalse(empty.binary)
+        XCTAssertEqual(empty.additions, 0)
+        XCTAssertEqual(empty.deletions, 0)
+        XCTAssertEqual(empty.hunks.first?.oldText, "")
+        XCTAssertEqual(empty.hunks.first?.newText, "", "An empty untracked file carries empty content")
+        let full = try XCTUnwrap(worktree.files.first { $0.path == "full.txt" })
+        XCTAssertEqual(full.status, "untracked")
+        XCTAssertEqual(full.additions, 1)
+        XCTAssertEqual(full.hunks.first?.newText, "content")
+    }
+
     func testBinaryListedWithoutBody() async throws {
         let root = try await makeRepo(); defer { try? FileManager.default.removeItem(at: root) }
         try Data([0, 1, 2, 3]).write(to: root.appendingPathComponent("bin.dat"))
@@ -149,6 +173,19 @@ final class WorkspaceDiffTests: XCTestCase, @unchecked Sendable {
         let diff = try await WorkspaceDiffEngine.generate(base: .worktree, workspace: dir.path)
         XCTAssertNotNil(diff.error)
         XCTAssertTrue(diff.files.isEmpty)
+    }
+
+    func testNotARepositoryReportsClearErrorForEveryBase() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString).resolvingSymlinksInPath()
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        for base in [WorkspaceDiffBase.worktree, .staged, .head, .ref("main")] {
+            let diff = try await WorkspaceDiffEngine.generate(base: base, workspace: dir.path)
+            XCTAssertEqual(diff.error, "This workspace is not a git repository.", "base \(base.wireValue)")
+            XCTAssertTrue(diff.files.isEmpty, "base \(base.wireValue)")
+            XCTAssertFalse(diff.truncated, "base \(base.wireValue)")
+        }
     }
 
     func testBoundsTruncateLargeHunk() async throws {

@@ -106,6 +106,13 @@ public enum WorkspaceDiffEngine {
     private static let fallbackEmptyTreeObject = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 
     public static func generate(base: WorkspaceDiffBase, workspace: String) async throws -> WorkspaceDiff {
+        // A non-repository workspace fails differently per base (`git diff` says
+        // "not a git repository", `git diff --cached` says "unknown option").
+        // Detect it once up front so every base gets the same clear message.
+        guard await isWorkTree(workspace: workspace) else {
+            return WorkspaceDiff(base: base.wireValue, resolvedBase: nil, files: [],
+                                 truncated: false, error: "This workspace is not a git repository.")
+        }
         var arguments = ["diff"]
         var resolvedBase: String?
         switch base {
@@ -141,6 +148,15 @@ public enum WorkspaceDiffEngine {
         }
         applyLimits(to: &result)
         return result
+    }
+
+    /// True only when `workspace` sits inside a git working tree. `--is-inside-work-tree`
+    /// exits non-zero outside any repository and prints `false` for a bare one.
+    private static func isWorkTree(workspace: String) async -> Bool {
+        guard let block = try? await runGit(["rev-parse", "--is-inside-work-tree"],
+                                            workspace: workspace, outputLimit: 4096),
+              block.outcome == "exited", block.exitCode == 0 else { return false }
+        return block.stdout.trimmingCharacters(in: .whitespacesAndNewlines) == "true"
     }
 
     private static func hasUnbornHead(workspace: String) async throws -> Bool {
@@ -229,7 +245,15 @@ public enum WorkspaceDiffEngine {
     private static func readBounded(_ url: URL, maximum: Int) -> (Data, Bool)? {
         guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
         defer { try? handle.close() }
-        guard let data = try? handle.read(upToCount: maximum + 1) else { return nil }
+        let data: Data
+        do {
+            // `read(upToCount:)` returns nil at EOF, so a zero-byte file would
+            // be silently dropped; an empty Data is the correct read for it.
+            guard let chunk = try handle.read(upToCount: maximum + 1) else { return (Data(), false) }
+            data = chunk
+        } catch {
+            return nil
+        }
         return data.count > maximum ? (Data(data.prefix(maximum)), true) : (data, false)
     }
 
