@@ -57,7 +57,7 @@ The queue panel reads conversation-owned state and keeps hover, drag and editing
 
 `PaneGroupFocusState` separates the focused pane from the active terminal session and keeps split/maximize state in one model. This matters when a code pane has keyboard focus but a terminal is still the relevant session. [S: focus_state.rs](https://github.com/warpdotdev/warp/blob/1f0cf55afb29c71d94f2980b384aa11cb3cdb85a/app/src/pane_group/focus_state.rs#L5).
 
-**Our adaptation:** extend the integrated `AgentWorkspace`, preserving its existing split tree and saved state. The separate experimental `NativeWorkspace` already contains some navigation/maximize ideas, but its presence is not evidence those features are available in the current Pocket window.
+**Our adaptation:** extend the integrated `AgentWorkspace`, preserving its existing split tree and saved state. The earlier experimental `NativeWorkspace` was removed once its navigation/maximize ideas landed on the integrated path.
 
 ## Interaction shortlist and current gaps
 

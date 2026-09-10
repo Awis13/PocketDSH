@@ -45,8 +45,8 @@ final class NativeTerminalHostView: UIView {
     var interruptCommand: (() -> Void)?
     var blockShortcut: ((ShellTerminalShortcut) -> Void)?
     private static let blockKeys: [(ShellTerminalShortcut, String, UIKeyModifierFlags, UIKeyboardHIDUsage)] = [
-        (.previous, UIKeyCommand.inputUpArrow, [.command, .shift], .keyboardUpArrow),
-        (.next, UIKeyCommand.inputDownArrow, [.command, .shift], .keyboardDownArrow),
+        (.previous, UIKeyCommand.inputUpArrow, [.command, .alternate], .keyboardUpArrow),
+        (.next, UIKeyCommand.inputDownArrow, [.command, .alternate], .keyboardDownArrow),
         (.find, "f", .command, .keyboardF), (.copyCommand, "c", [.command, .alternate], .keyboardC),
         (.copyOutput, "c", [.command, .shift], .keyboardC), (.copyBoth, "c", [.command, .alternate, .shift], .keyboardC),
         (.attach, "a", [.command, .shift], .keyboardA)
@@ -124,7 +124,7 @@ struct NativeTerminalView: UIViewRepresentable {
         host.askAgent = nil; host.interruptCommand = nil; host.blockShortcut = nil
         for case let terminal as NativeTerminalSurface in host.subviews {
             terminal.pendingFocus = false
-            terminal.resignFirstResponder()
+            _ = terminal.resignFirstResponder()
             terminal.onBufferActivated = nil
         }
     }
@@ -139,6 +139,8 @@ struct NativeShellPane: View {
     @EnvironmentObject private var store: PocketStore
     @Environment(\.harnessTheme) private var theme
     @Environment(\.agentPaneIsActive) private var active
+    @Environment(\.agentPaneFocus) private var focusPane
+    @Environment(\.agentPaneMaximize) private var maximizePane
     @ObservedObject var client: NativeClient
     @State private var focus: UUID?
     @State private var following = true
@@ -218,14 +220,14 @@ struct NativeShellPane: View {
                 }.scrollIndicators(.hidden).accessibilityIdentifier("shellTranscript")
                     .scrollDisabled(isExpanded)
                     .modifier(ReadingScrollObserver(onScroll: { following = false }, onBottom: {
-                        if store.shellSelectedBlockID == nil && !findVisible { following = true; scrollRequest += 1 }
+                        if store.shellSelectedBlockID == nil && !findVisible && !isExpanded { following = true; scrollRequest += 1 }
                     }))
-                    .onPreferenceChange(ConversationContentHeight.self) { _ in if following { scrollRequest += 1 } }
-                    .onChange(of: store.rows) { _, _ in if following { scrollRequest += 1 } }
+                    .onPreferenceChange(ConversationContentHeight.self) { _ in if following && !isExpanded { scrollRequest += 1 } }
+                    .onChange(of: store.rows) { _, _ in if following && !isExpanded { scrollRequest += 1 } }
                     .onAppear { scrollRequest += 1 }
                     .task(id: scrollRequest) {
                         do { try await Task.sleep(for: .milliseconds(50)) } catch { return }
-                        guard !Task.isCancelled, following else { return }
+                        guard !Task.isCancelled, following, !isExpanded else { return }
                         scroll.scrollTo("shellBottom", anchor: .bottom)
                     }
                     .task(id: navigationRevision) {
@@ -303,6 +305,11 @@ struct NativeShellPane: View {
         .onChange(of: client.presentation) { old, new in
             if new.isExpanded {
                 focus = nil
+                // A full-screen TUI owns the viewport. Stop bottom-following so
+                // new rows (for example a ⌘Enter question) cannot push the
+                // expanded terminal out of view, and pin its block to the top.
+                following = false
+                if let anchor = new.anchor { anchorRequest = anchor }
                 client.terminal.requestInputFocus()
             } else if old.isExpanded {
                 if let anchor = client.consumeReturnAnchor() { anchorRequest = anchor }
@@ -454,7 +461,7 @@ struct NativeShellPane: View {
     }
     private func closeFind() { findVisible = false; findFocused = false; findQuery = ""; focusInput() }
     private func moveMatch(_ direction: Int) { matchIndex = search.index(after: matchIndex, direction: direction); navigationRevision += 1 }
-    private func resumeFollowing() { store.shellSelectedBlockID = nil; findVisible = false; findFocused = false; following = true; scrollRequest += 1 }
+    private func resumeFollowing() { store.shellSelectedBlockID = nil; findVisible = false; findFocused = false; following = !isExpanded; scrollRequest += 1 }
 
     private func handleTerminalShortcut(_ action: ShellTerminalShortcut) {
         guard canUseActions else { return }
@@ -472,8 +479,8 @@ struct NativeShellPane: View {
     private var blockToolbar: some View {
         ScrollView(.horizontal) {
             HStack(spacing: 6) {
-                Button { moveBlock(-1) } label: { Image(systemName: "chevron.up").frame(width: 44, height: 44) }.accessibilityLabel("Previous command block").help("Previous block · ⌘⇧↑")
-                Button { moveBlock(1) } label: { Image(systemName: "chevron.down").frame(width: 44, height: 44) }.accessibilityLabel("Next command block").help("Next block · ⌘⇧↓")
+                Button { moveBlock(-1) } label: { Image(systemName: "chevron.up").frame(width: 44, height: 44) }.accessibilityLabel("Previous command block").help("Previous block · ⌘⌥↑")
+                Button { moveBlock(1) } label: { Image(systemName: "chevron.down").frame(width: 44, height: 44) }.accessibilityLabel("Next command block").help("Next block · ⌘⌥↓")
                 Text(selectedBlock.flatMap { block in blocks.firstIndex(where: { $0.id == block.id }).map { "Block \($0 + 1) of \(blocks.count)" } } ?? "\(blocks.count) command blocks")
                     .font(.caption.monospaced()).foregroundStyle(.secondary)
                 Button { openFind() } label: { Image(systemName: "magnifyingglass").frame(width: 44, height: 44) }.accessibilityLabel("Find in command output").help("Find in output · ⌘F")
@@ -515,8 +522,8 @@ struct NativeShellPane: View {
     }
     private var keyboardActions: some View {
         Group {
-            Button("Previous block") { moveBlock(-1) }.keyboardShortcut(.upArrow, modifiers: [.command, .shift])
-            Button("Next block") { moveBlock(1) }.keyboardShortcut(.downArrow, modifiers: [.command, .shift])
+            Button("Previous block") { moveBlock(-1) }.keyboardShortcut(.upArrow, modifiers: [.command, .option])
+            Button("Next block") { moveBlock(1) }.keyboardShortcut(.downArrow, modifiers: [.command, .option])
             Button("Find output") { openFind() }.keyboardShortcut("f", modifiers: .command)
             if selectedBlock != nil {
                 Button("Copy command") { copy(.command) }.keyboardShortcut("c", modifiers: [.command, .option])
@@ -529,6 +536,13 @@ struct NativeShellPane: View {
                 Button("Previous match") { moveMatch(-1) }.keyboardShortcut("g", modifiers: [.command, .shift])
                 Button("Close find") { closeFind() }.keyboardShortcut(.escape, modifiers: [])
             }
+            // iPad hardware keyboards have no Mac menu; mirror the pane chords
+            // with hidden buttons so directional focus and maximize work there.
+            Button("Focus pane left") { focusPane(.left) }.keyboardShortcut(.leftArrow, modifiers: [.control, .option])
+            Button("Focus pane right") { focusPane(.right) }.keyboardShortcut(.rightArrow, modifiers: [.control, .option])
+            Button("Focus pane above") { focusPane(.up) }.keyboardShortcut(.upArrow, modifiers: [.control, .option])
+            Button("Focus pane below") { focusPane(.down) }.keyboardShortcut(.downArrow, modifiers: [.control, .option])
+            Button("Maximize pane") { maximizePane() }.keyboardShortcut("m", modifiers: [.command, .shift])
         }.frame(width: 0, height: 0).opacity(0).accessibilityHidden(true)
     }
 }
@@ -570,11 +584,6 @@ struct NativeCommandCell: View {
                 NativeTerminalView(client: client, focus: active && terminal, revision: revision, askAgent: {
                     Task { await store.askFromShell(store.draft.isEmpty ? "Inspect this running terminal command and explain its current output without executing more commands." : store.draft, block: nil) }
                 }, blockShortcut: blockShortcut).frame(height: terminalHeight)
-            } else if !block.finished {
-                // Reserve the live surface's slot even when the host connection
-                // is gone, so the transcript feed does not reflow around a
-                // running command.
-                NativeTerminalPlaceholder(height: terminalHeight)
             } else if !block.preview.isEmpty {
                 ScrollView(.horizontal) {
                     Text(block.attributedOutput(appearance: TerminalAppearance(theme: theme, scheme: scheme)))
@@ -612,18 +621,3 @@ extension EnvironmentValues {
     }
 }
 
-/// Reserves the live terminal's place in the transcript feed when the surface
-/// itself cannot be shown, keeping block layout stable across reconnects.
-private struct NativeTerminalPlaceholder: View {
-    @Environment(\.harnessTheme) private var theme
-    let height: CGFloat
-    var body: some View {
-        RoundedRectangle(cornerRadius: 8)
-            .fill(theme.surface.opacity(0.35))
-            .frame(height: height)
-            .overlay {
-                Text("Live terminal unavailable").font(.caption.monospaced()).foregroundStyle(.secondary)
-            }
-            .accessibilityIdentifier("nativeTerminalPlaceholder")
-    }
-}

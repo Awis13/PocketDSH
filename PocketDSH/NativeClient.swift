@@ -56,7 +56,6 @@ final class NativeClient: ObservableObject {
         terminal.onAgent = { [weak self] in self?.onAgent?() }
     }
     var onAgent: (() -> Void)?
-    var onWorkspaceAction: ((String) -> Void)?
     func connect() {
         disconnect()
         guard let url = URL(string: endpoint), url.scheme == "ws" || url.scheme == "wss", !token.isEmpty else {
@@ -92,6 +91,9 @@ final class NativeClient: ObservableObject {
     func disconnect() {
         generation = UUID(); reader?.cancel(); poller?.cancel(); sender?.cancel(); sender = nil
         socket?.cancel(with: .goingAway, reason: nil); socket = nil; connected = false; pendingSends = 0
+        // A dropped socket never delivers the alternate-buffer release, so the
+        // presentation must not stay stuck on a dead full-screen TUI.
+        presentation.reset()
     }
     var externalSend: ((NativeCommand) -> Void)?
     func send(_ command: NativeCommand) {
@@ -117,15 +119,10 @@ final class NativeClient: ObservableObject {
     }
     func prepareForCommand(width: CGFloat, height: CGFloat) {
         guard !shellRunning else { return }
-        let width = max(180, width)
-        let height = max(120, height)
-        terminal.frame = CGRect(x: 0, y: 0, width: width, height: height)
-        let cellWidth = ceil(("W" as NSString).size(withAttributes: [.font: terminal.font]).width)
-        let cellHeight = ceil(terminal.font.lineHeight)
-        let columns = max(20, Int(width / max(1, cellWidth)))
-        let rows = max(2, Int(height / max(1, cellHeight)))
-        terminal.getTerminal().resize(cols: columns, rows: rows)
-        resize(columns: columns, rows: rows)
+        // Setting the frame drives SwiftTerm's `processSizeChange`, which
+        // resizes the emulator and invokes the delegate once. Resizing the
+        // emulator and the remote PTY here as well would double the resize.
+        terminal.frame = CGRect(x: 0, y: 0, width: max(180, width), height: max(120, height))
     }
     /// The alternate buffer changed ownership. A full-screen TUI expands the
     /// surface to the active pane; releasing it collapses back to the feed.
@@ -223,6 +220,7 @@ final class NativeClient: ObservableObject {
             commandHistory = []; completionReply = nil
             suggestionHistory = []
             terminal.getTerminal().resetToInitialState()
+            presentation.reset()
             model = event.model ?? ""; directory = event.workspace ?? ""
             if event.gap == true { error = "Only the retained history is available; earlier output was discarded by the host." }
             return
@@ -240,7 +238,6 @@ final class NativeClient: ObservableObject {
             if syncing, let columns = event.columns, let rows = event.rows, (1...1000).contains(columns), (1...1000).contains(rows) {
                 terminal.getTerminal().resize(cols: columns, rows: rows)
             }
-        case "workspaceAction": if !syncing, let action = event.text { onWorkspaceAction?(action) }
         case "pty":
             if let bytes = event.bytes {
                 terminal.feed(byteArray: Array(bytes)[...])
@@ -275,15 +272,18 @@ final class NativeClient: ObservableObject {
             }
             activeBlock = nil; shellRunning = false; directory = event.workspace ?? directory
             terminal.getTerminal().resetToInitialState()
+            terminalBufferActivated(alternate: false)
         case "ptyExit":
             if let id = activeBlock, let i = blocks.firstIndex(where: { $0.id == id }) {
                 blocks[i].finished = true; blocks[i].interrupted = true
                 blocks[i].preview = renderedOutput(); blocks[i].styledOutput = styledOutput(matching: blocks[i].preview)
             }
             activeBlock = nil; shellExited = true; shellRunning = false; status = event.text ?? "Shell exited"
+            terminalBufferActivated(alternate: false)
         case "shellReset":
             activeBlock = nil; shellExited = false; shellRunning = false; directory = event.workspace ?? directory
             terminal.getTerminal().resetToInitialState()
+            terminalBufferActivated(alternate: false)
         case "user": chats.append(NativeChat(id: event.id ?? UUID().uuidString, role: "user", text: event.text ?? "")); assistantID = nil; reasoning = ""; running = true
         case "text":
             if let id = assistantID, let i = chats.firstIndex(where: { $0.id == id }) { chats[i].text += event.text ?? "" }

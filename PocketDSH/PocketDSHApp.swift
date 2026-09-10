@@ -107,10 +107,10 @@ final class PocketMacAppDelegate: UIResponder, UIApplicationDelegate {
         // Directional pane focus and maximize must be claimed before the
         // focused terminal turns the same chords into PTY bytes.
         let focus = [
-            UIKeyCommand(title: "Focus Pane Left", action: #selector(focusPane(_:)), input: UIKeyCommand.inputLeftArrow, modifierFlags: [.command, .alternate]),
-            UIKeyCommand(title: "Focus Pane Right", action: #selector(focusPane(_:)), input: UIKeyCommand.inputRightArrow, modifierFlags: [.command, .alternate]),
-            UIKeyCommand(title: "Focus Pane Above", action: #selector(focusPane(_:)), input: UIKeyCommand.inputUpArrow, modifierFlags: [.command, .alternate]),
-            UIKeyCommand(title: "Focus Pane Below", action: #selector(focusPane(_:)), input: UIKeyCommand.inputDownArrow, modifierFlags: [.command, .alternate])
+            UIKeyCommand(title: "Focus Pane Left", action: #selector(focusPane(_:)), input: UIKeyCommand.inputLeftArrow, modifierFlags: [.control, .alternate]),
+            UIKeyCommand(title: "Focus Pane Right", action: #selector(focusPane(_:)), input: UIKeyCommand.inputRightArrow, modifierFlags: [.control, .alternate]),
+            UIKeyCommand(title: "Focus Pane Above", action: #selector(focusPane(_:)), input: UIKeyCommand.inputUpArrow, modifierFlags: [.control, .alternate]),
+            UIKeyCommand(title: "Focus Pane Below", action: #selector(focusPane(_:)), input: UIKeyCommand.inputDownArrow, modifierFlags: [.control, .alternate])
         ]
         let maximize = UIKeyCommand(title: "Maximize or Restore Pane", action: #selector(toggleMaximizePane), input: "m", modifierFlags: [.command, .shift])
         (focus + [maximize]).forEach { $0.wantsPriorityOverSystemBehavior = true }
@@ -129,17 +129,20 @@ final class PocketMacAppDelegate: UIResponder, UIApplicationDelegate {
     }
     @objc private func toggleMaximizePane(_ sender: UIKeyCommand) { PaneCommands.toggleMaximize() }
 }
-struct PaneCloseCommandBridge: UIViewRepresentable {
+/// Registers the key-window handlers for pane commands (close, directional
+/// focus and maximize). The Mac menu dispatches to them; iPad uses the hidden
+/// SwiftUI shortcuts in `NativeShellPane`.
+struct PaneCommandBridge: UIViewRepresentable {
     let onClose: () -> Void
     var onFocus: ((PaneFocusDirection) -> Void)? = nil
     var onMaximize: (() -> Void)? = nil
-    func makeUIView(context: Context) -> PaneCloseCommandView { PaneCloseCommandView() }
-    func updateUIView(_ view: PaneCloseCommandView, context: Context) {
+    func makeUIView(context: Context) -> PaneCommandView { PaneCommandView() }
+    func updateUIView(_ view: PaneCommandView, context: Context) {
         view.onClose = onClose; view.onFocus = onFocus; view.onMaximize = onMaximize; view.registerWindow()
     }
-    static func dismantleUIView(_ view: PaneCloseCommandView, coordinator: ()) { view.unregisterWindow() }
+    static func dismantleUIView(_ view: PaneCommandView, coordinator: ()) { view.unregisterWindow() }
 }
-final class PaneCloseCommandView: UIView {
+final class PaneCommandView: UIView {
     var onClose: (() -> Void)?
     var onFocus: ((PaneFocusDirection) -> Void)?
     var onMaximize: (() -> Void)?

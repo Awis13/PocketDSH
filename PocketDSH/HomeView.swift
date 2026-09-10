@@ -348,6 +348,12 @@ private struct AgentPaneActiveKey: EnvironmentKey { static let defaultValue = tr
 private struct AgentPaneActivateKey: EnvironmentKey {
     static let defaultValue: () -> Void = {}
 }
+private struct AgentPaneFocusKey: EnvironmentKey {
+    static let defaultValue: (PaneFocusDirection) -> Void = { _ in }
+}
+private struct AgentPaneMaximizeKey: EnvironmentKey {
+    static let defaultValue: () -> Void = {}
+}
 extension EnvironmentValues {
     var agentPaneIsActive: Bool {
         get { self[AgentPaneActiveKey.self] }
@@ -356,6 +362,14 @@ extension EnvironmentValues {
     var agentPaneActivate: () -> Void {
         get { self[AgentPaneActivateKey.self] }
         set { self[AgentPaneActivateKey.self] = newValue }
+    }
+    var agentPaneFocus: (PaneFocusDirection) -> Void {
+        get { self[AgentPaneFocusKey.self] }
+        set { self[AgentPaneFocusKey.self] = newValue }
+    }
+    var agentPaneMaximize: () -> Void {
+        get { self[AgentPaneMaximizeKey.self] }
+        set { self[AgentPaneMaximizeKey.self] = newValue }
     }
 }
 indirect enum AgentLayout: Codable {
@@ -382,12 +396,14 @@ indirect enum AgentLayout: Codable {
     var panes: [UUID] {
         switch self { case .pane(let id): return [id]; case .split(_, _, let a, let b): return a.panes + b.panes }
     }
-    /// Shape-only mirror used by the pure directional focus navigator.
+    /// Shape-only mirror used by the pure directional focus navigator. The
+    /// stacked-to-axis mapping lives in the check-compiled navigator so the
+    /// riskiest seam is covered by the offline checks.
     var focusTree: PaneFocusNavigator.Node {
         switch self {
         case .pane(let id): return .pane(id.uuidString)
         case .split(_, let stacked, let a, let b):
-            return .split(stacked ? .vertical : .horizontal, a.focusTree, b.focusTree)
+            return PaneFocusNavigator.node(stacked: stacked, first: a.focusTree, second: b.focusTree)
         }
     }
 }
@@ -442,7 +458,7 @@ private final class AgentWorkspace: ObservableObject {
         observe(store); ready = true; save()
     }
     func split(stacked: Bool) {
-        guard canSplit(stacked: stacked), let active, let source = stores[active], let layout else { return }
+        guard stores.count < 8, canSplit(stacked: stacked), let active, let source = stores[active], let layout else { return }
         let id = UUID(), store = PocketStore(restoringPrimary: false)
         store.endpoint = source.endpoint
         observe(store)
@@ -510,7 +526,7 @@ struct DesktopHomeView: View {
                 .padding(.horizontal, 16).frame(minHeight: 44).padding(.vertical, 4)
             if let layout = workspace.layout { render(workspace.maximized ? .pane(workspace.active ?? layout.first) : layout) }
         }.background { ThemeBackdrop() }
-            .background { PaneCloseCommandBridge(onClose: { workspace.close() }, onFocus: { workspace.moveFocus($0) }, onMaximize: { workspace.toggleMaximize() }).frame(width: 0, height: 0) }
+            .background { PaneCommandBridge(onClose: { workspace.close() }, onFocus: { workspace.moveFocus($0) }, onMaximize: { workspace.toggleMaximize() }).frame(width: 0, height: 0) }
             .onPreferenceChange(AgentPaneSizes.self) { if workspace.sizes != $0 { workspace.sizes = $0 } }
             .onAppear { workspace.prepare(store) }
             .onChange(of: phase) { _, phase in
@@ -529,6 +545,8 @@ struct DesktopHomeView: View {
             return AnyView(DesktopPaneView(sidebarKey: id == workspace.initial ? "harness.mac.sidebar" : "harness.mac.sidebar." + id.uuidString, initiallyVisible: id == workspace.initial).environmentObject(pane)
                 .environment(\.agentPaneActivate, { workspace.active = id })
                 .environment(\.agentPaneIsActive, workspace.active == id)
+                .environment(\.agentPaneFocus, { workspace.moveFocus($0) })
+                .environment(\.agentPaneMaximize, { workspace.toggleMaximize() })
                 .overlay { Rectangle().stroke(workspace.active == id && workspace.stores.count > 1 ? theme.accent.opacity(0.7) : .clear, lineWidth: 1).allowsHitTesting(false) }
                 .background { GeometryReader { geometry in Color.clear.preference(key: AgentPaneSizes.self, value: [id: geometry.size]) } }
                 .simultaneousGesture(TapGesture().onEnded { workspace.active = id })

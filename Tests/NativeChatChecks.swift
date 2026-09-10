@@ -211,7 +211,31 @@ import Foundation
         let stackedRow = PaneFocusNavigator.Node.split(.vertical, .split(.horizontal, .pane("a"), .pane("b")), .pane("c"))
         precondition(PaneFocusNavigator.next(from: "c", direction: .up, in: stackedRow) == "b",
                      "Moving into a row prefers the pane nearest the positive edge")
-        print("PASS pane focus navigator: single, horizontal, vertical, nested row, grid and edge tie-breaks")
+        let quad = PaneFocusNavigator.Node.split(.horizontal,
+            .split(.vertical, .pane("tl"), .pane("bl")),
+            .split(.vertical, .pane("tr"), .pane("br")))
+        precondition(PaneFocusNavigator.next(from: "bl", direction: .right, in: quad) == "br",
+                     "A nested 2x2 move keeps the active pane's row instead of jumping to the top")
+        precondition(PaneFocusNavigator.next(from: "tl", direction: .right, in: quad) == "tr")
+        precondition(PaneFocusNavigator.next(from: "br", direction: .left, in: quad) == "bl")
+        precondition(PaneFocusNavigator.next(from: "tr", direction: .left, in: quad) == "tl")
+        precondition(PaneFocusNavigator.next(from: "bl", direction: .up, in: quad) == "tl")
+        precondition(PaneFocusNavigator.next(from: "br", direction: .up, in: quad) == "tr")
+        precondition(PaneFocusNavigator.next(from: "tl", direction: .down, in: quad) == "bl")
+        precondition(PaneFocusNavigator.next(from: "tr", direction: .down, in: quad) == "br")
+        precondition(PaneFocusNavigator.next(from: "tl", direction: .left, in: quad) == nil,
+                     "The leftmost nested pane has no neighbour to its left")
+        precondition(PaneFocusNavigator.next(from: "tr", direction: .right, in: quad) == nil)
+        let empty = PaneFocusNavigator.Node.pane("only")
+        precondition(PaneFocusNavigator.next(from: "only", direction: .right, in: empty) == nil)
+        precondition(PaneFocusNavigator.next(from: "missing", direction: .up, in: empty) == nil)
+        let duplicate = PaneFocusNavigator.Node.split(.horizontal, .pane("dup"), .pane("dup"))
+        precondition(PaneFocusNavigator.next(from: "dup", direction: .right, in: duplicate) == "dup",
+                     "Duplicate ids are resolved deterministically instead of crashing")
+        precondition(PaneFocusNavigator.node(stacked: false, first: .pane("l"), second: .pane("r")) == .split(.horizontal, .pane("l"), .pane("r")),
+                     "The layout's stacked flag maps to the navigator axis")
+        precondition(PaneFocusNavigator.node(stacked: true, first: .pane("t"), second: .pane("b")) == .split(.vertical, .pane("t"), .pane("b")))
+        print("PASS pane focus navigator: single, horizontal, vertical, nested row, grid, nested 2x2 and edge tie-breaks")
 
         guard CommandLine.arguments.count > 1 else { return }
         let config = try JSONDecoder().decode([String:String].self, from: Data(contentsOf: URL(fileURLWithPath: CommandLine.arguments[1])))

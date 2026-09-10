@@ -1,6 +1,6 @@
 # Native Harness in the existing Pocket DSH chat
 
-The normal `HomeView` / `DesktopHomeView` / `HarnessView` remain the only application entry points. Native Harness is a connection type, not an alternate interface. The earlier `NativeWorkspaceView` experiment is not routed into the application.
+The normal `HomeView` / `DesktopHomeView` / `HarnessView` remain the only application entry points. Native Harness is a connection type, not an alternate interface. The earlier `NativeWorkspaceView` experiment has been removed from source.
 
 ## Connection
 
@@ -82,7 +82,7 @@ Shell now has an explicit selected command block, a compact action bar, and a co
 
 | Action | Shortcut |
 | --- | --- |
-| Previous / next command block | ⌘⇧↑ / ⌘⇧↓ |
+| Previous / next command block | ⌘⌥↑ / ⌘⌥↓ |
 | Find in selected output (last block if none selected) | ⌘F |
 | Next / previous match | ⌘G / ⌘⇧G |
 | Close Find and return to input | Escape |
@@ -162,3 +162,11 @@ The interactive `ls` wrapper translates only the shared `-l`, `-a`, `-A`, `-h`, 
 Colors use `EZA_COLORS` semantic ANSI values. Override that environment variable in the session for custom file colors; `--color=never` / `--icons=never` work with the eza-based helpers. Full CLI and styling details: [eza manual](https://github.com/eza-community/eza/blob/main/man/eza.1.md), [color configuration](https://github.com/eza-community/eza/blob/main/man/eza_colors.5.md). eza remains an optional host executable; it is not redistributed inside the Apple client.
 
 Validation (2026-09-08): all 65 Native Harness tests passed, including a real PTY check for argument preservation, injection-shaped filenames, exit codes, redirection/pipes, unsupported flags and an absent eza binary. Existing completion/history and native transcript helper checks also passed. Live Mac checks covered a Git fixture with modified/untracked/ignored paths and symlinks, tree output, BMP/supplementary icons in live and restored blocks, Ctrl+C returning exit 130 and composer focus, ANSI styles, Find highlighting and Light/Dracula switching. Find's row now reserves its intrinsic height so the transcript cannot compress it away. Generic iOS builds include the symbol font; a physical iPad was not installed or validated in this increment.
+
+## Pane focus and full-screen terminal hardening (September 10)
+
+Pane focus is Control+Option+arrows and maximize/restore is Command+Shift+M, in both the Mac menu and hidden SwiftUI shortcuts so an iPad hardware keyboard can drive the workspace from the shell pane. Command-block navigation returns to Command+Option+Up/Down; the previous Command+Shift binding collided with the system extend-selection chord. Directional focus walks the split tree with the active pane's row/column hint, so a nested 2×2 grid keeps the active row instead of jumping to the top. The dead `NativeWorkspace.swift` experiment was deleted.
+
+Entering the full-screen terminal stops transcript bottom-following and pins the owning block to the top, so asking the agent with Command+Enter cannot push the terminal out of the viewport. Abnormal TUI endings and reconnect clear the expanded presentation: `disconnect()` and `opened` reset it, and `blockEnd`/`ptyExit`/`shellReset` release the alternate buffer. `prepareForCommand` resizes the emulator and PTY once through the frame change instead of twice. The unreachable live-terminal placeholder branch and its obsolete documentation were removed.
+
+Offline checks cover the nested 2×2 focus grid, the stacked-to-axis mapping, empty layouts and duplicate ids, and the Mac Catalyst build succeeds. Physical iPad keyboard verification is still pending.

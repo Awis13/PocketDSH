@@ -22,7 +22,7 @@ Pocket DSH is a native client with two explicit backends. DeepSeek Harness owns 
 
 Native Shell and Chat render one ordered journal and share a draft/session. A persistent PTY feeds the live emulator; completed blocks retain bounded output and styles. The engine database and adjacent `.native.sqlite` presentation journal have distinct responsibilities and must be backed up together. Reconnect reconstructs output; host restart marks interrupted work without rerunning commands or restoring dead OS processes.
 
-The headless engine uses Swift/Foundation, SQLite and a small in-tree C bridge. The client bundles a locally patched SwiftTerm library subset and Nerd Fonts symbols with notices. Optional eza runs on the host. `NativeWorkspace.swift` is an earlier experiment retained in source, not the application entry point. See [native integration](NATIVE-CHAT-INTEGRATION.md) for current implementation evidence and constraints.
+The headless engine uses Swift/Foundation, SQLite and a small in-tree C bridge. The client bundles a locally patched SwiftTerm library subset and Nerd Fonts symbols with notices. Optional eza runs on the host. See [native integration](NATIVE-CHAT-INTEGRATION.md) for current implementation evidence and constraints.
 
 Each pane owns a store and follows its selected session through the Harness remote stream. Historical and streaming events fold into transcript rows. Signing configuration lives outside source code in an ignored local xcconfig.
 

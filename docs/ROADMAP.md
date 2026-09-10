@@ -99,7 +99,7 @@ All 55 research IDs are mapped. “Partial” means the useful core exists, not 
 | W33 | Partial: direct private provider connection | Native model/effort/catalog selection and provider capabilities |
 | W34, W35 | Missing in native backend | DSH voice/images already work separately; reliable notification delivery remains unresolved |
 | W36, W37 | Missing dedicated integration | Foreign CLI agents, indexing, browser/computer use and search are separate capability projects; a raw shell can still run installed programs |
-| W39, W40, W41 | Partial: sidebar, split tree, resize and active-pane close | Directional focus/maximize in the actual app path; tab reorder/reopen/pins/groups and drag/drop. Unused NativeWorkspace experiment is not shipped evidence |
+| W39, W40, W41 | Partial: sidebar, split tree, resize and active-pane close | Directional focus/maximize in the actual app path; tab reorder/reopen/pins/groups and drag/drop. The earlier NativeWorkspace experiment has been deleted |
 | W42, W43 | Partial: saved current layout, sessions and drafts, replay/recovery | Named layout templates, paged history and multi-device policies; no dead-process resurrection |
 | W44 | Missing; optional | Global summon shortcut and customizable toolbar |
 | W45 | Partial: raw SSH can run inside PTY | Shell hooks/completion do not automatically install inside SSH or subshells; integrated remote-shell support needs a separate contract |
