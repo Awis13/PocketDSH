@@ -242,9 +242,13 @@ struct SessionProjectionStore: Equatable {
 
     /// Apply one finished value. A row already at this key with an equal or
     /// higher watermark wins; a stale or replayed frame changes nothing.
-    mutating func apply(key: String, value: JSON, seq: Int) {
-        if let row = rows[key], seq <= row.seq { return }
+    /// Reports whether the row landed, so callers can skip downstream work
+    /// for frames the store refused.
+    @discardableResult
+    mutating func apply(key: String, value: JSON, seq: Int) -> Bool {
+        if let row = rows[key], seq <= row.seq { return false }
         rows[key] = ProjectionRow(value: value, seq: seq)
+        return true
     }
 
     /// Seed from a baseline block. Every carried key lands under the same seq

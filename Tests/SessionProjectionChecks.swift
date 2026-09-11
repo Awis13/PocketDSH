@@ -15,15 +15,16 @@ struct ImageLimits: Equatable {
 @main struct SessionProjectionChecks {
     static func json(_ s: String) -> JSON { try! JSONDecoder().decode(JSON.self, from: Data(s.utf8)) }
     static func main() {
-        // Higher seq wins; an equal or lower seq is ignored.
+        // Higher seq wins; an equal or lower seq is ignored, and apply
+        // reports the refusal so callers can skip their downstream writes.
         var store = SessionProjectionStore()
-        store.apply(key: "title", value: .string("first"), seq: 4)
+        assert(store.apply(key: "title", value: .string("first"), seq: 4), "A new row lands")
         assert(store.title?.text == "first")
-        store.apply(key: "title", value: .string("stale"), seq: 3)
+        assert(!store.apply(key: "title", value: .string("stale"), seq: 3), "A lower seq is refused")
         assert(store.title?.text == "first", "A lower seq must not overwrite")
-        store.apply(key: "title", value: .string("tie"), seq: 4)
+        assert(!store.apply(key: "title", value: .string("tie"), seq: 4), "An equal seq is refused")
         assert(store.title?.text == "first", "An equal seq must be ignored")
-        store.apply(key: "title", value: .string("newer"), seq: 5)
+        assert(store.apply(key: "title", value: .string("newer"), seq: 5), "A higher seq lands")
         assert(store.title?.text == "newer")
         print("PASS: higher-seq-wins and equal-seq-ignored")
 

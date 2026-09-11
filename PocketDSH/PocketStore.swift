@@ -168,7 +168,7 @@ final class PocketStore: ObservableObject {
     private var clientID = ""
     private var drafts: [String: String] = [:]
     private var pendingRequest: (id: String, text: String, session: String, imageIDs: [UUID])?
-    private var projectionSeq: [String: Int] = [:]
+    private var projectionStores: [String: SessionProjectionStore] = [:]
     var selected: HarnessSession? { sessions.first { $0.id == selectedID } }
     var running: Bool { (selected?.running ?? false) || compactingContext }
     var liveReasoning: TranscriptRow? {
@@ -283,7 +283,7 @@ final class PocketStore: ObservableObject {
             for attempt in 0..<5 {
                 guard !Task.isCancelled, self.generation == token else { return }
                 do {
-                    self.connecting = true; self.interactions = []; self.queues = [:]; self.projectionSeq = [:]
+                    self.connecting = true; self.interactions = []; self.queues = [:]; self.projectionStores = [:]
                     let socket = api.socket(); self.socket = socket
                     try await self.open("$events", id: "$events")
                     while !Task.isCancelled {
@@ -354,15 +354,11 @@ final class PocketStore: ObservableObject {
         } else if id == "control" {
             if type == "baseline" {
                 queues = value["value"]["queues"].object
-                for (sid, p) in value["value"]["projections"].object { applyProjection(sid, p: p) }
+                for (sid, p) in value["value"]["projections"].object { applyProjection(sid, p: p, replacement: true) }
             } else if type == "queue" { queues[value["sessionId"].string] = value["items"] }
             else if type == "projection" {
-                let sid = value["sessionId"].string, key = value["key"].string, seq = value["seq"].int
-                let stamp = sid + "/" + key
-                if seq >= (projectionSeq[stamp] ?? -1) {
-                    projectionSeq[stamp] = seq
-                    patchProjection(sid, key: key, value: value["value"])
-                }
+                let sid = value["sessionId"].string, key = value["key"].string
+                applyProjection(sid, key: key, value: value["value"], seq: value["seq"].int)
             }
             reconcilePending()
         } else if id == followID {
@@ -379,19 +375,42 @@ final class PocketStore: ObservableObject {
             rows = assistantLive.merged(with: transcript.rows); reconcilePending()
         }
     }
-    private func applyProjection(_ sid: String, p: JSON) {
-        for (key, value) in p["values"].object {
-            let stamp = sid + "/" + key, seq = p["asOfSeq"].int
-            if seq >= (projectionSeq[stamp] ?? -1) { projectionSeq[stamp] = seq; patchProjection(sid, key: key, value: value) }
-        }
+    /// Fold a baseline block into this session's store. A control baseline
+    /// replaces the process state the Host lost, so rows beyond its cursor drop
+    /// before the new values land; a history snapshot is a plain seed.
+    private func applyProjection(_ sid: String, p: JSON, replacement: Bool = false) {
+        let baseline = ProjectionBaseline(p)
+        var store = projectionStores[sid] ?? SessionProjectionStore()
+        let previous = store.rows
+        if replacement { store.truncate(lastSeq: baseline.asOfSeq) }
+        store.seed(baseline: baseline)
+        projectionStores[sid] = store
+        for (key, row) in store.rows where previous[key] != row { patchProjection(sid, key: key, value: row.value) }
+        for key in previous.keys where store.rows[key] == nil { dropProjection(sid, key: key) }
+    }
+    /// Fold one finished projection frame. The store decides staleness: an
+    /// equal or lower watermark changes nothing, and the raw container only
+    /// ever sees frames the store admitted.
+    private func applyProjection(_ sid: String, key: String, value: JSON, seq: Int) {
+        var store = projectionStores[sid] ?? SessionProjectionStore()
+        let applied = store.apply(key: key, value: value, seq: seq)
+        projectionStores[sid] = store
+        if applied { patchProjection(sid, key: key, value: value) }
+    }
+    /// Remove a key the store no longer carries, so the raw container cannot
+    /// serve it stale after a baseline drop.
+    private func dropProjection(_ sid: String, key: String) {
+        guard let i = sessions.firstIndex(where: { $0.id == sid }) else { return }
+        var raw = sessions[i].raw.object, p = raw["projections"]?.object ?? [:], values = p["values"]?.object ?? [:]
+        values.removeValue(forKey: key); p["values"] = .object(values); raw["projections"] = .object(p); sessions[i].raw = .object(raw)
     }
     private func patchProjection(_ sid: String, key: String, value: JSON) {
         if let i = sessions.firstIndex(where: { $0.id == sid }) {
             var raw = sessions[i].raw.object, p = raw["projections"]?.object ?? [:], values = p["values"]?.object ?? [:]
             values[key] = value; p["values"] = .object(values); raw["projections"] = .object(p); sessions[i].raw = .object(raw)
         }
-        if sid == selectedID && key == "imageLimits" { imageLimits = ImageLimits(value) }
-        if sid == selectedID && key == "modelSelection" { model = value["next"] == .null ? catalog["default"] : value["next"] }
+        if sid == selectedID && key == ProjectionKey.imageLimits { imageLimits = ImageLimits(value) }
+        if sid == selectedID && key == ProjectionKey.modelSelection { model = value["next"] == .null ? catalog["default"] : value["next"] }
     }
     private func updateSession(_ id: String, key: String, value: JSON) {
         if let i = sessions.firstIndex(where: { $0.id == id }) { var raw = sessions[i].raw.object; raw[key] = value; sessions[i].raw = .object(raw) }
@@ -812,7 +831,7 @@ extension PocketStore {
         if event.op == "user", let id = selectedID {
             if nativeReady {
                 updateSession(id, key: "updatedAt", value: .number(Date().timeIntervalSince1970 * 1000))
-                if selected?.title == "New task" { patchProjection(id, key: "title", value: .string(String((event.text ?? "").prefix(70)))) }
+                if selected?.title == "New task" { patchProjection(id, key: ProjectionKey.title, value: .string(String((event.text ?? "").prefix(70)))) }
             }
             if pendingRequest?.id == event.id { pendingRequest = nil; pendingText = nil }
             if let data = UserDefaults.standard.data(forKey: nativeRequestKey(id)),
