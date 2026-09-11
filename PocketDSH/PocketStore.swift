@@ -64,6 +64,7 @@ final class PocketStore: ObservableObject {
     @Published var rows: [TranscriptRow] = []
     @Published var interactions: [Interaction] = []
     @Published var queues: [String: JSON] = [:]
+    @Published var jobs: [String: [SessionJob]] = [:]
     @Published var catalog: JSON = .null
     @Published var model: JSON = .null
     @Published var hasMore = false
@@ -283,7 +284,7 @@ final class PocketStore: ObservableObject {
             for attempt in 0..<5 {
                 guard !Task.isCancelled, self.generation == token else { return }
                 do {
-                    self.connecting = true; self.interactions = []; self.queues = [:]; self.projectionStores = [:]
+                    self.connecting = true; self.interactions = []; self.queues = [:]; self.jobs = [:]; self.projectionStores = [:]
                     let socket = api.socket(); self.socket = socket
                     try await self.open("$events", id: "$events")
                     while !Task.isCancelled {
@@ -354,11 +355,16 @@ final class PocketStore: ObservableObject {
         } else if id == "control" {
             if type == "baseline" {
                 queues = value["value"]["queues"].object
+                foldBaselineJobs(value["value"], into: &jobs)
                 for (sid, p) in value["value"]["projections"].object { applyProjection(sid, p: p, replacement: true) }
-            } else if type == "queue" { queues[value["sessionId"].string] = value["items"] }
-            else if type == "projection" {
+            } else if type == "jobs" {
+                foldSessionJobs(value, into: &jobs)
+            } else if type == "projection" {
                 let sid = value["sessionId"].string, key = value["key"].string
                 applyProjection(sid, key: key, value: value["value"], seq: value["seq"].int)
+            } else {
+                // Queue frames and unknown control types land here, like the reference client.
+                queues[value["sessionId"].string] = value["items"]
             }
             reconcilePending()
         } else if id == followID {

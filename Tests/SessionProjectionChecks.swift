@@ -150,6 +150,29 @@ struct ImageLimits: Equatable {
         b.apply(key: ProjectionKey.title, value: .string("B"), seq: 1)
         assert(a.title?.text == "A" && b.title?.text == "B")
         print("PASS: per-session stores keep independent watermarks")
+
+        // Jobs control frames fold like the reference client: a populated
+        // list replaces the session's jobs, an empty list clears the entry,
+        // and malformed rows degrade field by field.
+        var jobs: [String: [SessionJob]] = [:]
+        foldSessionJobs(json(#"{"sessionId":"s1","jobs":[{"id":"j1","kind":"bash","label":"npm test","status":"running","startedAt":1000}]}"#), into: &jobs)
+        assert(jobs["s1"]?.count == 1 && jobs["s1"]?.first?.id == "j1" && jobs["s1"]?.first?.status == "running" && jobs["s1"]?.first?.startedAt == 1000)
+        foldSessionJobs(json(#"{"sessionId":"s1","jobs":[{"id":"j1","kind":"bash","label":"npm test","status":"completed","detail":"exit 0","startedAt":1000,"finishedAt":2000},"junk",{"id":"j2","kind":"agent"}]}"#), into: &jobs)
+        assert(jobs["s1"]?.count == 3, "A populated frame replaces the whole list, malformed rows included")
+        assert(jobs["s1"]?.first { $0.id == "j1" }?.status == "completed" && jobs["s1"]?.first { $0.id == "j1" }?.detail == "exit 0")
+        assert(jobs["s1"]?.first { $0.id == "j1" }?.finishedAt == 2000)
+        assert(jobs["s1"]?.first { $0.id == "j2" }?.kind == "agent" && jobs["s1"]?.first { $0.id == "j2" }?.status == "" && jobs["s1"]?.first { $0.id == "j2" }?.finishedAt == nil)
+        assert(jobs["s1"]?.contains { $0.id.isEmpty && $0.kind.isEmpty && $0.status.isEmpty } == true, "A non-object row degrades to an empty job")
+        foldSessionJobs(json(#"{"sessionId":"s1","jobs":[]}"#), into: &jobs)
+        assert(jobs.isEmpty, "An empty jobs list clears the session's entry")
+        // baseline.jobs clears the whole table, keeps only sessions that still
+        // carry jobs, and admits sessions the client has never seen.
+        jobs = ["s1": [SessionJob(json(#"{"id":"j1","status":"running","startedAt":10}"#))], "s3": []]
+        foldBaselineJobs(json(#"{"jobs":{"s1":[{"id":"j9","kind":"build","label":"make","status":"running","startedAt":5000}],"s2":[],"s4":[{"id":"j7","status":"killed","startedAt":20,"finishedAt":30}]}}"#), into: &jobs)
+        assert(jobs["s1"]?.count == 1 && jobs["s1"]?.first?.id == "j9", "A baseline replaces the session's jobs")
+        assert(jobs["s2"] == nil && jobs["s3"] == nil, "A session with no jobs, or with no entry, drops out")
+        assert(jobs["s4"]?.first?.status == "killed" && jobs["s4"]?.first?.finishedAt == 30, "A new baseline session is admitted")
+        print("PASS: jobs frames replace or clear per-session jobs, baseline.jobs clears and keeps non-empty")
     }
 
     /// Mirrors PocketStore.patchProjection's container write: the store's value

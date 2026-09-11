@@ -319,3 +319,48 @@ enum ProjectionKey {
     static let inbox = "inbox"
     static let sessionListMetadata = "sessionListMetadata"
 }
+
+// MARK: - Jobs frames
+
+/// One jobs control-frame row — a Host background-job status line.
+/// Malformed rows degrade field by field like the other models.
+struct SessionJob: Equatable {
+    var id = ""
+    var kind = ""
+    var label = ""
+    var status = ""
+    var detail: String?
+    var startedAt = 0.0
+    var finishedAt: Double?
+    init(_ value: JSON = .null) {
+        id = value["id"].string
+        kind = value["kind"].string
+        label = value["label"].string
+        status = value["status"].string
+        let d = value["detail"].string
+        if !d.isEmpty { detail = d }
+        startedAt = value["startedAt"].double
+        let f = value["finishedAt"].double
+        if f != 0 { finishedAt = f }
+    }
+}
+
+/// Fold a jobs control frame into the client's per-session job table,
+/// mirroring the reference client: a populated list replaces whatever the
+/// session held, an empty list clears the entry.
+func foldSessionJobs(_ frame: JSON, into jobs: inout [String: [SessionJob]]) {
+    let sid = frame["sessionId"].string
+    let list = frame["jobs"].array.map { SessionJob($0) }
+    if list.isEmpty { jobs[sid] = nil } else { jobs[sid] = list }
+}
+
+/// Fold the jobs table of a control baseline. The reference client clears
+/// the whole table first and re-adds only sessions that still carry jobs,
+/// so a session missing from the baseline drops out.
+func foldBaselineJobs(_ baseline: JSON, into jobs: inout [String: [SessionJob]]) {
+    jobs.removeAll()
+    for (sid, value) in baseline["jobs"].object {
+        let list = value.array.map { SessionJob($0) }
+        if !list.isEmpty { jobs[sid] = list }
+    }
+}
