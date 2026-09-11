@@ -189,8 +189,6 @@ private actor NativeHostSession {
         let approvals = ApprovalController(), observations = TerminalObservations()
         self.sink = sink; self.approvals = approvals
         let ptyID = UUID().uuidString
-        let observation = try observations.create(id: ptyID, workspace: workspace)
-        self.observation = observation
         let tools = try WorkspaceTools(root: URL(fileURLWithPath: workspace), approvals: approvals, observations: observations)
         let engine = SessionEngine(id: id, store: store, provider: provider, tools: tools)
         self.engine = engine
@@ -226,15 +224,21 @@ private actor NativeHostSession {
         let lastDirectory = previous.last(where: { $0.op == "blockEnd" })?.workspace ?? workspace
         var directoryExists: ObjCBool = false
         let shellDirectory = FileManager.default.fileExists(atPath: lastDirectory, isDirectory: &directoryExists) && directoryExists.boolValue ? lastDirectory : workspace
-        if !previous.isEmpty { sink.send(NativeEvent(op: "shellReset", session: id, text: "Host restarted. New shell in \(shellDirectory); previous commands were not rerun.", workspace: shellDirectory, ptyID: ptyID)) }
+        let resolvedShellDirectory = PTYSession.canonicalWorkspace(URL(fileURLWithPath: shellDirectory))
+        let observation = try observations.create(id: ptyID, workspace: resolvedShellDirectory)
+        self.observation = observation
+        if !previous.isEmpty { sink.send(NativeEvent(op: "shellReset", session: id, text: "Host restarted. New shell in \(resolvedShellDirectory); previous commands were not rerun.", workspace: resolvedShellDirectory, ptyID: ptyID)) }
         sink.send(NativeEvent(op: "terminalSize", session: id, rows: 24, columns: 80))
-        self.pty = try PTYSession(workspace: URL(fileURLWithPath: shellDirectory), observation: observation, segmented: true, onFrame: { frame in
+        self.pty = try PTYSession(workspace: URL(fileURLWithPath: resolvedShellDirectory), observation: observation, segmented: true, onFrame: { frame in
             switch frame {
             case .completion: break // Consumed by PTYSession; never journal draft lookups.
             case .workspace(let action): sink.send(NativeEvent(op: "workspaceAction", session: id, text: action))
             case .output(let bytes): sink.send(NativeEvent(op: "pty", session: id, bytes: bytes, ptyID: ptyID))
             case .start(let command, let directory): sink.send(NativeEvent(op: "blockStart", session: id, id: UUID().uuidString, text: command, workspace: directory))
             case .ready(let code, let directory): sink.send(NativeEvent(op: "blockEnd", session: id, workspace: directory, exitCode: code))
+            // A dropped marker is not journaled; the observation already refused
+            // to pair it, and the raw bytes were sent as output above.
+            case .dropped: break
             }
         }, onOutput: { _ in })
         Task { [pty] in

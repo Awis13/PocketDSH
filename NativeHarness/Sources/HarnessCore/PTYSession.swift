@@ -24,13 +24,26 @@ public final class PTYSession: @unchecked Sendable {
     private let worker: Task<PTYExit, Never>
     private let integration: ShellIntegration?
 
+    /// The single canonical workspace path. Callers must pass this same string
+    /// to the observation so the shell's `getcwd()` never looks like a change.
+    /// `URL.resolvingSymlinksInPath()` declines to resolve some symlinks such as
+    /// `/var` and `/tmp`, so use `realpath(3)`, which matches `getcwd()`.
+    public static func canonicalWorkspace(_ workspace: URL) -> String {
+        let standardized = workspace.standardizedFileURL.path
+        guard !standardized.contains("\0") else { return workspace.resolvingSymlinksInPath().path }
+        if let resolved = standardized.withCString({ realpath($0, nil) }) {
+            defer { free(resolved) }
+            return String(cString: resolved)
+        }
+        return workspace.resolvingSymlinksInPath().path
+    }
     public init(workspace: URL, rows: Int = 24, columns: Int = 80,
                 observation: TerminalObservation? = nil,
                 segmented: Bool = false,
                 onFrame: @escaping @Sendable (ShellFrame) -> Void = { _ in },
                 onOutput: @escaping @Sendable (Data) -> Void) throws {
         try Self.validateSize(rows, columns)
-        let path = workspace.standardizedFileURL.resolvingSymlinksInPath().path
+        let path = Self.canonicalWorkspace(workspace)
         var directory: ObjCBool = false
         guard !path.contains("\0"), FileManager.default.fileExists(atPath: path, isDirectory: &directory), directory.boolValue else {
             throw HarnessError.invalid("PTY workspace must be a directory")
@@ -59,9 +72,16 @@ public final class PTYSession: @unchecked Sendable {
                 if case .completion(let id, let values, let limited) = frame {
                     integration?.resolve(id: id, values: values, limited: limited); return
                 }
-                if case .ready = frame { state.lock.withLock { state.promptReady = true } }
-                if case .start = frame { state.lock.withLock { state.promptReady = false } }
+                if case .ready(let code, let directory) = frame {
+                    state.lock.withLock { state.promptReady = true }
+                    observation?.recordReady(code: code, directory: directory)
+                }
+                if case .start(let command, let directory) = frame {
+                    state.lock.withLock { state.promptReady = false }
+                    observation?.recordStart(command: command, directory: directory)
+                }
                 if case .output(let bytes) = frame { observation?.append(bytes); onOutput(bytes) }
+                if case .dropped = frame { observation?.noteMarkerLoss() }
                 onFrame(frame)
             }
             let result = Self.pump(state, onOutput: { data in
@@ -72,9 +92,19 @@ public final class PTYSession: @unchecked Sendable {
             observation?.finish(result)
             return result
         }
+        observation?.attachForeground(shellPgid: pid) { [state] in Self.foreground(of: state) }
     }
 
     deinit { close() }
+
+    /// The shell's own process group (its PID; it is the session leader).
+    public var shellPgid: pid_t { state.pid }
+    private static func foreground(of state: State) -> pid_t? {
+        state.lock.lock(); defer { state.lock.unlock() }
+        guard state.fd >= 0, !state.closing else { return nil }
+        let foreground = tcgetpgrp(state.fd)
+        return foreground > 0 ? foreground : nil
+    }
 
     /// Queue input atomically; reject rather than dropping bytes on overload.
     public func write(_ bytes: Data) throws {
