@@ -81,6 +81,7 @@ public final class PTYSession: @unchecked Sendable {
                     observation?.recordStart(command: command, directory: directory)
                 }
                 if case .output(let bytes) = frame { observation?.append(bytes); onOutput(bytes) }
+                if case .dropped = frame { observation?.noteMarkerLoss() }
                 onFrame(frame)
             }
             let result = Self.pump(state, onOutput: { data in

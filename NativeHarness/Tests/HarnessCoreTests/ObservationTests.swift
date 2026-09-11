@@ -409,4 +409,50 @@ final class ObservationTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(history.currentDirectory, canonical)
         session.close(); _ = await session.wait()
     }
+    func testLostStartMarkerNeverStampsAForeignExitCodeOnAnOlderRecord() throws {
+        // Reproduces the oversized-blob escape in ShellFrameParser.feed: when a
+        // marker has no terminator and the pending buffer exceeds 131072 bytes,
+        // the whole blob is flushed as raw output and the marker is never framed.
+        // A start lost this way leaves an older record open, so the NEXT precmd
+        // must not be allowed to complete that unrelated record.
+        let history = try TerminalObservation(id: "lost", initialWorkspace: "/tmp")
+        let nonce = "regression-nonce"
+        var parser = ShellFrameParser(nonce: nonce)
+        func deliver(_ frames: [ShellFrame]) {
+            for frame in frames {
+                if case .start(let command, let directory) = frame { history.recordStart(command: command, directory: directory) }
+                if case .ready(let code, let directory) = frame { history.recordReady(code: code, directory: directory) }
+                if case .dropped = frame { history.noteMarkerLoss() }
+            }
+        }
+        func marker(_ body: String) -> Data { Data("\u{1b}P+h;\(nonce);\(body)\u{1b}\\".utf8) }
+        func start(_ command: String, _ directory: String) -> Data {
+            marker("S;\(Data(command.utf8).base64EncodedString());\(Data(directory.utf8).base64EncodedString())")
+        }
+        func ready(_ code: Int, _ directory: String) -> Data {
+            marker("E;\(code);\(Data(directory.utf8).base64EncodedString())")
+        }
+        // Command A starts and is left open: its precmd never arrives as a frame.
+        deliver(parser.feed(start("first-command", "/tmp")))
+        XCTAssertEqual(history.commandHistory(limit: 8).last?.endedAt, nil)
+        // The preexec for command B is lost: its prefix and body are present but
+        // the DCS terminator is missing, and the buffer crosses the 131072-byte
+        // escape so the parser flushes the whole thing as raw output (and reports
+        // the loss). No start frame is ever delivered for B.
+        var lost = Data()
+        lost.append(Data("\u{1b}P+h;\(nonce);".utf8))
+        lost.append(Data(("S;\(Data("lost-second-command".utf8).base64EncodedString());\(Data("/".utf8).base64EncodedString())").utf8))
+        lost.append(Data(repeating: 0x41, count: 200_000))
+        deliver(parser.feed(lost))
+        // A normal precmd now arrives for the command whose start was lost. On the
+        // unguarded code it would be stamped onto the still-open first record.
+        deliver(parser.feed(ready(7, "/etc")))
+        let records = history.commandHistory(limit: 8)
+        let first = try XCTUnwrap(records.first { $0.command == "first-command" })
+        XCTAssertNil(first.exitCode, "A lost start must never stamp a foreign exit code on an older record")
+        XCTAssertNotEqual(first.directory, "/etc", "A lost start must never stamp a foreign cwd on an older record")
+        // The completion is recorded as a standalone entry instead of being paired.
+        XCTAssertTrue(records.contains { $0.command == nil && $0.exitCode == 7 })
+        XCTAssertLessThanOrEqual(records.filter { $0.exitCode == 7 }.count, 1, "The foreign exit code is recorded at most once")
+    }
 }

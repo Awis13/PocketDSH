@@ -236,6 +236,9 @@ private actor NativeHostSession {
             case .output(let bytes): sink.send(NativeEvent(op: "pty", session: id, bytes: bytes, ptyID: ptyID))
             case .start(let command, let directory): sink.send(NativeEvent(op: "blockStart", session: id, id: UUID().uuidString, text: command, workspace: directory))
             case .ready(let code, let directory): sink.send(NativeEvent(op: "blockEnd", session: id, workspace: directory, exitCode: code))
+            // A dropped marker is not journaled; the observation already refused
+            // to pair it, and the raw bytes were sent as output above.
+            case .dropped: break
             }
         }, onOutput: { _ in })
         Task { [pty] in

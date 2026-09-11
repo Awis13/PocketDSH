@@ -57,5 +57,13 @@ macOS has no supported query for "is a process waiting on stdin", so exact stdin
 
 `foregroundBusy` is `null` when the group is unknown or unavailable — an unknown group is never reported as idle or busy. It is `false` only when a known foreground group matches the shell's own group, and `true` only when a known foreground group differs. Immediately after `forkpty` returns, and before the child establishes its session and controlling terminal, the PTY has no foreground group and `foregroundPgid` is nil; it settles once the shell owns the terminal. Readers should treat nil as "unknown", not "idle".
 
+## Interactive PTY startup (2026-09-11)
 
+`PTYControl` now constructs its session with `segmented: true`. The delta from the previous startup is concrete:
 
+- argv changes from `/bin/zsh -f -i` to `/bin/zsh -d -i`.
+- The environment gains a private generated `ZDOTDIR`, plus `PROMPT`, `RPROMPT` and `EZA_COLORS`, and the `ls`/`ll`/`la`/`lt` interactive overrides, all injected from `ShellIntegration`.
+
+The flag is required: without `ShellIntegration` there are no `preexec`/`precmd` lifecycle markers, so `terminal_commands` and the `command_finished`/`cwd_changed` wait conditions are inert on that path. `PTYControl` is used only by `--interactive` (the developer control channel); the shipped application path (`NativeHost`) already constructed its session with `segmented: true` before this change. `-d` skips global rc files, and the private `ZDOTDIR` means the user shell configuration is never edited.
+
+This is a host-side startup change only. The model tool schema, the JSON field names and the local control protocol are unchanged.

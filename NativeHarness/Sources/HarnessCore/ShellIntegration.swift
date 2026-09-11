@@ -6,6 +6,12 @@ public enum ShellFrame: Sendable, Equatable {
     case start(command: String, directory: String)
     case ready(code: Int, directory: String)
     case completion(id: String, values: [String], limited: Bool)
+    /// An oversized marker was abandoned by the bounded framing buffer, so at
+    /// least one lifecycle marker never became a frame. The associated count is
+    /// the number of bytes flushed as output, never a marker identity. This is
+    /// the only point where a marker loss is knowable, so a consumer that pairs
+    /// markers across frames must invalidate any open pair when it sees one.
+    case dropped(count: Int)
 }
 
 /// Incremental framing only. Ordinary ANSI remains untouched for the emulator.
@@ -24,7 +30,7 @@ public struct ShellFrameParser: Sendable {
                     pending = Data(pending[range.lowerBound...])
                 }
                 guard let end = pending.range(of: Data([27, 92]), in: prefix.count..<pending.count) else {
-                    if pending.count > 131072 { result.append(.output(pending)); pending.removeAll() }
+                    if pending.count > 131072 { result.append(.output(pending)); result.append(.dropped(count: pending.count)); pending.removeAll() }
                     break
                 }
                 let body = String(decoding: pending[prefix.count..<end.lowerBound], as: UTF8.self)

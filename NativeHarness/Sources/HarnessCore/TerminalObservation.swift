@@ -110,6 +110,11 @@ public final class TerminalObservation: @unchecked Sendable {
     private var exit: PTYExit?
     private var commands: [TerminalCommand] = []
     private var commandSeq: Int64 = 0
+    /// Pairing token of the start currently awaiting its matching ready: the
+    /// `seq` stamped by `recordStart`. Nil when no start is open to a ready,
+    /// either because the last one was completed, superseded, or invalidated by
+    /// a known marker loss.
+    private var openPairToken: Int64?
     private var finishedCommands: Int64 = 0
     private var cwdChanges: Int64 = 0
     private var latestDirectory: String
@@ -157,6 +162,11 @@ public final class TerminalObservation: @unchecked Sendable {
     /// start that arrives while the tail is still open supersedes it: the older
     /// record is closed with no exit code rather than left open to steal a
     /// later `precmd`.
+    ///
+    /// The opened record is stamped with a pairing token (its own `seq`) so a
+    /// later `precmd` can prove it belongs to the start this observation
+    /// actually recorded. The token is valid only until it is consumed by a
+    /// ready or invalidated by a known marker loss.
     public func recordStart(command: String, directory: String, at date: Date = Date()) {
         lock.lock()
         if let last = commands.last, last.command != nil, last.endedAt == nil {
@@ -168,24 +178,42 @@ public final class TerminalObservation: @unchecked Sendable {
         commands.append(TerminalCommand(seq: commandSeq, command: Self.clamp(command, to: Self.maxCommandBytes),
                                          directory: Self.clamp(directory, to: Self.maxDirectoryBytes),
                                          exitCode: nil, startedAt: date, endedAt: nil))
+        openPairToken = commandSeq
         if commands.count > Self.maxCommands { commands.removeFirst(commands.count - Self.maxCommands) }
         let ready = updateDirectoryLocked(directory) ? drainCwdLocked(latestDirectory) : []
         lock.unlock()
         resume(ready)
     }
-    /// Records a `precmd` marker. Only the tail can be the open start; a
-    /// standalone ready (the initial prompt) is stored with `command == nil`.
+    /// Marks the open start as un-pairable because the framing layer abandoned a
+    /// marker. A ready that arrives afterwards cannot be proven to complete the
+    /// record left open, so the guard would otherwise stamp a foreign exit code
+    /// and cwd onto it. Clearing the token leaves the orphan exactly as it is,
+    /// with no exit code and no fabricated end time (the documented open /
+    /// ended-unknown convention); the next ready therefore takes the standalone
+    /// (initial-prompt) path instead of completing it.
+    public func noteMarkerLoss() {
+        lock.lock()
+        openPairToken = nil
+        lock.unlock()
+    }
+    /// Records a `precmd` marker. Only the tail can be the open start, and only
+    /// when its pairing token still matches the last start this observation
+    /// recorded; a ready whose start was lost is never attached to an older
+    /// record. A standalone ready (the initial prompt, or one that follows a
+    /// known marker loss) is stored with `command == nil`.
     public func recordReady(code: Int, directory: String, at date: Date = Date()) {
         lock.lock()
         var completed: TerminalCommand?
-        if let last = commands.last, last.command != nil, last.endedAt == nil {
+        if let token = openPairToken, let last = commands.last, last.seq == token, last.command != nil, last.endedAt == nil {
             let closed = TerminalCommand(seq: last.seq, command: last.command,
                                          directory: Self.clamp(directory, to: Self.maxDirectoryBytes),
                                          exitCode: code, startedAt: last.startedAt, endedAt: date)
             commands[commands.count - 1] = closed
             completed = closed
+            openPairToken = nil
             finishedCommands += 1
         } else {
+            openPairToken = nil
             commandSeq += 1
             commands.append(TerminalCommand(seq: commandSeq, command: nil,
                                             directory: Self.clamp(directory, to: Self.maxDirectoryBytes),
