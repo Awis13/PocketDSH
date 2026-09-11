@@ -36,6 +36,7 @@
 		B3E5A6229657B8C03CA87DEB /* ContextStatusView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4536C46B3F5C4076165E8409 /* ContextStatusView.swift */; };
 		C103524CD83608A91CE30F86 /* ConnectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F88F3CD3883D2F6BFE7D5AE7 /* ConnectionView.swift */; };
 		C519777D60BB3FCC4A067C08 /* TerminalPresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 69A98018D6A145FAF016AB93 /* TerminalPresentation.swift */; };
+		C5D6D353401E2159FA1637B3 /* SessionProjection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3803EDCA2FE32411585C99B5 /* SessionProjection.swift */; };
 		C9D4CACAFC991269FE6A7BCB /* PocketDSHApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = F816DAE6C96C8E45D149EEF5 /* PocketDSHApp.swift */; };
 		D82FC2E56324E4886177E337 /* PocketStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = C49C2AC1DB6173218484FA24 /* PocketStore.swift */; };
 		DEC528524D504A3BD961D8F2 /* SwiftTerm in Frameworks */ = {isa = PBXBuildFile; productRef = AD6686A33E1C422500B47929 /* SwiftTerm */; };
@@ -70,6 +71,7 @@
 		2E6534119C5B17C6485507CB /* NativeTerminalView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeTerminalView.swift; sourceTree = "<group>"; };
 		304C17A2D92890DDB8FA098C /* THIRD-PARTY-NOTICES.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "THIRD-PARTY-NOTICES.txt"; sourceTree = "<group>"; };
 		362036A7D1E27D64FD77D956 /* PocketDSHUITests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = PocketDSHUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		3803EDCA2FE32411585C99B5 /* SessionProjection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionProjection.swift; sourceTree = "<group>"; };
 		3F19FB2A62A2A1ADAA7337ED /* Simulator.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Simulator.entitlements; sourceTree = "<group>"; };
 		44B25DCB6141C9DBACE0EE9B /* ShellBlockViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShellBlockViews.swift; sourceTree = "<group>"; };
 		4536C46B3F5C4076165E8409 /* ContextStatusView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContextStatusView.swift; sourceTree = "<group>"; };
@@ -170,6 +172,7 @@
 				C49C2AC1DB6173218484FA24 /* PocketStore.swift */,
 				56106B6E42C165653F7CEDA4 /* QueueDockView.swift */,
 				06C35CF3F2E4B245A4F9BB28 /* SavedConnections.swift */,
+				3803EDCA2FE32411585C99B5 /* SessionProjection.swift */,
 				51A0DE6E9EE1DD8033673D14 /* ShellBlockInteraction.swift */,
 				44B25DCB6141C9DBACE0EE9B /* ShellBlockViews.swift */,
 				3F19FB2A62A2A1ADAA7337ED /* Simulator.entitlements */,
@@ -352,6 +355,7 @@
 				D82FC2E56324E4886177E337 /* PocketStore.swift in Sources */,
 				64C85387583C6D477097EE7A /* QueueDockView.swift in Sources */,
 				AEE9CF4748B05A40537309B6 /* SavedConnections.swift in Sources */,
+				C5D6D353401E2159FA1637B3 /* SessionProjection.swift in Sources */,
 				8A3284A72DB675093B2EB8B1 /* ShellBlockInteraction.swift in Sources */,
 				4B32DCC7FD423731DE545A37 /* ShellBlockViews.swift in Sources */,
 				A8F3CECEBAD3E60B962CBAB9 /* TerminalAppearance.swift in Sources */,
