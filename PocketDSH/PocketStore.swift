@@ -159,7 +159,11 @@ final class PocketStore: ObservableObject {
     private var socket: URLSessionWebSocketTask?
     private var connectionTask: Task<Void, Never>?
     private var generation = UUID()
-    private var followID = ""
+    /// The Remote carrier's stream identity: which socket attempt is live,
+    /// which IDs its streams carry, and which ping/refresh work may still
+    /// report. The socket and the UI stay here; every "whose frame is this"
+    /// decision lives in the coordinator, which the offline gates compile.
+    private let carrier = RemoteStreamConnection()
     private var clientID = ""
     /// The composer's draft lines and their versions (`ComposerDrafts`). The
     /// version is what tells a pending send whether the line it carried is
@@ -218,18 +222,21 @@ final class PocketStore: ObservableObject {
         SavedConnections.remember(endpoint)
     }
 
-    private func connectionDiagnostic(_ stage: String, error: Error? = nil) {
+    /// Record one connection event. The record is built by
+    /// `RemoteStreamDiagnostic`, which admits only app-produced values (stage,
+    /// close code, attempt, stream kind) and redacts messages, so nothing that
+    /// can carry a credential reaches the file. The history is bounded at 80
+    /// records; the single-record file stays as it was.
+    private func connectionDiagnostic(_ stage: String, error: Error? = nil, details: [String: Any] = [:]) {
         #if DEBUG
-        var data: [String: Any] = ["stage": stage, "time": Date().description, "connected": connected]
-        if let error {
-            let e = error as NSError
-            data["domain"] = e.domain; data["code"] = e.code
-            if case DecodingError.dataCorrupted(let context) = error { data["decode"] = context.debugDescription }
-            if case DecodingError.typeMismatch(_, let context) = error { data["decode"] = context.debugDescription; data["path"] = context.codingPath.map(\.stringValue) }
-            data["message"] = e.localizedDescription.replacingOccurrences(of: #"\?[^\s\"]+"#, with: "?redacted", options: .regularExpression)
-        }
-        if let bytes = try? JSONSerialization.data(withJSONObject: data) {
-            try? bytes.write(to: URL.documentsDirectory.appending(path: "connection-diagnostic.json"), options: .atomic)
+        let record = RemoteStreamDiagnostic(stage: stage, connected: connected, details: details, error: error).record
+        if let bytes = try? JSONSerialization.data(withJSONObject: record) {
+            let directory = URL.documentsDirectory
+            try? bytes.write(to: directory.appending(path: "connection-diagnostic.json"), options: .atomic)
+            let historyURL = directory.appending(path: "connection-events.json")
+            let history = ((try? Data(contentsOf: historyURL)).flatMap { try? JSONSerialization.jsonObject(with: $0) } as? [[String: Any]]) ?? []
+            let bounded = RemoteStreamDiagnostic.appending(record, to: history)
+            if let log = try? JSONSerialization.data(withJSONObject: bounded) { try? log.write(to: historyURL, options: .atomic) }
         }
         #endif
     }
@@ -269,6 +276,9 @@ final class PocketStore: ObservableObject {
     func disconnect() {
         nativeReconnect?.cancel(); nativeReconnect = nil
         generation = UUID(); connectionTask?.cancel(); connectionTask = nil
+        // The carrier's streams, its ping and its scheduled refreshes die with
+        // the connection: after this no late frame, ping or list may report.
+        carrier.stop()
         nativeShell?.disconnect(); nativeShell = nil
         native?.disconnect(); native = nil; nativeRequests = []; nativeProtocolNotices = []; nativeCompaction = nil; nativeSupportsCompaction = false; nativeCompactionPending = false; nativeQueue = []; nativeQueueOmitted = 0; nativeSupportsQueue = false; nativeDiff = nil; nativeSupportsDiff = false; nativeDiffLoading = false; nativeDiffTimeout?.cancel(); nativeDiffTimeout = nil; nativeReady = false; nativeSubmission = nil; queueTextHandlers.removeAll(); api = nil
         socket?.cancel(with: .goingAway, reason: nil); socket = nil
@@ -319,63 +329,99 @@ final class PocketStore: ObservableObject {
         let token = generation
         connectionTask = Task { [weak self] in
             guard let self else { return }
-            for attempt in 0..<5 {
-                guard !Task.isCancelled, self.generation == token else { return }
-                do {
-                    self.connecting = true; self.interactions = []; self.queues = [:]; self.jobs = [:]; self.projectionStores = [:]
-                    let socket = api.socket(); self.socket = socket
-                    try await self.open("$events", id: "$events")
-                    while !Task.isCancelled {
-                        let message = try await socket.receive()
-                        guard self.generation == token else { return }
-                        let data: Data
-                        switch message { case .data(let d): data = d; case .string(let s): data = Data(s.utf8); @unknown default: continue }
-                        let frame = try JSON.decodeWire(data)
-                        try await self.receive(frame)
-                    }
-                } catch {
-                    guard !Task.isCancelled, self.generation == token else { return }
-                    self.socket?.cancel(with: .goingAway, reason: nil)
-                    self.connected = false; self.interactions = []
-                    self.error = "Connection interrupted. " + error.localizedDescription
-                    self.connectionDiagnostic("websocket-failed", error: error)
-                    if attempt < 4 { try? await Task.sleep(nanoseconds: UInt64(min(8, 1 << attempt)) * 1_000_000_000) }
-                }
+            await self.carrier.run { attempt in
+                try await self.carrierAttempt(attempt, api: api, generation: token)
+            } onAttempt: { _ in
+                // Every attempt is a clean slate: nothing a previous socket
+                // folded may answer for this one.
+                self.connecting = true; self.interactions = []; self.queues = [:]; self.jobs = [:]; self.projectionStores = [:]
+            } onFailure: { attempt, error in
+                // The actual close code is read before the socket is dropped;
+                // 1008 is a refused stream request, while a terminated carrier
+                // (the gateway's missed heartbeats) has no close code of its own
+                // and must not be reported as one.
+                let closeCode = self.socket?.closeCode.rawValue ?? 0
+                self.socket?.cancel(with: .goingAway, reason: nil)
+                self.socket = nil
+                self.connected = false; self.interactions = []
+                self.error = "Connection interrupted. " + error.localizedDescription
+                self.connectionDiagnostic("websocket-failed", error: error, details: ["closeCode": closeCode, "attempt": attempt.index])
+            } onFinish: {
+                // Only the carrier whose connection is still the current one
+                // reports its end: a superseded carrier must not clear the
+                // state of the connection that replaced it.
+                if self.generation == token { self.connecting = false }
             }
-            self.connecting = false
         }
     }
-    private func sendFrame(_ frame: JSON) async throws {
-        guard let socket else { throw HarnessError(message: "Not connected") }
-        try await socket.send(.string(String(decoding: JSONEncoder().encode(frame), as: UTF8.self)))
-    }
-    private func open(_ endpoint: String, id: String, args: [String: JSON] = [:]) async throws {
-        try await sendFrame(.object(["type": .string("open"), "streamId": .string(id), "endpoint": .string(endpoint), "payload": .object(["args": .object(args)])]))
-    }
-    private func receive(_ frame: JSON) async throws {
-        let id = frame["streamId"].string
-        if frame["type"].string == "error" {
-            if id == followID { loadingHistory = false; error = frame["error"]["message"].string; return }
-            throw HarnessError(message: frame["error"]["message"].string)
+    /// One carrier attempt: open the event stream on a fresh socket and read it
+    /// until it fails. The ping belongs to this attempt and never reconnects
+    /// anything; the loop that called this body is the only retry owner.
+    private func carrierAttempt(_ attempt: RemoteStreamConnection.Attempt, api: HarnessAPI, generation token: UUID) async throws {
+        let socket = api.socket()
+        self.socket = socket
+        carrier.startPing(ping: { try await socket.ping() }, onFailure: { attempt, error in
+            self.connectionDiagnostic("ping-failed", error: error, details: ["attempt": attempt.index])
+        })
+        try await carrier.subscribe(.events, endpoint: "$events", on: socket)
+        while !Task.isCancelled {
+            let message = try await socket.receive()
+            guard self.generation == token, carrier.isCurrent(attempt) else { throw CancellationError() }
+            let data: Data
+            switch message { case .data(let d): data = d; case .string(let s): data = Data(s.utf8); @unknown default: continue }
+            let frame = try JSON.decodeWire(data)
+            try await receive(frame, on: socket)
         }
-        guard frame["type"].string == "item" else { return }
-        let value = frame["value"], type = value["type"].string
-        if id == "$events" {
+    }
+    private func receive(_ frame: JSON, on socket: URLSessionWebSocketTask) async throws {
+        // The identity check comes first, so a late frame, error or end of a
+        // replaced stream - of a previous selection or a previous socket - is
+        // discarded before it can touch any state.
+        guard let delivery = carrier.admit(frame) else { return }
+        switch delivery.frame["type"].string {
+        case "error":
+            let failure = HarnessError(message: delivery.frame["error"]["message"].string)
+            if delivery.kind == .conversation {
+                loadingHistory = false; error = failure.localizedDescription
+                connectionDiagnostic("conversation-failed", error: failure, details: ["stream": delivery.kind.rawValue])
+                return
+            }
+            connectionDiagnostic("stream-failed", error: failure, details: ["stream": delivery.kind.rawValue])
+            throw failure
+        case "end":
+            // A stream this client holds open was finished by the server: the
+            // ID is retired and the reader reconnects. Only that loop may
+            // reopen it, so the end is never papered over with stale state.
+            carrier.end(delivery.kind)
+            if delivery.kind == .conversation { loadingHistory = false }
+            connectionDiagnostic("stream-ended", details: ["stream": delivery.kind.rawValue])
+            throw RemoteStreamConnection.StreamEnded(kind: delivery.kind)
+        case "item":
+            break
+        default:
+            return
+        }
+        let value = delivery.frame["value"], type = value["type"].string
+        if delivery.kind == .events {
             if type == "ready" {
+                let attempt = carrier.attempt
                 clientID = value["clientId"].string; connected = true; connecting = false; error = nil
-                connectionDiagnostic("websocket-connected")
+                connectionDiagnostic("websocket-connected", details: ["attempt": attempt?.index ?? 0])
                 // The reference client synthesizes `connection/reset` locally when the
                 // transport (re)connects (dsh-api-gateway client.js:1433), so every
                 // cached catalog is suspect; the directory drops and prewarms them.
                 commandDirectory.apply(.connectionReset)
-                try await open("workspace/follow", id: "workspaces")
-                try await open("session/control", id: "control")
-                // Refresh the list after readiness; later event frames stay buffered in the socket.
-                await refresh()
+                try await carrier.subscribe(.workspaces, endpoint: "workspace/follow", on: socket)
+                guard carrier.isCurrent(attempt) else { return }
+                try await carrier.subscribe(.control, endpoint: "session/control", on: socket)
                 // A selection restored before this connection has no warm entry yet.
                 if let id = selectedID { commandDirectory.warm(id) }
                 syncCommandCatalog()
                 if selectedID != nil { try await followSelected() }
+                // The HTTP list refresh runs outside this loop: awaiting it here
+                // would stop reading the socket, and its result is applied only
+                // while this attempt is still the live one.
+                carrier.scheduleRefresh { [weak self] token in await self?.refresh(token: token) }
             } else if type == "waterfall" {
                 let item = Interaction(raw: value, clientID: clientID)
                 if item.isApproval || value["event"].string == "user-questions/request" {
@@ -397,13 +443,12 @@ final class PocketStore: ObservableObject {
                     commandDirectory.apply(catalogEvent); syncCommandCatalog()
                 }
             }
-        } else if id == "workspaces" {
+        } else if delivery.kind == .workspaces {
             if type == "baseline" { workspaces = value["value"]["items"].array.map { HarnessWorkspace(raw: $0) }; archived = Set(value["value"]["archivedSessionIds"].array.map(\.string)) }
             else { // Reopen a complete baseline after a registry delta; no guessed patch semantics.
-                try await sendFrame(.object(["type": .string("cancel"), "streamId": .string("workspaces")]))
-                try await open("workspace/follow", id: "workspaces")
+                try await carrier.subscribe(.workspaces, endpoint: "workspace/follow", on: socket)
             }
-        } else if id == "control" {
+        } else if delivery.kind == .control {
             if type == "baseline" {
                 queues = value["value"]["queues"].object
                 foldBaselineJobs(value["value"], into: &jobs)
@@ -418,7 +463,7 @@ final class PocketStore: ObservableObject {
                 queues[value["sessionId"].string] = value["items"]
             }
             reconcilePending()
-        } else if id == followID {
+        } else if delivery.kind == .conversation {
             if type == "snapshot" {
                 transcript.replace(value["records"].array, cursor: value["cursor"].int)
                 assistantLive.baseline(value["assistantStream"])
@@ -472,11 +517,25 @@ final class PocketStore: ObservableObject {
     private func updateSession(_ id: String, key: String, value: JSON) {
         if let i = sessions.firstIndex(where: { $0.id == id }) { var raw = sessions[i].raw.object; raw[key] = value; sessions[i].raw = .object(raw) }
     }
-    func refresh() async {
+    /// Refresh the session list. `token` is the refresh's own identity when the
+    /// carrier scheduled it for one socket attempt; a caller that passes none
+    /// (the list buttons, a create, a model change) is bound to the attempt
+    /// live at this moment. Either way a result - success or failure - is
+    /// applied only while that identity is still the live one, so a list that
+    /// arrives after a reconnect belongs to the connection that asked for it.
+    func refresh(token: RemoteStreamConnection.RefreshToken? = nil) async {
         if let native { do { try await native.send(NativeCommand(op: "list")) } catch { self.error = error.localizedDescription }; return }
         guard let api else { return }
-        do { sessions = try await api.rpc("session/list", args: ["_request": .object([:])])["items"].array.map { HarnessSession(raw: $0) } }
-        catch { self.error = error.localizedDescription }
+        let connection = generation
+        let refresh = token ?? carrier.currentRefreshToken()
+        do {
+            let result = try await api.rpc("session/list", args: ["_request": .object([:])])
+            guard generation == connection, carrier.accepts(refresh) else { return }
+            sessions = result["items"].array.map { HarnessSession(raw: $0) }
+        } catch {
+            guard generation == connection, carrier.accepts(refresh) else { return }
+            self.error = error.localizedDescription
+        }
     }
     func select(_ id: String?) async {
         #if DEBUG
@@ -507,22 +566,40 @@ final class PocketStore: ObservableObject {
         }
         do { try await followSelected() } catch { self.error = error.localizedDescription; loadingHistory = false }
     }
+    /// Point the conversation stream at the selected session. The previous ID
+    /// is retired before the first suspension, so frames of the session the
+    /// user just left - its snapshot, its events, its errors - are discarded
+    /// from the moment the switch is decided. A deselect retires the stream
+    /// without opening another one.
     private func followSelected() async throws {
-        if !followID.isEmpty { try await sendFrame(.object(["type": .string("cancel"), "streamId": .string(followID)])) }
-        followID = UUID().uuidString
-        guard let id = selectedID else { return }
+        guard let socket else {
+            // No socket to tell: the ID is still retired, so nothing can
+            // arrive for it later.
+            try await carrier.cancel(.conversation, on: nil)
+            return
+        }
+        guard let id = selectedID else {
+            loadingHistory = false
+            try await carrier.cancel(.conversation, on: socket)
+            return
+        }
         loadingHistory = true
-        try await open("session/follow", id: followID, args: ["request": .object(["address": .object(["kind": .string("session"), "sessionId": .string(id)]), "maxMessages": .number(50), "assistantStream": .bool(true)])])
+        try await carrier.subscribe(.conversation, endpoint: "session/follow", args: ["request": .object(["address": .object(["kind": .string("session"), "sessionId": .string(id)]), "maxMessages": .number(50), "assistantStream": .bool(true)])], on: socket)
     }
     func loadOlder() async {
         guard let api, let id = selectedID, let beforeSeq = transcript.firstSeq, !loadingHistory else { return }
-        loadingHistory = true; let stream = followID
-        defer { if stream == followID { loadingHistory = false } }
+        // The history page belongs to the conversation stream it was started
+        // for: a page that lands after a switch, a deselect or a reconnect is
+        // dropped instead of being prepended to another session's transcript.
+        let stream = carrier.streams[.conversation]
+        guard !stream.isEmpty else { return }
+        loadingHistory = true
+        defer { if stream == carrier.streams[.conversation] { loadingHistory = false } }
         do {
             let page = try await api.rpc("session/page", args: ["request": .object(["address": .object(["kind": .string("session"), "sessionId": .string(id)]), "throughSeq": .number(Double(transcript.cursor)), "beforeSeq": .number(Double(beforeSeq)), "maxMessages": .number(50)])])
-            guard stream == followID else { return }
+            guard stream == carrier.streams[.conversation] else { return }
             transcript.prepend(page["records"].array); rows = assistantLive.merged(with: transcript.rows); hasMore = page["hasMore"].bool
-        } catch { if stream == followID { self.error = error.localizedDescription } }
+        } catch { if stream == carrier.streams[.conversation] { self.error = error.localizedDescription } }
     }
 
     // MARK: - Session command catalog
