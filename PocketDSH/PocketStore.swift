@@ -73,13 +73,7 @@ final class PocketStore: ObservableObject {
     @Published var selectingModel = false
     @Published var draft = "" {
         didSet {
-            if let id = selectedID {
-                drafts[id] = draft
-                let key = "harness.drafts." + endpoint
-                var latest = UserDefaults.standard.dictionary(forKey: key) as? [String: String] ?? [:]
-                latest[id] = draft
-                UserDefaults.standard.set(latest, forKey: key)
-            }
+            if let id = selectedID { saveDraft(draft, for: id) }
         }
     }
     @Published var images: [OutgoingImage] = []
@@ -609,6 +603,33 @@ final class PocketStore: ObservableObject {
         return ComposerSubmission(draft: draft, images: images, sessionID: id, endpoint: endpoint, catalogGeneration: commandDirectory.catalogGeneration)
     }
 
+    /// The draft map as it is persisted for the connected Host - the copy
+    /// `select` reloads the session table from.
+    private var savedDrafts: [String: String] {
+        UserDefaults.standard.dictionary(forKey: "harness.drafts." + endpoint) as? [String: String] ?? [:]
+    }
+
+    /// Record one session's draft line the way the `draft` observer does: in
+    /// the session table and in the persisted map. Both matter, because a
+    /// session table reloaded from the map would otherwise resurrect a line
+    /// this session already sent.
+    private func saveDraft(_ text: String, for session: String) {
+        drafts[session] = text
+        var saved = savedDrafts
+        saved[session] = text
+        UserDefaults.standard.set(saved, forKey: "harness.drafts." + endpoint)
+    }
+
+    /// Forget the sending session's draft line once its table still holds what
+    /// this snapshot actually sent - the same rule the live composer follows
+    /// (`draftAfterSend`), applied to the table `select` restores from, so a
+    /// sent message does not come back when the user returns to its session. A
+    /// draft typed meanwhile is not the sent one and stays.
+    private func forgetSentDraft(_ sent: ComposerSubmission) {
+        guard let held = drafts[sent.sessionID], sent.isSentDraft(held) else { return }
+        saveDraft("", for: sent.sessionID)
+    }
+
     /// Run one frozen composer action through the Host's registry
     /// (`commands/execute`), strong-waiting the session's catalog first.
     ///
@@ -682,24 +703,30 @@ final class PocketStore: ObservableObject {
         do {
             guard current() else { return }
             let value = try await api.rpc("commands/execute", args: commandExecuteArguments(agentId: snapshot.sessionID, line: snapshot.text, submittedAttachments: submitted))
+            let execution = CommandExecution(value)
+            // The cleanup of the sending session's saved composer hangs on the
+            // Host having taken the command - not on the user still looking at
+            // that session: returning to it must not resurrect the command and
+            // its attachments. The live composer and the notice below belong to
+            // the selected session, so they stay behind `current()`.
+            let declined = value == .null || (!snapshot.images.isEmpty && execution.result.isError)
+            if !declined, endpoint == snapshot.endpoint {
+                let key = snapshot.imageDraftKey
+                if !snapshot.images.isEmpty, let existing = imageDrafts[key] {
+                    imageDrafts[key] = snapshot.imagesAfterSend(existing)
+                    saveImageDrafts(key: key)
+                }
+                forgetSentDraft(snapshot)
+            }
             guard current() else { return }
             guard value != .null else { self.error = "Unknown or malformed command: " + snapshot.text; return }
-            let execution = CommandExecution(value)
             if !snapshot.images.isEmpty, execution.result.isError {
                 self.error = execution.result.text ?? ("/" + descriptor.name + " failed")
                 return
             }
             error = nil
-            // Only what this action sent leaves the composer: the sent draft is
-            // cleared, a draft typed while the command ran stays, and an
-            // attachment added meanwhile is not dropped.
             draft = snapshot.draftAfterSend(draft)
-            if !snapshot.images.isEmpty {
-                let key = snapshot.imageDraftKey
-                if let existing = imageDrafts[key] { imageDrafts[key] = snapshot.imagesAfterSend(existing) }
-                images = snapshot.imagesAfterSend(images)
-                saveImageDrafts(key: key)
-            }
+            if !snapshot.images.isEmpty { images = snapshot.imagesAfterSend(images) }
         } catch { if current() { self.error = error.localizedDescription } }
     }
     func createDefaultTask() async {
@@ -737,7 +764,6 @@ final class PocketStore: ObservableObject {
         // torn down - is never sent here: the user moved on and this action is
         // not theirs any more.
         guard frozen.stillApplies(sessionID: id, endpoint: endpoint, catalogGeneration: commandDirectory.catalogGeneration) else { return }
-        let sentDraft = frozen.draft
         let text = frozen.text
         guard !text.isEmpty || !frozen.images.isEmpty else { return }
         let sendingImages = frozen.images
@@ -750,16 +776,18 @@ final class PocketStore: ObservableObject {
             _ = try await api.rpc("session/prompt", args: ["request": .object(["sessionId": .string(id), "requestId": .string(request.id), "mode": .string(mode), "clientTimeZone": .string(TimeZone.current.identifier), "content": .array(promptContent(frozen))])])
             // A successful send removes exactly what it sent. The sending
             // session is the one whose saved composer it cleans: that session's
-            // draft store loses what went out even if the user selected another
-            // session while the RPC was in flight - returning to it must not
-            // resurrect a message that already left - while the live composer is
-            // touched only while it still shows that session.
-            let key = frozen.imageDraftKey
-            if endpoint == frozen.endpoint, let existing = imageDrafts[key] {
-                imageDrafts[key] = frozen.imagesAfterSend(existing)
-                saveImageDrafts(key: key)
+            // draft line and saved attachments go even if the user selected
+            // another session while the RPC was in flight - returning to it
+            // must not resurrect a message that already left - while the live
+            // composer is touched only while it still shows that session.
+            if endpoint == frozen.endpoint {
+                let key = frozen.imageDraftKey
+                if let existing = imageDrafts[key] {
+                    imageDrafts[key] = frozen.imagesAfterSend(existing)
+                    saveImageDrafts(key: key)
+                }
+                forgetSentDraft(frozen)
             }
-            if drafts[id] == sentDraft { drafts[id] = "" }
             guard frozen.stillApplies(sessionID: selectedID, endpoint: endpoint, catalogGeneration: commandDirectory.catalogGeneration) else { return }
             images = frozen.imagesAfterSend(images)
             draft = frozen.draftAfterSend(draft)

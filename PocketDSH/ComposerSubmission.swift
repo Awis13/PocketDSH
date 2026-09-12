@@ -6,9 +6,10 @@ import Foundation
 // warmup alone can take a whole round trip - so every step of one send action
 // must read the state the user sent, never the live composer. This file holds
 // that snapshot and the decisions taken on it, as plain values the offline
-// checks compile and drive directly: `PocketStore` is outside every offline
-// gate (`scripts/check.sh` compiles no app file), so a rule that stays inside
-// the store can only be found by reading.
+// checks compile and drive directly: `PocketStore` itself is compiled by no
+// gate (`scripts/check.sh` and `check-protocol.sh` compile the ported value
+// files - this one included - but not the store), so a rule that lives only in
+// the store can be found by reading alone.
 
 /// One composer send action, frozen on the main actor by the action that owns
 /// it - the send button, the keyboard shortcut, or a palette row - before that
@@ -27,7 +28,7 @@ import Foundation
 /// snapshot also carries the command directory's `catalogGeneration` - the value
 /// a teardown rotates (`CommandDirectory.removeAll`) - and a send that outlives
 /// its connection is dropped instead of being issued against the next one.
-struct ComposerSubmission: Equatable {
+struct ComposerSubmission {
     /// The composer draft exactly as typed, trimming not applied.
     var draft: String
     var images: [OutgoingImage]
@@ -59,13 +60,20 @@ struct ComposerSubmission: Equatable {
         request.session == sessionID && request.text == text && request.imageIDs == imageIDs
     }
 
+    /// Whether a draft the composer (or its saved session table) holds is the
+    /// content this snapshot sent. Surrounding whitespace does not make it a
+    /// different draft: the reference trims the line it submits, so a composer
+    /// holding "  /compact  " holds the line that went out.
+    func isSentDraft(_ current: String) -> Bool {
+        current.trimmingCharacters(in: .whitespacesAndNewlines) == text
+    }
+
     /// The draft the composer keeps after this snapshot was actually sent: the
     /// text that went out is cleared, and anything the user typed meanwhile -
     /// including the same text retyped as a new draft - is not this action's to
-    /// erase. A draft that differs only in surrounding whitespace is the sent
-    /// content, so it clears like it did on the command path before.
+    /// erase.
     func draftAfterSend(_ current: String) -> String {
-        current.trimmingCharacters(in: .whitespacesAndNewlines) == text ? "" : current
+        isSentDraft(current) ? "" : current
     }
 
     /// The attachments the composer keeps after this snapshot was sent: only

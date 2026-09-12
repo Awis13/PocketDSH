@@ -79,6 +79,11 @@ import Foundation
         // during the wait, on the command path as well.
         assert(claimed.draftAfterSend("something else") == "something else", "a new draft survives a successful command")
         assert(claimed.draftAfterSend("  /compact  ") == "", "a draft that differs only in whitespace is the sent content")
+        // The sent line is recognised through surrounding whitespace, and a
+        // newer draft is not the sent one - the rule both the live composer and
+        // the persisted session table are cleaned by.
+        assert(claimed.isSentDraft("/compact") && claimed.isSentDraft("  /compact  "), "the sent line is the sent content")
+        assert(!claimed.isSentDraft("something else") && !claimed.isSentDraft("") && !claimed.isSentDraft("/compact now"), "a newer draft is not the sent one")
         // The attachment that went out is dropped; anything attached meanwhile
         // is kept. The composer still holds the sent one, which is what makes
         // this a cleanup and not a no-op.
