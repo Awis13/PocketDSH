@@ -16,6 +16,11 @@ struct PocketDSHApp: App {
     @State private var started = false
     @State private var needsResume = false
     @Environment(\.scenePhase) private var scenePhase
+    /// Presentation only: the pending value itself is the store's, and each
+    /// button ends it through the store - the dismissal binding only reports.
+    private var fullAccessConfirmationPresented: Binding<Bool> {
+        Binding(get: { store.accessConfirmation != nil }, set: { _ in })
+    }
     @ViewBuilder private var content: some View {
         #if DEBUG
         if ProcessInfo.processInfo.environment["DSH_APPROVAL_PREVIEW"] == "1" {
@@ -32,6 +37,18 @@ struct PocketDSHApp: App {
             content.modifier(HarnessGlassGroup()).environmentObject(store)
                 .environment(\.locale, Locale(identifier: "en"))
                 .fontDesign(theme.design).environment(\.harnessTheme, theme).preferredColorScheme(theme.scheme).tint(theme.accent)
+                // The one escalation question, asked once per window: the
+                // composer's `/permission danger-full-access` line and the
+                // approval card's "Full access..." button publish the same
+                // pending confirmation into the store, and the workspace can
+                // host several panes of that store at once - an alert rendered
+                // by a pane would ask once per pane.
+                .alert(FullAccessPolicy.title, isPresented: fullAccessConfirmationPresented, presenting: store.accessConfirmation) { pending in
+                    Button(FullAccessPolicy.cancelLabel, role: .cancel) { store.cancelFullAccess(pending.id) }
+                    Button(pending.enableLabel, role: .destructive) { Task { await store.confirmFullAccess(pending.id) } }
+                } message: { _ in
+                    Text(FullAccessPolicy.message)
+                }
                 .task {
                     guard !started else { return }; started = true
                     #if DEBUG

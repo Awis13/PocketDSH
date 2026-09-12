@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		01462F8C0CA4072255F2C695 /* DiffReviewView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 98AC5E64694BD203ECD59670 /* DiffReviewView.swift */; };
+		03B819346632AC4A00020F68 /* FullAccessConfirmation.swift in Sources */ = {isa = PBXBuildFile; fileRef = F69B120ED2F48AADB9929C31 /* FullAccessConfirmation.swift */; };
 		07B0636E1F8662F3B84B0B0C /* HomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6DA2E6D500176C6992989EE1 /* HomeView.swift */; };
 		17DB52B0576409D2EA9E2C0C /* SymbolsNerdFontMono-Regular.ttf in Resources */ = {isa = PBXBuildFile; fileRef = 0C0F59F2281C005DD28D2339 /* SymbolsNerdFontMono-Regular.ttf */; };
 		2BE9481F5EB86B12C151E7FD /* ImageAttachments.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8742D0DC00E6185285EF6EC5 /* ImageAttachments.swift */; };
@@ -100,6 +101,7 @@
 		E44B318D23987DA240BA7317 /* ComposerSubmission.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerSubmission.swift; sourceTree = "<group>"; };
 		E44CCE33FA506477977F2202 /* Appearance.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Appearance.swift; sourceTree = "<group>"; };
 		F1DB1F53D3DE276524D2EFC7 /* LiveReasoningView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveReasoningView.swift; sourceTree = "<group>"; };
+		F69B120ED2F48AADB9929C31 /* FullAccessConfirmation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FullAccessConfirmation.swift; sourceTree = "<group>"; };
 		F816DAE6C96C8E45D149EEF5 /* PocketDSHApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PocketDSHApp.swift; sourceTree = "<group>"; };
 		F88F3CD3883D2F6BFE7D5AE7 /* ConnectionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectionView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -160,6 +162,7 @@
 				4536C46B3F5C4076165E8409 /* ContextStatusView.swift */,
 				9A23CDF070AEDF1D7FEED50A /* DemoData.swift */,
 				98AC5E64694BD203ECD59670 /* DiffReviewView.swift */,
+				F69B120ED2F48AADB9929C31 /* FullAccessConfirmation.swift */,
 				213F6D56A815333905F5F393 /* HarnessAPI.swift */,
 				0A6ACA8367AD55DAF03625A7 /* HarnessProtocol.swift */,
 				19B8B07078D82DC7A7EE6EC4 /* HarnessView.swift */,
@@ -346,6 +349,7 @@
 				B3E5A6229657B8C03CA87DEB /* ContextStatusView.swift in Sources */,
 				AB8C7FF9C25F4275D73B6A31 /* DemoData.swift in Sources */,
 				01462F8C0CA4072255F2C695 /* DiffReviewView.swift in Sources */,
+				03B819346632AC4A00020F68 /* FullAccessConfirmation.swift in Sources */,
 				40BBF01895004C9E8FAC5FE0 /* HarnessAPI.swift in Sources */,
 				5860D86558FAB4821B9CBDF9 /* HarnessProtocol.swift in Sources */,
 				80C50DEC3D296393371771EE /* HarnessView.swift in Sources */,

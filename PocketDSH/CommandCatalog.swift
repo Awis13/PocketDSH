@@ -227,18 +227,29 @@ private func isCommandSeparator(_ scalar: UInt32) -> Bool {
 /// when present, so an out-of-contract slash-less line degrades to the token
 /// itself instead of the token minus its first character.
 func submittedCommandName(_ line: String) -> String {
-    let scalars = Array(line.unicodeScalars)
+    let scalars = Array(commandLineTrimmed(line).unicodeScalars)
+    guard !scalars.isEmpty else { return "" }
+    var end = 0
+    while end < scalars.count, !isCommandLineWhitespace(scalars[end].value) { end += 1 }
+    let token = scalars[0..<end]
+    guard token.first?.value == 47 else { return decode(token) }
+    return decode(token.dropFirst())
+}
+
+/// JS `String.prototype.trim()` over the command line's whitespace class (ASCII
+/// plus NBSP): what the reference applies to a line or an argument before
+/// comparing it - `line.trim()` before matchEnter, `rawInput.trim()` in the
+/// `/permission` handler against its preset table. Trimming is not cosmetic
+/// there: it decides which preset a switch line names.
+func commandLineTrimmed(_ text: String) -> String {
+    let scalars = Array(text.unicodeScalars)
     guard !scalars.isEmpty else { return "" }
     var lo = 0
     var hi = scalars.count - 1
     while lo <= hi, isCommandLineWhitespace(scalars[lo].value) { lo += 1 }
     while hi >= lo, isCommandLineWhitespace(scalars[hi].value) { hi -= 1 }
     guard lo <= hi else { return "" }
-    var end = lo
-    while end <= hi, !isCommandLineWhitespace(scalars[end].value) { end += 1 }
-    let token = scalars[lo..<end]
-    guard token.first?.value == 47 else { return decode(token) }
-    return decode(token.dropFirst())
+    return decode(scalars[lo...hi])
 }
 
 private func decode(_ scalars: ArraySlice<Unicode.Scalar>) -> String {
