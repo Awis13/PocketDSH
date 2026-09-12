@@ -467,7 +467,6 @@ struct InteractionView: View {
     @Environment(\.harnessTheme) private var theme
     @EnvironmentObject var store: PocketStore
     @Environment(\.agentPaneIsActive) private var activePane
-    @State private var confirmFullAccess = false
     let item: Interaction
     var decisionHandler: ((JSON) -> Void)? = nil
     @State private var answers: [String: String] = [:]
@@ -500,7 +499,7 @@ struct InteractionView: View {
                     VStack(alignment: .leading, spacing: 8) {
                         Button("Allow once") { answer(.string("allowed-once")) }.buttonStyle(.borderedProminent)
                         Button("Reject") { answer(.string("rejected")) }.buttonStyle(.bordered)
-                        Button("Full access…") { confirmFullAccess = true }.disabled(!store.supportsFullAccess)
+                        Button("Full access…") { store.requestFullAccess(.approval(item)) }.disabled(!store.supportsFullAccess)
                     }
                 }
                 if activePane { Text(store.supportsFullAccess ? "⌘↵ Allow once · ⌘⌫ Reject · ⌘⇧A Full access" : "⌘↵ Allow once · ⌘⌫ Reject").font(.caption2).foregroundStyle(.secondary) }
@@ -528,32 +527,20 @@ struct InteractionView: View {
                     answer(.object(["answers": .array(data)]))
                 }.buttonStyle(.borderedProminent).tint(theme.accent).disabled(!ready)
             }
-        }.padding(12).frame(maxWidth: .infinity, alignment: .leading).background(theme.accent.opacity(0.08), in: RoundedRectangle(cornerRadius: 18)).disabled(busy || !store.connected)
+        }.padding(12).frame(maxWidth: .infinity, alignment: .leading).background(theme.accent.opacity(0.08), in: RoundedRectangle(cornerRadius: 18)).disabled(busy || !store.connected || store.fullAccessExecuting)
         .background {
             if activePane && item.isApproval {
                 Button("") { answer(.string("allowed-once")) }.keyboardShortcut(.return, modifiers: .command).hidden().disabled(busy || !store.connected)
                 Button("") { answer(.string("rejected")) }.keyboardShortcut(.delete, modifiers: .command).hidden().disabled(busy || !store.connected)
-                Button("") { confirmFullAccess = true }.keyboardShortcut("a", modifiers: [.command, .shift]).hidden().disabled(busy || !store.connected || !store.supportsFullAccess)
+                Button("") { store.requestFullAccess(.approval(item)) }.keyboardShortcut("a", modifiers: [.command, .shift]).hidden().disabled(busy || !store.connected || !store.supportsFullAccess)
             }
-        }
-        .alert("Enable full access for this session?", isPresented: $confirmFullAccess) {
-            Button("Cancel", role: .cancel) {}
-            Button("Enable and allow this request", role: .destructive) {
-                busy = true
-                Task {
-                    if await store.enableFullAccess(for: item) { await store.answer(item, value: .string("allowed-once")) }
-                    busy = false
-                }
-            }
-        } message: {
-            Text("The agent may change files and run external commands without further permission prompts in this session. Other sessions are unchanged.")
         }
     }
     private var approvalButtons: some View {
         HStack(spacing: 10) {
             Button("Allow once") { answer(.string("allowed-once")) }.buttonStyle(.borderedProminent).tint(theme.accent)
             Button("Reject") { answer(.string("rejected")) }.buttonStyle(.bordered)
-            Button("Full access…") { confirmFullAccess = true }.disabled(!store.supportsFullAccess).buttonStyle(.borderless)
+            Button("Full access…") { store.requestFullAccess(.approval(item)) }.disabled(!store.supportsFullAccess).buttonStyle(.borderless)
         }
     }
     private func answer(_ value: JSON) { guard !busy, store.connected else { return }; if let decisionHandler { decisionHandler(value); return }; busy = true; Task { await store.answer(item, value: value); busy = false } }

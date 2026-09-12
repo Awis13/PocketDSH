@@ -57,6 +57,12 @@ struct ComposerSubmission {
         sessionID == self.sessionID && endpoint == self.endpoint && catalogGeneration == self.catalogGeneration
     }
 
+    /// The same check against the store's live state as one value: what a
+    /// pending action is answered against once its question has been on screen.
+    func stillApplies(_ live: LiveConnectionIdentity) -> Bool {
+        stillApplies(sessionID: live.sessionID, endpoint: live.endpoint, catalogGeneration: live.catalogGeneration)
+    }
+
     /// Whether an unconfirmed request is a retry of this same submission: same
     /// session, same text, same attachments, so a retry keeps its request id
     /// instead of minting a second one. Content the user changed is a new
@@ -92,6 +98,16 @@ struct ComposerSubmission {
         let sent = Set(imageIDs)
         return current.filter { !sent.contains($0.id) }
     }
+}
+
+/// The live session and connection one frozen action is checked against: the
+/// store's state at the moment a pending action is answered, as one value.
+/// `sessionID` is nil when nothing is selected (or the store is disconnected
+/// from the DSH Host), which no snapshot ever matches.
+struct LiveConnectionIdentity: Equatable {
+    var sessionID: String?
+    var endpoint: String
+    var catalogGeneration: Int
 }
 
 /// The composer's draft lines and their versions - the bookkeeping the send

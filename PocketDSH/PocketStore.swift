@@ -34,7 +34,7 @@ final class PocketStore: ObservableObject {
     var openDefaultTaskWhenConnected = false
     @Published var voiceRecording = false
     @Published var selectedID: String? { didSet {
-        if selectedID != oldValue { nativeRequests = []; nativeProtocolNotices = []; nativeCompaction = nil; nativeSupportsCompaction = false; nativeCompactionPending = false; nativeQueue = []; nativeQueueOmitted = 0; nativeSupportsQueue = false; nativeDiff = nil; nativeSupportsDiff = false; nativeDiffLoading = false; nativeDiffTimeout?.cancel(); nativeDiffTimeout = nil; queueTextHandlers.removeAll() }
+        if selectedID != oldValue { nativeRequests = []; nativeProtocolNotices = []; nativeCompaction = nil; nativeSupportsCompaction = false; nativeCompactionPending = false; nativeQueue = []; nativeQueueOmitted = 0; nativeSupportsQueue = false; nativeDiff = nil; nativeSupportsDiff = false; nativeDiffLoading = false; nativeDiffTimeout?.cancel(); nativeDiffTimeout = nil; queueTextHandlers.removeAll(); clearAccessConfirmation() }
         persistPane()
     } }
     @Published var composerFocusRequest: UUID?
@@ -196,6 +196,18 @@ final class PocketStore: ObservableObject {
     /// cancellation is what stops the work, the guard is what keeps it from
     /// landing.
     private lazy var commandConnection = CommandPullConnection(directory: commandDirectory)
+    /// The unanswered full-access confirmation, or nil when there is none. It is
+    /// the one question both escalation routes ask - the composer's command line
+    /// and the approval card's button - so it is published once and rendered
+    /// once: two surfaces cannot stack two alerts over one switch. The lifecycle
+    /// behind it (one pending action, its frozen identity, exactly one dispatch
+    /// per answer) is `FullAccessGate` (FullAccessConfirmation.swift), which the
+    /// offline checks drive.
+    @Published private(set) var accessConfirmation: FullAccessGate.Pending?
+    /// Whether a confirmed approval is being escalated and answered right now:
+    /// the card stays disabled until the Host has taken the decision.
+    @Published private(set) var fullAccessExecuting = false
+    private lazy var fullAccessGate = FullAccessGate()
     var selected: HarnessSession? { sessions.first { $0.id == selectedID } }
     var running: Bool { (selected?.running ?? false) || compactingContext }
     var liveReasoning: TranscriptRow? {
@@ -285,6 +297,7 @@ final class PocketStore: ObservableObject {
         // RPC harmless.
         commandConnection.stop()
         commandDirectory.removeAll(); syncCommandCatalog()
+        clearAccessConfirmation()
     }
     func transcribeVoice(_ data: Data, endpoint: String) async throws -> String {
         guard connected, self.endpoint == endpoint, let api else { throw HarnessError(message: "Reconnect to DSH and retry transcription.") }
@@ -693,6 +706,14 @@ final class PocketStore: ObservableObject {
         case .refusesAttachments(let message):
             error = message
         case .execute(let descriptor):
+            // One claimed line is not a command run but a policy change: the
+            // escalation is the only dispatch that asks first, and its answer is
+            // what sends it (FullAccessPolicy/FullAccessGate). Nothing reaches
+            // `commands/execute` before the user enables full access.
+            guard !FullAccessPolicy.isEscalation(line: snapshot.text) else {
+                requestFullAccess(.command(snapshot, descriptor))
+                return
+            }
             await executeClaimedCommand(snapshot, descriptor: descriptor, api: api)
         }
     }
@@ -961,12 +982,68 @@ final class PocketStore: ObservableObject {
         guard connected, let api else { return }
         do { _ = try await api.rpc(name, args: ["request": .object(request)]) } catch { self.error = error.localizedDescription }
     }
+    /// The store's live session and connection as one value: what a pending
+    /// action is checked against when its question is answered.
+    var liveConnectionIdentity: LiveConnectionIdentity {
+        LiveConnectionIdentity(sessionID: selectedID, endpoint: endpoint, catalogGeneration: commandDirectory.catalogGeneration)
+    }
+
+    /// Ask the user to confirm one access escalation. The pending question is
+    /// bound to the action's own snapshot, so the composer can keep being edited
+    /// while it is on screen, and a second request while one is unanswered is
+    /// refused instead of replacing it.
+    func requestFullAccess(_ target: FullAccessGate.Target) {
+        guard let pending = fullAccessGate.request(target) else { return }
+        accessConfirmation = pending
+    }
+
+    /// The user declined the pending escalation: nothing is sent, and the
+    /// composer keeps exactly the draft and attachments it held.
+    func cancelFullAccess(_ id: UUID) {
+        guard accessConfirmation?.id == id, fullAccessGate.cancel(id: id) else { return }
+        accessConfirmation = nil
+    }
+
+    /// Answer the pending escalation. The gate runs at most one action per
+    /// confirmation and drops a late, doubled or stale answer; the transports
+    /// below are the two legs the question guarded.
+    func confirmFullAccess(_ id: UUID) async {
+        // A question that is no longer the current one is not answerable: the
+        // answer arriving for a replaced or withdrawn confirmation must not
+        // consume it on the user's behalf.
+        guard accessConfirmation?.id == id else { return }
+        accessConfirmation = nil
+        let live = connected ? liveConnectionIdentity : nil
+        _ = await fullAccessGate.confirm(id: id, live: live, busy: submitting, command: { [weak self] snapshot, descriptor in
+            guard let self, !self.submitting, self.connected, let api = self.api else { return }
+            self.submitting = true
+            defer { self.submitting = false }
+            await self.executeClaimedCommand(snapshot, descriptor: descriptor, api: api)
+        }, approval: { [weak self] item in
+            guard let self else { return }
+            self.fullAccessExecuting = true
+            defer { self.fullAccessExecuting = false }
+            if await self.enableFullAccess(for: item) { await self.answer(item, value: .string("allowed-once")) }
+        })
+    }
+
+    /// Drop an unanswered escalation question without a decision. Its action
+    /// names one session and one connection generation, and neither survives the
+    /// question: after a switch, a reconnect or a teardown there is nothing left
+    /// for the user to be answering.
+    private func clearAccessConfirmation() {
+        fullAccessGate.clear()
+        accessConfirmation = nil
+    }
+
+    /// The `commands/execute` leg behind a confirmed escalation, for the
+    /// approval card that sits on a live request.
     func enableFullAccess(for item: Interaction) async -> Bool {
         guard let api, connected, item.sessionID == selectedID, item.clientID == clientID,
               interactions.contains(where: { $0.id == item.id }) else { return false }
         do {
             let value = try await api.rpc("commands/execute", args: commandExecuteArguments(agentId: item.sessionID,
-                line: "/permission danger-full-access", submittedAttachments: []))
+                line: FullAccessPolicy.commandLine, submittedAttachments: []))
             guard value["result"]["kind"].string == "success" else {
                 throw HarnessError(message: value["result"]["text"].string.isEmpty ? "Full access was not confirmed by Harness." : value["result"]["text"].string)
             }
