@@ -117,6 +117,7 @@ final class ManualClock {
         try await delayedRefreshKeepsReceiving()
         try await pingOwnership()
         try await carrierLoopOwnsRetry()
+        try await failedAttemptInvalidation()
         try await perAttemptCleanSlate()
         try await diagnosticsAreSanitizedAndBounded()
         try await liveProbe()
@@ -169,13 +170,13 @@ final class ManualClock {
         assert(carrier.streams[.events].isEmpty && carrier.streams[.workspaces].isEmpty)
         let closed = try await carrier.subscribe(.events, endpoint: "$events", on: transport)
         assert(closed == nil, "a stopped carrier opens nothing")
-        var reconnected: RemoteStreamConnection.Attempt?
-        await carrier.run(attempts: 1, sleep: { _ in }, body: { attempt in reconnected = attempt },
-                          onAttempt: { _ in }, onFailure: { _, _ in }, onFinish: {})
-        _ = try unwrapped(reconnected, "the next carrier run mints an attempt")
+        let reconnected = arm(carrier)
+        await spin { carrier.attempt != nil }
         assert(carrier.admit(baseline(live)) == nil, "the previous attempt's stream is stale")
         let reopened = try await carrier.subscribe(.events, endpoint: "$events", on: transport)
         assert(reopened != nil && reopened != events, "the new attempt mints a new event stream ID")
+        reconnected.cancel()
+        await spin { carrier.attempt == nil }
         print("PASS stream replacement: unique IDs, stale data/error/end rejection, independent streams and a clean reconnect")
     }
 
@@ -425,6 +426,107 @@ final class ManualClock {
         print("PASS carrier loop: single retry owner, limited backoff, one final state report")
     }
 
+    /// A failed attempt is dead before the backoff is awaited. Codex's
+    /// reproducer showed the opposite: the failed socket stayed "current", so a
+    /// delayed refresh result and a history page were still accepted during the
+    /// retry sleep and forever after the carrier gave up. This drives the whole
+    /// lifetime - stream ID, page, delayed refresh, ping - and asserts the
+    /// failed attempt owns nothing in either window, while a newer carrier's
+    /// attempt is never invalidated by the run it replaced.
+    @MainActor
+    static func failedAttemptInvalidation() async throws {
+        let transport = FakeRemoteTransport()
+        let carrier = RemoteStreamConnection()
+        let clock = ManualClock()
+        let backoff = Park()
+        let http = Park()
+        var attempts: [Int] = [], failures: [Int] = [], finishes = 0
+        var streams: [String] = [], pages: [RemoteStreamConnection.PageWait] = []
+        var refreshes: [RemoteStreamConnection.RefreshToken] = []
+        var applied: [String] = []
+        let run = Task {
+            await carrier.run(attempts: 2, backoff: { _ in .seconds(1) }, sleep: { _ in await backoff.wait() }, body: { attempt in
+                attempts.append(attempt.index)
+                streams.append(try unwrapped(try await carrier.subscribe(.workspaces, endpoint: "workspace/follow", on: transport), "a workspace stream opens"))
+                _ = try await carrier.subscribe(.conversation, endpoint: "session/follow", args: conversationArgs("session-fail"), on: transport)
+                pages.append(try unwrapped(carrier.beginPage(), "the page starts on the live conversation stream"))
+                refreshes.append(try unwrapped(carrier.scheduleRefresh { token in
+                    await http.wait()   // the HTTP list answers only after the socket died
+                    if carrier.accepts(token) { applied.append("refresh") }
+                }, "the refresh is scheduled on the live attempt"))
+                carrier.startPing(interval: .seconds(15), sleep: { try await clock.sleep($0) }, ping: { try await transport.ping() }, onFailure: { _, _ in })
+                throw HarnessError(message: "socket \(attempt.index) died")
+            }, onAttempt: { _ in }, onFailure: { attempt, _ in failures.append(attempt.index) }, onFinish: { finishes += 1 })
+        }
+        await spin { backoff.isParked }
+        // The exact window Codex probed: the retry is sleeping, the failed
+        // socket must already own nothing.
+        assert(attempts == [1] && failures == [1], "the failed attempt was reported once")
+        assert(carrier.attempt == nil, "the failed attempt is retired before the backoff")
+        assert(!carrier.accepts(refreshes[0]), "the failed socket's refresh token is refused during the backoff")
+        assert(!carrier.owns(pages[0]) && carrier.beginPage() == nil, "the failed socket's page owns nothing during the backoff")
+        assert(carrier.admit(baseline(streams[0])) == nil, "the failed socket's stream ID is stale during the backoff")
+        assert(!carrier.hasOwnedWork, "the failed attempt's ping and refresh work are cancelled before the backoff")
+        clock.tick()
+        await Task.yield(); await Task.yield()
+        assert(transport.pings == 0, "the failed attempt's ping never fires during the backoff")
+        assert(applied.isEmpty, "a refresh that answers during the backoff applies nothing")
+        backoff.release()
+        await spin { finishes == 1 }
+        await run.value
+        // After the final failure the same holds: nothing of the dead socket is
+        // accepted, and the delayed HTTP answer still applies nothing.
+        assert(attempts == [1, 2] && failures == [1, 2] && finishes == 1, "the loop retried once and reported its end")
+        assert(carrier.attempt == nil && !carrier.accepts(refreshes[1]), "the exhausted carrier keeps no current attempt")
+        assert(!carrier.owns(pages[1]) && carrier.beginPage() == nil, "the exhausted carrier has no page to own")
+        assert(!carrier.hasOwnedWork, "the exhausted carrier owns no work")
+        http.release()
+        await spin { !carrier.hasOwnedWork }
+        assert(applied.isEmpty, "a refresh of the dead socket never applies, not even after the carrier gave up")
+        // A stale run cannot invalidate the carrier that replaced it: cancel it
+        // the way the store does, then let it wake from the backoff.
+        let stale = RemoteStreamConnection()
+        let stalePark = Park()
+        let staleRun = Task {
+            await stale.run(attempts: 3, sleep: { _ in await stalePark.wait() }, body: { _ in throw HarnessError(message: "dead") },
+                            onAttempt: { _ in }, onFailure: { _, _ in }, onFinish: { })
+        }
+        await spin { stalePark.isParked }
+        // The store cancels the carrier task and stops the carrier together; a
+        // run woken from its backoff must then leave the new attempt alone.
+        staleRun.cancel()
+        stale.stop()
+        let replacement = arm(stale) { _ in
+            _ = try? await stale.subscribe(.conversation, endpoint: "session/follow", args: conversationArgs("session-new"), on: transport)
+        }
+        await spin { stale.attempt != nil && !stale.streams[.conversation].isEmpty }
+        let replacementPage = try unwrapped(stale.beginPage(), "the replacement carrier owns its page")
+        let replacementRefresh = try unwrapped(stale.scheduleRefresh { _ in }, "the replacement carrier owns its refresh")
+        stalePark.release()
+        await staleRun.value
+        assert(stale.accepts(replacementRefresh) && stale.owns(replacementPage),
+               "a stale run waking from its backoff never invalidates the newer carrier's attempt")
+        replacement.cancel()
+        print("PASS failed attempt invalidation: dead socket owns no refresh, page, stream or ping")
+    }
+
+    /// Arm a carrier the way the store does: `run` owns the attempt, and the
+    /// body stays alive until the check cancels it - the production body is the
+    /// reader loop, which also returns only when it is cancelled.
+    @MainActor
+    static func arm(_ carrier: RemoteStreamConnection, attempts: Int = 1,
+                    setup: @escaping @MainActor (RemoteStreamConnection.Attempt) async -> Void = { _ in }) -> Task<Void, Never> {
+        Task {
+            await carrier.run(attempts: attempts,
+                              sleep: { _ in try? await Task.sleep(for: .seconds(1)) },
+                              body: { attempt in
+                                  await setup(attempt)
+                                  try? await Task.sleep(for: .seconds(30))
+                              },
+                              onAttempt: { _ in }, onFailure: { _, _ in }, onFinish: { })
+        }
+    }
+
     /// A reconnect is a clean slate: no stream ID, no owned work and no frame
     /// of the previous socket survives it, so the store's per-attempt reset of
     /// queues, jobs and projections starts from an empty table.
@@ -565,7 +667,7 @@ final class ManualClock {
         }
         print("live DSH: following the read-only session chosen for the reconnect phase")
         let second = connect()
-        _ = try await rearm(carrier)
+        let reconnect = try await rearm(carrier)
         _ = try await carrier.subscribe(.events, endpoint: "$events", on: second)
         _ = try await read(second) { $0.kind == .events && $0.frame["value"]["type"].string == "ready" }
         _ = try await carrier.subscribe(.control, endpoint: "session/control", on: second)
@@ -575,6 +677,7 @@ final class ManualClock {
         assert(snapshot.frame["value"]["cursor"].int >= 0, "the reconnected session restores a snapshot")
         print("PASS live DSH: reconnect delivers the event and control baselines and restores session \(sessionId) (cursor \(snapshot.frame["value"]["cursor"].int))")
         second.cancel(with: .goingAway, reason: nil)
+        reconnect.cancel()
         carrier.stop()
     }
 
@@ -584,12 +687,20 @@ final class ManualClock {
     /// next `run` mints the new attempt, and this one stays live for the
     /// subscriptions that follow.
     @MainActor
-    static func rearm(_ carrier: RemoteStreamConnection) async throws -> RemoteStreamConnection.Attempt {
+    static func rearm(_ carrier: RemoteStreamConnection) async throws -> Task<Void, Never> {
         carrier.stop()
-        var attempt: RemoteStreamConnection.Attempt?
-        await carrier.run(attempts: 1, sleep: { _ in }, body: { attempt = $0 },
-                          onAttempt: { _ in }, onFailure: { _, _ in }, onFinish: {})
-        return try unwrapped(attempt, "the reconnected carrier mints an attempt")
+        // The run's body stays alive - the production body is the reader loop -
+        // so the attempt keeps owning the probe's subscriptions until the probe
+        // is done with it. A body that returned would end its own attempt.
+        let run = Task {
+            await carrier.run(attempts: 1, sleep: { _ in },
+                              body: { _ in try? await Task.sleep(for: .seconds(300)) },
+                              onAttempt: { _ in }, onFailure: { _, _ in }, onFinish: { })
+        }
+        let deadline = ContinuousClock.now + .seconds(10)
+        while carrier.attempt == nil && ContinuousClock.now < deadline { try? await Task.sleep(for: .milliseconds(5)) }
+        _ = try unwrapped(carrier.attempt, "the reconnected carrier mints an attempt")
+        return run
     }
 
     /// The probe's read-only credentials: either the explicit cookie file the
