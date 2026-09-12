@@ -369,9 +369,11 @@ final class PocketStore: ObservableObject {
                 }
                 if event == "api-session/error", args.count == 2, args[0].string == selectedID { error = args[1].string }
                 // Catalog invalidation, wired one for one like the reference client
-                // (dsh-client-ui-commands client.js:537-545).
-                if event == "commands/change" { commandDirectory?.apply(.commandsChanged); syncCommandCatalog() }
-                if event == "agent-preset/selected", args.count == 2 { commandDirectory?.apply(.agentPresetSelected(sessionId: args[0].string)); syncCommandCatalog() }
+                // (dsh-client-ui-commands client.js:537-545); the mapping itself
+                // lives in CommandCatalog.swift so the offline gates can pin it.
+                if let catalogEvent = commandCatalogEvent(name: event, args: args) {
+                    commandDirectory?.apply(catalogEvent); syncCommandCatalog()
+                }
             }
         } else if id == "workspaces" {
             if type == "baseline" { workspaces = value["value"]["items"].array.map { HarnessWorkspace(raw: $0) }; archived = Set(value["value"]["archivedSessionIds"].array.map(\.string)) }
@@ -467,6 +469,11 @@ final class PocketStore: ObservableObject {
         pendingText = pendingRequest?.session == id ? (pendingRequest?.text.isEmpty == true ? "Image" : pendingRequest?.text) : nil
         model = selected?.raw["projections"]["values"]["modelSelection"]["next"] ?? .null
         if model == .null { model = catalog["default"] }
+        // The catalog belongs to the selected session: republish (or clear) it
+        // before any early return, so a disconnected or native switch can never
+        // leave the previous session's rows in the palette.
+        if !usesNativeHarness, connected, let id { commandDirectory?.warm(id) }
+        syncCommandCatalog()
         guard connected else { return }
         if let native {
             nativeReady = false; nativeTranscript = NativeTranscript(); nativeRequests = []; nativeProtocolNotices = []; nativeCompaction = nil; nativeSupportsCompaction = false; nativeCompactionPending = false; nativeQueue = []; nativeQueueOmitted = 0; nativeSupportsQueue = false; nativeDiff = nil; nativeSupportsDiff = false; nativeDiffLoading = false; nativeDiffTimeout?.cancel(); nativeDiffTimeout = nil; interactions = []
@@ -476,10 +483,6 @@ final class PocketStore: ObservableObject {
             catch { self.error = error.localizedDescription; loadingHistory = false }
             return
         }
-        // Catalogs are per session: start the pull as soon as one is selected,
-        // so the composer palette has a snapshot to serve.
-        if let id { commandDirectory?.warm(id) }
-        syncCommandCatalog()
         do { try await followSelected() } catch { self.error = error.localizedDescription; loadingHistory = false }
     }
     private func followSelected() async throws {
@@ -541,32 +544,47 @@ final class PocketStore: ObservableObject {
         commandCatalogState = commandDirectory?.status(selectedID ?? "") ?? .cold
     }
 
-    /// The catalog entry one composer line resolves to, from the session's hot
-    /// snapshot only. The reference strong-waits `ensureReady` here
-    /// (dsh-client-ui-commands client.js:733-735); this port stays synchronous
-    /// because the composer calls it straight from a keystroke on the main
-    /// actor. The pull starts when the session is selected and restarts on
-    /// reconnect, so a ready snapshot is the normal case; a cold or failed
-    /// catalog resolves nothing and the line stays an ordinary message - the
-    /// behaviour the composer had before the catalog existed, and it never
-    /// blocks typing.
-    func resolvedCommand(_ line: String) -> CommandDescriptor? {
-        guard !usesNativeHarness, line.hasPrefix("/"), let id = selectedID else { return nil }
-        let name = parseCommand(line)?.name ?? submittedCommandName(line)
-        guard !name.isEmpty else { return nil }
-        return commandDirectory?.resolve(id, name)
+    /// Whether one composer line is a command line at all: the Host's own
+    /// parse, so the composer can route it to the catalog path before the
+    /// catalog is consulted. A line that does not parse (no leading slash, an
+    /// invalid name, a bare "/") stays an ordinary message, exactly like a
+    /// reference `matchEnter` miss.
+    func isCommandLine(_ line: String) -> Bool {
+        guard !usesNativeHarness else { return false }
+        return parseCommand(line.trimmingCharacters(in: .whitespacesAndNewlines)) != nil
     }
 
-    /// Execute one resolved command line through the Host's registry
-    /// (`commands/execute`). Admission is the only immediate answer: the
-    /// lifecycle (`command/run` / `command/done`) is durably logged and folds
-    /// into the transcript, so a successful command is never echoed here. A
-    /// refused or errored invocation that carried attachments leaves the draft
-    /// and the attachments in place for correction, like the reference client.
+    /// Execute one command line through the Host's registry
+    /// (`commands/execute`), strong-waiting the session's catalog first. Every
+    /// slash line that parses as a command takes this path: a cold, pending or
+    /// failed catalog is waited on - and repulled when it failed - so the line
+    /// is either executed or reported, never silently downgraded into a model
+    /// message (reference `matchEnter` and its "a warmup failure rejects"
+    /// rule, dsh-client-ui-commands client.js:699-711, 733-735). Admission is
+    /// the only immediate answer: the lifecycle (`command/run` /
+    /// `command/done`) is durably logged and folds into the transcript, so a
+    /// successful command is never echoed here. A refused or errored
+    /// invocation that carried attachments leaves the draft and the
+    /// attachments in place for correction, like the reference client.
     func executeCommand(_ line: String) async {
-        guard !usesNativeHarness, connected, let api, let id = selectedID, !submitting else { return }
+        guard !usesNativeHarness, connected, let api, let id = selectedID, !submitting, let directory = commandDirectory else { return }
+        let host = endpoint
         let text = line.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let descriptor = resolvedCommand(text) else { return }
+        guard let name = parseCommand(text)?.name, !name.isEmpty else { return }
+        submitting = true
+        defer { submitting = false }
+        let descriptors: [CommandDescriptor]
+        do { descriptors = try await directory.ensureReadyAsync(id) }
+        catch {
+            self.error = "Could not load the command catalog: " + commandErrorMessage(error)
+            return
+        }
+        guard host == endpoint, selectedID == id else { return }
+        // The catalog is authoritative once it is servable: a name it does not
+        // carry is reported instead of being submitted as model text.
+        guard let descriptor = descriptors.first(where: { $0.name == name }) else {
+            self.error = "Unknown or malformed command: " + text; return
+        }
         let attachments = images
         guard attachments.isEmpty || commandAdmitsAttachments(descriptor) else {
             error = "The /\(descriptor.name) command does not accept attachments. Remove them first."; return
@@ -578,9 +596,6 @@ final class PocketStore: ObservableObject {
             }
             submitted.append(wire)
         }
-        let host = endpoint
-        submitting = true
-        defer { submitting = false }
         do {
             let value = try await api.rpc("commands/execute", args: commandExecuteArguments(agentId: id, line: text, submittedAttachments: submitted))
             guard host == endpoint, selectedID == id else { return }

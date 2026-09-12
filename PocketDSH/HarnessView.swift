@@ -89,7 +89,12 @@ struct HarnessView: View {
     }
     private func completeCommand() {
         guard !commandMatches.isEmpty else { return }
-        store.draft = commandMatches[min(commandIndex, commandMatches.count - 1)].name
+        let suggestion = commandMatches[min(commandIndex, commandMatches.count - 1)]
+        // The reference's leading claim is "/name " with the trailing space
+        // (dsh-client-ui-commands client.js:775-783), so a row declaring an
+        // input line completes into argument position instead of stopping at
+        // the name.
+        store.draft = suggestion.descriptor?.input == nil ? suggestion.name : suggestion.name + " "
     }
     @AppStorage("harness.terminalInput") private var savedTerminalInput = false
     private var terminalInput: Bool {
@@ -126,14 +131,12 @@ struct HarnessView: View {
         if let local = localCommands.first(where: { $0.0 == command }) {
             runCommand(CommandSuggestion(name: local.0, detail: local.1, descriptor: nil)); return
         }
-        // A catalog command line: a command declaring an input line submits the
-        // line as typed, a bare one only while nothing follows the name
-        // (reference matchEnter, dsh-client-ui-commands client.js:712-758), and
-        // the store refuses attachments the command does not admit. A cold
-        // catalog resolves nothing, so the line stays an ordinary message -
-        // exactly the composer's behaviour before the catalog existed.
-        if let descriptor = store.resolvedCommand(command),
-           descriptor.input != nil || !command.contains(where: { $0.isWhitespace }) {
+        // A slash line that parses as a command always takes the command path:
+        // the store strong-waits the session's catalog - repulling it when the
+        // last pull failed - and reports the outcome, so a command line can
+        // never be silently downgraded into a model message (dsh-client-ui-commands
+        // matchEnter and its "a warmup failure rejects" rule, client.js:699-711).
+        if store.isCommandLine(command) {
             Task { await store.executeCommand(command) }
             return
         }

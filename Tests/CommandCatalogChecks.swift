@@ -9,7 +9,13 @@ import Foundation
         let result = parseCommand(line)!
         return (result.name, result.rawInput)
     }
-    static func main() throws {
+    /// Yield until the background wait reaches the expected state. A bounded
+    /// spin keeps the asynchronous checks deterministic without sleeping.
+    static func spin(_ reached: () -> Bool) async {
+        for _ in 0..<10_000 { if reached() { return }; await Task.yield() }
+        assert(false, "the background wait never reached the expected state")
+    }
+    static func main() async throws {
         // Descriptors: input absent, present with attachments true/false,
         // and attachments absent inside a present input.
         let full = CommandDescriptor(json(#"{"name":"compact","description":"Compact the session","input":{"hint":"compact [reason]","attachments":true}}"#))
@@ -76,7 +82,10 @@ import Foundation
         assert(submittedCommandName("/compact extra args") == "compact")
         print("PASS: submittedCommandName")
 
-        struct PullError: Error, Equatable { let message: String }
+        struct PullError: Error, Equatable, LocalizedError {
+            let message: String
+            var errorDescription: String? { message }
+        }
 
         // cold -> refresh -> ready; a ready snapshot resolves by name.
         var pulls = 0
@@ -344,5 +353,68 @@ import Foundation
         _ = fold.apply(json(#"{"type":"command/done","seq":9,"data":{"commandId":"c4","kind":"success","sourceEventSeq":-1}}"#))
         assert(fold.record("c4")?.outcome?.sourceEventSeq == nil, "a negative seq cannot point at an earlier event")
         print("PASS: command lifecycle fold")
+
+        // The $events emit mapping the store wires to the directory
+        // (dsh-client-ui-commands client.js:537-545).
+        assert(commandCatalogEvent(name: "commands/change", args: []) == .commandsChanged)
+        assert(commandCatalogEvent(name: "commands/change", args: [.string("ignored")]) == .commandsChanged, "commands/change carries no args")
+        assert(commandCatalogEvent(name: "agent-preset/selected", args: [.string("s1"), .string("preset")]) == .agentPresetSelected(sessionId: "s1"))
+        assert(commandCatalogEvent(name: "agent-preset/selected", args: [.string("s1")]) == nil, "a malformed preset emit changes nothing")
+        assert(commandCatalogEvent(name: "api-session/status", args: [.string("s1")]) == nil, "an unrelated emit changes nothing")
+        print("PASS: emit frame to catalog event mapping")
+
+        // The asynchronous strong wait (JS ensureReady, client.js:118-126): a
+        // cold entry starts the pull it needs and a pending entry joins the
+        // pull in flight; both return the winning snapshot.
+        var waitStarts: [(String, Int)] = []
+        let waited = CommandDirectory(startPull: { id, epoch in waitStarts.append((id, epoch)) })
+        let cold = Task { try await waited.ensureReadyAsync("s1") }
+        await spin { !waitStarts.isEmpty }
+        assert(waitStarts.count == 1 && waitStarts[0].0 == "s1" && waited.status("s1") == .pending, "the wait starts the pull it needs")
+        let joined = Task { try await waited.ensureReadyAsync("s1") }
+        await spin { (waited.entries["s1"]?.waiters.count ?? 0) == 2 }
+        assert(waitStarts.count == 1, "a pending entry joins the pull in flight")
+        waited.publish("s1", epoch: waitStarts[0].1, .success([descriptor("goal")]))
+        let coldResult = try await cold.value
+        let joinedResult = try await joined.value
+        assert(coldResult == [descriptor("goal")] && joinedResult == [descriptor("goal")])
+        assert(waited.status("s1") == .ready)
+        print("PASS: the strong wait serves a cold entry and joins a pending pull")
+
+        // A failed pull rejects the wait (the reference's "never a silent
+        // downgrade") and does not poison the key: the next wait repulls.
+        var failWaitStarts: [(String, Int)] = []
+        let failingWait = CommandDirectory(startPull: { id, epoch in failWaitStarts.append((id, epoch)) })
+        let rejected = Task { try await failingWait.ensureReadyAsync("s1") }
+        await spin { !failWaitStarts.isEmpty }
+        failingWait.publish("s1", epoch: failWaitStarts[0].1, .failure(PullError(message: "down")))
+        do {
+            _ = try await rejected.value
+            assert(false, "a failed warmup must reject the wait")
+        } catch let failure as CommandDirectory.WarmupFailure {
+            assert(failure.reason == "command directory warmup failed: down")
+        } catch { assert(false, "unexpected error: \(error)") }
+        assert(failingWait.status("s1") == .failed)
+        let retried = Task { try await failingWait.ensureReadyAsync("s1") }
+        await spin { failWaitStarts.count == 2 }
+        assert(failingWait.status("s1") == .pending, "the retry repulls a failed entry")
+        failingWait.publish("s1", epoch: failWaitStarts[1].1, .success([descriptor("recovered")]))
+        let retriedResult = try await retried.value
+        assert(retriedResult == [descriptor("recovered")])
+        print("PASS: a failed warmup rejects and the next wait repulls")
+
+        // A tear-down wakes the wait instead of stranding it, so a wait can
+        // never outlive the connection it was started for.
+        var tornStarts: [(String, Int)] = []
+        let torn = CommandDirectory(startPull: { id, epoch in tornStarts.append((id, epoch)) })
+        let stranded = Task { try await torn.ensureReadyAsync("s1") }
+        await spin { !tornStarts.isEmpty }
+        torn.removeAll()
+        await spin { tornStarts.count == 2 }
+        assert(torn.status("s1") == .pending, "the woken wait re-reads the dropped entry and repulls")
+        torn.publish("s1", epoch: tornStarts[1].1, .success([descriptor("after-teardown")]))
+        let strandedResult = try await stranded.value
+        assert(strandedResult == [descriptor("after-teardown")])
+        print("PASS: removeAll wakes a waiting strong wait")
     }
 }

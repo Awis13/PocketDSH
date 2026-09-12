@@ -324,9 +324,13 @@ final class CommandDirectory {
 
     /// Drop every cached entry. The reference directory lives as long as the
     /// plugin; this client drops it when a connection tears down, so a stale
-    /// snapshot can never answer for the next connection.
+    /// snapshot can never answer for the next connection. Waiters are woken
+    /// first: a strong-wait must re-read the state (and repull or reject)
+    /// instead of suspending forever on a connection that has gone away.
     func removeAll() {
+        let woken = entries.values.flatMap(\.waiters)
         entries.removeAll()
+        for wake in woken { wake() }
     }
 
     /// Synchronous exact-name lookup over one session's hot snapshot;
@@ -422,8 +426,9 @@ final class CommandDirectory {
     }
 
     /// JS settled(entry): register a once-resolve waiter woken by the next
-    /// winning publish. The JS abort-signal handling belongs to the C2
-    /// caller; the synchronous port has no signal.
+    /// winning publish. `ensureReadyAsync` drives this from the app; the JS
+    /// abort-signal handling has no counterpart here, so `removeAll` waking
+    /// the waiters is what keeps a wait from outliving its connection.
     func settle(_ sessionId: String, _ waiter: @escaping () -> Void) {
         var entry = entries[sessionId] ?? Entry()
         entry.waiters.append(waiter)
@@ -451,6 +456,49 @@ final class CommandDirectory {
                 throw WarmupFailure(reason: "command directory warmup failed: " + commandErrorMessage(entry.lastError))
             }
         }
+    }
+
+    /// JS ensureReady (client.js:118-126) as the asynchronous form the app
+    /// uses: strong-wait until one session's catalog is servable - ready
+    /// returns at once, cold/failed launch a fresh pull, pending joins the
+    /// pull in flight. A failed pull rejects the wait (the reference's "never a
+    /// silent downgrade") and repulls on the next wait instead of poisoning the
+    /// key.
+    func ensureReadyAsync(_ sessionId: String) async throws -> [CommandDescriptor] {
+        while true {
+            switch status(sessionId) {
+            case .ready:
+                return entries[sessionId]?.commands ?? []
+            case .pending:
+                break
+            case .cold, .failed:
+                refresh(sessionId)
+            }
+            await waitForPublish(sessionId)
+            if status(sessionId) == .failed, let entry = entries[sessionId] {
+                throw WarmupFailure(reason: "command directory warmup failed: " + commandErrorMessage(entry.lastError))
+            }
+        }
+    }
+
+    /// One settlement tick: suspend until the key's next winning publish. A
+    /// publish that already landed never registers a waiter, so a synchronous
+    /// pull cannot deadlock the wait, and a tear-down wakes the wait instead of
+    /// stranding it.
+    private func waitForPublish(_ sessionId: String) async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            let gate = OnceGate(continuation)
+            if status(sessionId) == .pending { settle(sessionId) { gate.resume() } }
+            else { gate.resume() }
+        }
+    }
+
+    /// Resume-once guard: a waiter may be woken by a publish and by a tear-down
+    /// in the same tick, and a checked continuation must resume exactly once.
+    private final class OnceGate {
+        private var continuation: CheckedContinuation<Void, Never>?
+        init(_ continuation: CheckedContinuation<Void, Never>) { self.continuation = continuation }
+        func resume() { let pending = continuation; continuation = nil; pending?.resume() }
     }
 
     private func notifyWaiters(_ sessionId: String) {
@@ -497,6 +545,18 @@ extension CommandDirectory {
         case .agentPresetSelected(let sessionId): resetSession(sessionId)
         case .connectionReset: resetConnected()
         }
+    }
+}
+
+/// The catalog decision one `$events` emit frame carries, or nil when the
+/// frame is not a catalog invalidation. The store wires the transport straight
+/// to this, so the reference's three registrations stay checkable without the
+/// store (which the offline gates cannot compile).
+func commandCatalogEvent(name: String, args: [JSON]) -> CommandCatalogEvent? {
+    switch name {
+    case "commands/change": return .commandsChanged
+    case "agent-preset/selected": return args.count == 2 ? .agentPresetSelected(sessionId: args[0].string) : nil
+    default: return nil
     }
 }
 
