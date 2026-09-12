@@ -79,7 +79,7 @@ struct HarnessView: View {
                 store.composerFocusRequest = UUID()
             } else {
                 store.draft = suggestion.name
-                Task { await store.executeCommand(suggestion.name) }
+                if let submission = store.composerSubmission() { Task { await store.executeCommand(submission) } }
             }
         }
     }
@@ -137,7 +137,11 @@ struct HarnessView: View {
         // never be silently downgraded into a model message (dsh-client-ui-commands
         // matchEnter and its "a warmup failure rejects" rule, client.js:699-711).
         if store.isCommandLine(command) {
-            Task { await store.executeCommand(command) }
+            // Freeze the composer in this action's own turn, before the store's
+            // send suspends on the catalog: the command path must send this line
+            // and these attachments, whatever the editor holds when the catalog
+            // answers.
+            if let submission = store.composerSubmission() { Task { await store.executeCommand(submission) } }
             return
         }
         guard canSend else { return }
@@ -145,7 +149,8 @@ struct HarnessView: View {
         composerFocused = false
         #endif
         stickToBottom = true; scrollRequest += 1
-        Task { await store.submit() }
+        let submission = store.composerSubmission()
+        Task { await store.submit(snapshot: submission) }
     }
     private func resumeFollowing() {
         stickToBottom = true

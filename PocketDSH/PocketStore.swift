@@ -598,35 +598,48 @@ final class PocketStore: ObservableObject {
         return parseCommand(line.trimmingCharacters(in: .whitespacesAndNewlines)) != nil
     }
 
-    /// Execute one command line through the Host's registry
-    /// (`commands/execute`), strong-waiting the session's catalog first. Every
-    /// slash line that parses as a command takes this path, and the wait is the
-    /// reference's `matchEnter` rule: a warmup failure reports a notice and
-    /// sends nothing ("a warmup failure rejects", dsh-client-ui-commands
-    /// client.js:699-711, 733), while a servable catalog that does not claim
-    /// the line - an unknown name (:735) or trailing arguments on a command
-    /// that declares no input line (:751) - hands it to the ordinary message
-    /// path with its draft and attachments. Admission is the only immediate
+    /// Freeze the composer for one send action. Main-actor synchronous by
+    /// design: the caller IS the action - the send button, the keyboard
+    /// shortcut, a palette row - so this states what the user sent before that
+    /// action suspends for the first time. Nil when there is nothing to freeze:
+    /// a native session (its own queue path is unchanged) or no connection and
+    /// session to address.
+    func composerSubmission() -> ComposerSubmission? {
+        guard !usesNativeHarness, connected, let id = selectedID else { return nil }
+        return ComposerSubmission(draft: draft, images: images, sessionID: id, endpoint: endpoint, catalogGeneration: commandDirectory.catalogGeneration)
+    }
+
+    /// Run one frozen composer action through the Host's registry
+    /// (`commands/execute`), strong-waiting the session's catalog first.
+    ///
+    /// The snapshot is the only content this method sends. The wait below can
+    /// take a whole round trip and the composer stays editable throughout, so
+    /// the line, the attachments, the session and the connection are all read
+    /// from the snapshot the user's action froze - never from the live composer
+    /// again. Every step after a suspension re-checks that identity
+    /// (`stillApplies`), so a reconnect or a session switch cancels the action
+    /// instead of issuing its RPC against the next connection.
+    ///
+    /// The wait is the reference's `matchEnter` rule: a warmup failure reports
+    /// a notice and sends nothing ("a warmup failure rejects",
+    /// dsh-client-ui-commands client.js:699-711, 733), while a servable catalog
+    /// that does not claim the line - an unknown name (:735) or trailing
+    /// arguments on a command that declares no input line (:751) - hands the
+    /// snapshot to the ordinary message path. Admission is the only immediate
     /// answer: the lifecycle (`command/run` / `command/done`) is durably
     /// logged and folds into the transcript, so a successful command is never
     /// echoed here. A refused or errored invocation that carried attachments
     /// leaves the draft and the attachments in place for correction, like the
     /// reference client.
-    func executeCommand(_ line: String) async {
-        guard !usesNativeHarness, connected, let api, let id = selectedID, !submitting else { return }
-        let host = endpoint
-        // The connection this dispatch belongs to. The endpoint and the
-        // session id cannot express it: a reconnect to the same server with
-        // the same session selected leaves both unchanged, so the old
-        // dispatch would keep going and issue its RPC against the new
-        // connection. The generation is the identity a teardown rotates.
-        let generation = commandDirectory.catalogGeneration
-        let text = line.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let name = parseCommand(text)?.name, !name.isEmpty else { return }
+    func executeCommand(_ snapshot: ComposerSubmission) async {
+        guard !usesNativeHarness, connected, let api, !submitting else { return }
+        let text = snapshot.text
+        guard parseCommand(text) != nil,
+              snapshot.stillApplies(sessionID: selectedID, endpoint: endpoint, catalogGeneration: commandDirectory.catalogGeneration) else { return }
         submitting = true
         defer { submitting = false }
         let descriptors: [CommandDescriptor]
-        do { descriptors = try await commandDirectory.ensureReadyAsync(id) }
+        do { descriptors = try await commandDirectory.ensureReadyAsync(snapshot.sessionID) }
         catch is CommandDirectory.CommandPullCancelled {
             // The connection changed under the wait and the catalog it was
             // warming is gone. Nothing is wrong and nothing may be sent: a
@@ -637,45 +650,57 @@ final class PocketStore: ObservableObject {
             self.error = "Could not load the command catalog: " + commandErrorMessage(error)
             return
         }
-        guard host == endpoint, selectedID == id, generation == commandDirectory.catalogGeneration else { return }
-        // A servable catalog that does not claim the line leaves it to the
-        // ordinary message path, draft and attachments included.
-        let resolved = descriptors.first { $0.name == name }
-        guard commandClaimsLine(text, descriptor: resolved), let descriptor = resolved else {
+        // The wait is exactly where the composer stops being what the user sent
+        // from: it may hold another draft, other attachments, another session or
+        // another connection by now. None of that belongs to this action, so
+        // the decision below is taken on the snapshot alone.
+        guard snapshot.stillApplies(sessionID: selectedID, endpoint: endpoint, catalogGeneration: commandDirectory.catalogGeneration) else { return }
+        switch resolveCommandDispatch(snapshot, descriptors: descriptors) {
+        case .message:
+            // A servable catalog that does not claim the line leaves it to the
+            // ordinary message path, with the snapshot's own text and
+            // attachments - not with whatever the composer holds by now.
             submitting = false
-            await submit()
-            return
+            await submit(snapshot: snapshot)
+        case .refusesAttachments(let message):
+            error = message
+        case .execute(let descriptor):
+            await executeClaimedCommand(snapshot, descriptor: descriptor, api: api)
         }
-        let attachments = images
-        guard attachments.isEmpty || commandAdmitsAttachments(descriptor) else {
-            error = "The /\(descriptor.name) command does not accept attachments. Remove them first."; return
+    }
+
+    /// The `commands/execute` leg of one frozen command action: the snapshot's
+    /// line and the snapshot's attachments, then the cleanup of exactly what
+    /// went out.
+    private func executeClaimedCommand(_ snapshot: ComposerSubmission, descriptor: CommandDescriptor, api: HarnessAPI) async {
+        guard let submitted = submissionAttachments(snapshot.images) else {
+            error = "An attachment cannot be submitted with /" + descriptor.name + "."; return
         }
-        var submitted: [JSON] = []
-        for attachment in attachments {
-            guard let wire = CommandSubmitAttachment(attachment.part).wire else {
-                error = "An attachment cannot be submitted with /" + descriptor.name + "."; return
-            }
-            submitted.append(wire)
+        func current() -> Bool {
+            snapshot.stillApplies(sessionID: selectedID, endpoint: endpoint, catalogGeneration: commandDirectory.catalogGeneration)
         }
         do {
-            guard generation == commandDirectory.catalogGeneration else { return }
-            let value = try await api.rpc("commands/execute", args: commandExecuteArguments(agentId: id, line: text, submittedAttachments: submitted))
-            guard host == endpoint, selectedID == id else { return }
-            guard value != .null else { self.error = "Unknown or malformed command: " + text; return }
+            guard current() else { return }
+            let value = try await api.rpc("commands/execute", args: commandExecuteArguments(agentId: snapshot.sessionID, line: snapshot.text, submittedAttachments: submitted))
+            guard current() else { return }
+            guard value != .null else { self.error = "Unknown or malformed command: " + snapshot.text; return }
             let execution = CommandExecution(value)
-            if !attachments.isEmpty, execution.result.isError {
+            if !snapshot.images.isEmpty, execution.result.isError {
                 self.error = execution.result.text ?? ("/" + descriptor.name + " failed")
                 return
             }
             error = nil
-            if draft.trimmingCharacters(in: .whitespacesAndNewlines) == text { draft = "" }
-            let sent = Set(attachments.map(\.id))
-            if !sent.isEmpty {
-                imageDrafts[imageDraftKey] = imageDrafts[imageDraftKey]?.filter { !sent.contains($0.id) }
-                images.removeAll { sent.contains($0.id) }
-                saveImageDrafts()
+            // Only what this action sent leaves the composer: the sent draft is
+            // cleared, a draft typed while the command ran stays, and an
+            // attachment added meanwhile is not dropped.
+            draft = snapshot.draftAfterSend(draft)
+            if !snapshot.images.isEmpty {
+                let key = snapshot.imageDraftKey
+                if let existing = imageDrafts[key] { imageDrafts[key] = snapshot.imagesAfterSend(existing) }
+                images = snapshot.imagesAfterSend(images)
+                saveImageDrafts(key: key)
             }
-        } catch { if host == endpoint { self.error = error.localizedDescription } }
+        } catch { if current() { self.error = error.localizedDescription } }
     }
     func createDefaultTask() async {
         // Omitting workspaceId uses the Harness server's working directory.
@@ -697,28 +722,41 @@ final class PocketStore: ObservableObject {
             newlyCreatedSession = selectedID
         } catch { self.error = error.localizedDescription }
     }
-    func submit(mode: String = "queue") async {
+    /// Send one message. `snapshot` is the composer state a send action froze
+    /// before its first suspension; a caller that does not freeze one (the steer
+    /// menu, the live probes, the native path) leaves it nil and the live
+    /// composer is read here instead, in one main-actor statement. Either way
+    /// this call reads the composer exactly once: the RPC payload and the
+    /// cleanup below both work from that value.
+    func submit(mode: String = "queue", snapshot: ComposerSubmission? = nil) async {
         if native != nil { await submitNative(mode: mode); return }
         guard let api, connected, let id = selectedID, !submitting else { return }
         guard !preparingImages, !selectingModel else { return }
-        let sendingEndpoint = endpoint
-        let sentDraft = draft
-        let text = sentDraft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty || !images.isEmpty else { return }
-        let sendingImages = images
+        let frozen = snapshot ?? ComposerSubmission(draft: draft, images: images, sessionID: id, endpoint: endpoint, catalogGeneration: commandDirectory.catalogGeneration)
+        // A snapshot of another session - or of a connection that has since been
+        // torn down - is never sent here: the user moved on and this action is
+        // not theirs any more.
+        guard frozen.stillApplies(sessionID: id, endpoint: endpoint, catalogGeneration: commandDirectory.catalogGeneration) else { return }
+        let sentDraft = frozen.draft
+        let text = frozen.text
+        guard !text.isEmpty || !frozen.images.isEmpty else { return }
+        let sendingImages = frozen.images
         do { try imageLimits.validate(sendingImages) } catch { self.error = error.localizedDescription; return }
         // A timeout keeps the same identity and text for an explicit retry, never an automatic resend.
-        let request = pendingRequest.flatMap { $0.session == id && $0.text == text && $0.imageIDs == sendingImages.map(\.id) ? $0 : nil } ?? (id: UUID().uuidString, text: text, session: id, imageIDs: sendingImages.map(\.id))
+        let request = pendingRequest.flatMap { frozen.isRetry(of: $0) ? $0 : nil } ?? (id: UUID().uuidString, text: text, session: id, imageIDs: frozen.imageIDs)
         pendingRequest = request; pendingText = text.isEmpty ? "Image" : text; submitting = true
         defer { submitting = false }
         do {
-            _ = try await api.rpc("session/prompt", args: ["request": .object(["sessionId": .string(id), "requestId": .string(request.id), "mode": .string(mode), "clientTimeZone": .string(TimeZone.current.identifier), "content": .array((text.isEmpty ? [] : [.object(["type": .string("text"), "text": .string(text)])]) + sendingImages.map(\.part))])])
-            guard endpoint == sendingEndpoint else { return }
-            let sentIDs = Set(sendingImages.map(\.id)), key = sendingEndpoint + "|" + id
-            imageDrafts[key] = imageDrafts[key]?.filter { !sentIDs.contains($0.id) }
-            if selectedID == id { images.removeAll { sentIDs.contains($0.id) } }
+            _ = try await api.rpc("session/prompt", args: ["request": .object(["sessionId": .string(id), "requestId": .string(request.id), "mode": .string(mode), "clientTimeZone": .string(TimeZone.current.identifier), "content": .array(promptContent(frozen))])])
+            // What leaves the composer is decided by the snapshot, not by the
+            // response: only a composer that still holds what this action sent
+            // loses it.
+            guard frozen.stillApplies(sessionID: selectedID, endpoint: endpoint, catalogGeneration: commandDirectory.catalogGeneration) else { return }
+            let key = frozen.imageDraftKey
+            if let existing = imageDrafts[key] { imageDrafts[key] = frozen.imagesAfterSend(existing) }
+            images = frozen.imagesAfterSend(images)
             saveImageDrafts(key: key)
-            if selectedID == id && draft == sentDraft { draft = "" }
+            draft = frozen.draftAfterSend(draft)
             if drafts[id] == sentDraft { drafts[id] = "" }
             error = nil
             reconcilePending()
