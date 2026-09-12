@@ -24,6 +24,7 @@
 		64C85387583C6D477097EE7A /* QueueDockView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 56106B6E42C165653F7CEDA4 /* QueueDockView.swift */; };
 		6AA8B323AAB5F1859C0355FF /* VoiceRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8F45255EB3E729C10CE13B85 /* VoiceRecorder.swift */; };
 		6B1B4FB32A1AC9BFB4B73BEA /* TurnNotificationState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5BA7754331250B9CF01F8A4F /* TurnNotificationState.swift */; };
+		73D3D093291C0C1068444FCD /* CommandCatalog.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1257454757A244737686E29E /* CommandCatalog.swift */; };
 		80C50DEC3D296393371771EE /* HarnessView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 19B8B07078D82DC7A7EE6EC4 /* HarnessView.swift */; };
 		873DD0232F9741F599714544 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 07CDD0CC0057F5866D24FF20 /* Assets.xcassets */; };
 		8A3284A72DB675093B2EB8B1 /* ShellBlockInteraction.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51A0DE6E9EE1DD8033673D14 /* ShellBlockInteraction.swift */; };
@@ -63,6 +64,7 @@
 		0A6ACA8367AD55DAF03625A7 /* HarnessProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HarnessProtocol.swift; sourceTree = "<group>"; };
 		0C0F59F2281C005DD28D2339 /* SymbolsNerdFontMono-Regular.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "SymbolsNerdFontMono-Regular.ttf"; sourceTree = "<group>"; };
 		10B1E247125D45F27D6465B8 /* SwiftTerm */ = {isa = PBXFileReference; lastKnownFileType = folder; name = SwiftTerm; path = Vendor/SwiftTerm; sourceTree = SOURCE_ROOT; };
+		1257454757A244737686E29E /* CommandCatalog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CommandCatalog.swift; sourceTree = "<group>"; };
 		19B8B07078D82DC7A7EE6EC4 /* HarnessView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HarnessView.swift; sourceTree = "<group>"; };
 		1A005021572717D11BE5AED6 /* PaneFocusNavigator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneFocusNavigator.swift; sourceTree = "<group>"; };
 		212067D3F85E4C892F86FBAD /* TurnNotifications.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TurnNotifications.swift; sourceTree = "<group>"; };
@@ -150,6 +152,7 @@
 				E44CCE33FA506477977F2202 /* Appearance.swift */,
 				07CDD0CC0057F5866D24FF20 /* Assets.xcassets */,
 				486CDE1EAA2F792AC9153AB0 /* AssistantMarkdown.swift */,
+				1257454757A244737686E29E /* CommandCatalog.swift */,
 				F88F3CD3883D2F6BFE7D5AE7 /* ConnectionView.swift */,
 				4536C46B3F5C4076165E8409 /* ContextStatusView.swift */,
 				9A23CDF070AEDF1D7FEED50A /* DemoData.swift */,
@@ -334,6 +337,7 @@
 			files = (
 				4A02EBFCFE7F078CC03880F1 /* Appearance.swift in Sources */,
 				FE7F024F37CCF50D8A612C40 /* AssistantMarkdown.swift in Sources */,
+				73D3D093291C0C1068444FCD /* CommandCatalog.swift in Sources */,
 				C103524CD83608A91CE30F86 /* ConnectionView.swift in Sources */,
 				B3E5A6229657B8C03CA87DEB /* ContextStatusView.swift in Sources */,
 				AB8C7FF9C25F4275D73B6A31 /* DemoData.swift in Sources */,

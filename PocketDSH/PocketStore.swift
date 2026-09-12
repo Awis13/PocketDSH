@@ -170,6 +170,14 @@ final class PocketStore: ObservableObject {
     private var drafts: [String: String] = [:]
     private var pendingRequest: (id: String, text: String, session: String, imageIDs: [UUID])?
     private var projectionStores: [String: SessionProjectionStore] = [:]
+    /// The per-session command catalog (`commands/list`), epoch-guarded by the
+    /// ported CommandDirectory. nil until the connection is set up.
+    private var commandDirectory: CommandDirectory?
+    /// The selected session's catalog snapshot as the composer palette renders
+    /// it, plus the cache state behind it. The directory is not observable, so
+    /// every publish and invalidation republishes these for SwiftUI.
+    @Published private(set) var commandCatalog: [CommandDescriptor] = []
+    @Published private(set) var commandCatalogState: CommandDirectory.State = .cold
     var selected: HarnessSession? { sessions.first { $0.id == selectedID } }
     var running: Bool { (selected?.running ?? false) || compactingContext }
     var liveReasoning: TranscriptRow? {
@@ -189,6 +197,11 @@ final class PocketStore: ObservableObject {
         if restoringPrimary, let data = UserDefaults.standard.data(forKey: "harness.primaryPane.v1"),
            let state = try? JSONDecoder().decode(SavedPane.self, from: data) { restorePane(state) }
         primaryPane = restoringPrimary
+        // The directory's fetch is an RPC, so the pull is handed back here and
+        // the outcome is published under the epoch the directory minted.
+        commandDirectory = CommandDirectory(startPull: { [weak self] sessionId, epoch in
+            self?.startCommandPull(sessionId, epoch: epoch)
+        })
         SavedConnections.remember(endpoint)
     }
 
@@ -247,6 +260,9 @@ final class PocketStore: ObservableObject {
         native?.disconnect(); native = nil; nativeRequests = []; nativeProtocolNotices = []; nativeCompaction = nil; nativeSupportsCompaction = false; nativeCompactionPending = false; nativeQueue = []; nativeQueueOmitted = 0; nativeSupportsQueue = false; nativeDiff = nil; nativeSupportsDiff = false; nativeDiffLoading = false; nativeDiffTimeout?.cancel(); nativeDiffTimeout = nil; nativeReady = false; nativeSubmission = nil; queueTextHandlers.removeAll(); api = nil
         socket?.cancel(with: .goingAway, reason: nil); socket = nil
         connected = false; connecting = false; loadingHistory = false; interactions = []; clientID = ""
+        // A catalog belongs to one Host connection: the next connection must
+        // never serve a snapshot the previous one warmed.
+        commandDirectory?.removeAll(); syncCommandCatalog()
     }
     func transcribeVoice(_ data: Data, endpoint: String) async throws -> String {
         guard connected, self.endpoint == endpoint, let api else { throw HarnessError(message: "Reconnect to DSH and retry transcription.") }
@@ -326,10 +342,17 @@ final class PocketStore: ObservableObject {
             if type == "ready" {
                 clientID = value["clientId"].string; connected = true; connecting = false; error = nil
                 connectionDiagnostic("websocket-connected")
+                // The reference client synthesizes `connection/reset` locally when the
+                // transport (re)connects (dsh-api-gateway client.js:1433), so every
+                // cached catalog is suspect; the directory drops and prewarms them.
+                commandDirectory?.apply(.connectionReset)
                 try await open("workspace/follow", id: "workspaces")
                 try await open("session/control", id: "control")
                 // Refresh the list after readiness; later event frames stay buffered in the socket.
                 await refresh()
+                // A selection restored before this connection has no warm entry yet.
+                if let id = selectedID { commandDirectory?.warm(id) }
+                syncCommandCatalog()
                 if selectedID != nil { try await followSelected() }
             } else if type == "waterfall" {
                 let item = Interaction(raw: value, clientID: clientID)
@@ -345,6 +368,10 @@ final class PocketStore: ObservableObject {
                     sessions.removeAll { $0.id == raw["sessionId"].string }; sessions.append(HarnessSession(raw: raw))
                 }
                 if event == "api-session/error", args.count == 2, args[0].string == selectedID { error = args[1].string }
+                // Catalog invalidation, wired one for one like the reference client
+                // (dsh-client-ui-commands client.js:537-545).
+                if event == "commands/change" { commandDirectory?.apply(.commandsChanged); syncCommandCatalog() }
+                if event == "agent-preset/selected", args.count == 2 { commandDirectory?.apply(.agentPresetSelected(sessionId: args[0].string)); syncCommandCatalog() }
             }
         } else if id == "workspaces" {
             if type == "baseline" { workspaces = value["value"]["items"].array.map { HarnessWorkspace(raw: $0) }; archived = Set(value["value"]["archivedSessionIds"].array.map(\.string)) }
@@ -449,6 +476,10 @@ final class PocketStore: ObservableObject {
             catch { self.error = error.localizedDescription; loadingHistory = false }
             return
         }
+        // Catalogs are per session: start the pull as soon as one is selected,
+        // so the composer palette has a snapshot to serve.
+        if let id { commandDirectory?.warm(id) }
+        syncCommandCatalog()
         do { try await followSelected() } catch { self.error = error.localizedDescription; loadingHistory = false }
     }
     private func followSelected() async throws {
@@ -467,6 +498,107 @@ final class PocketStore: ObservableObject {
             guard stream == followID else { return }
             transcript.prepend(page["records"].array); rows = assistantLive.merged(with: transcript.rows); hasMore = page["hasMore"].bool
         } catch { if stream == followID { self.error = error.localizedDescription } }
+    }
+
+    // MARK: - Session command catalog
+
+    /// The directory's pull seam. The ported directory drives its pulls
+    /// synchronously, while the RPC cannot be, so the pull is handed to the
+    /// main actor and its outcome published under the epoch the directory
+    /// minted (`CommandDirectory.publish`).
+    private nonisolated func startCommandPull(_ sessionId: String, epoch: Int) {
+        Task { @MainActor [weak self] in await self?.pullCommandCatalog(sessionId: sessionId, epoch: epoch) }
+    }
+
+    /// Issue one catalog pull for one session. A subagent session has no
+    /// catalog of its own, so the reference short-circuits it to an empty list
+    /// instead of calling `commands/list`; a pull that outlives its connection
+    /// publishes nothing.
+    private func pullCommandCatalog(sessionId: String, epoch: Int) async {
+        guard let directory = commandDirectory else { return }
+        let attempt = generation
+        func publish(_ outcome: Result<[CommandDescriptor], Error>) {
+            guard attempt == generation else { return }
+            directory.publish(sessionId, epoch: epoch, outcome)
+            syncCommandCatalog()
+        }
+        guard !usesNativeHarness else { publish(.success([])); return }
+        switch commandCatalogRequest(sessionId: sessionId, origin: sessions.first { $0.id == sessionId }?.raw["origin"].string ?? "") {
+        case .emptyCatalog:
+            publish(.success([]))
+        case .list(let agentId):
+            guard connected, let api else { publish(.failure(HarnessError(message: "the DSH connection is not ready"))); return }
+            do { publish(.success(commandDescriptors(try await api.rpc("commands/list", args: commandListArguments(agentId: agentId))))) }
+            catch { publish(.failure(error)) }
+        }
+    }
+
+    /// Republish the selected session's catalog snapshot for SwiftUI. The
+    /// directory itself is not observable, so every publish and invalidation
+    /// ends here.
+    private func syncCommandCatalog() {
+        commandCatalog = commandDirectory?.snapshot(selectedID ?? "") ?? []
+        commandCatalogState = commandDirectory?.status(selectedID ?? "") ?? .cold
+    }
+
+    /// The catalog entry one composer line resolves to, from the session's hot
+    /// snapshot only. The reference strong-waits `ensureReady` here
+    /// (dsh-client-ui-commands client.js:733-735); this port stays synchronous
+    /// because the composer calls it straight from a keystroke on the main
+    /// actor. The pull starts when the session is selected and restarts on
+    /// reconnect, so a ready snapshot is the normal case; a cold or failed
+    /// catalog resolves nothing and the line stays an ordinary message - the
+    /// behaviour the composer had before the catalog existed, and it never
+    /// blocks typing.
+    func resolvedCommand(_ line: String) -> CommandDescriptor? {
+        guard !usesNativeHarness, line.hasPrefix("/"), let id = selectedID else { return nil }
+        let name = parseCommand(line)?.name ?? submittedCommandName(line)
+        guard !name.isEmpty else { return nil }
+        return commandDirectory?.resolve(id, name)
+    }
+
+    /// Execute one resolved command line through the Host's registry
+    /// (`commands/execute`). Admission is the only immediate answer: the
+    /// lifecycle (`command/run` / `command/done`) is durably logged and folds
+    /// into the transcript, so a successful command is never echoed here. A
+    /// refused or errored invocation that carried attachments leaves the draft
+    /// and the attachments in place for correction, like the reference client.
+    func executeCommand(_ line: String) async {
+        guard !usesNativeHarness, connected, let api, let id = selectedID, !submitting else { return }
+        let text = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let descriptor = resolvedCommand(text) else { return }
+        let attachments = images
+        guard attachments.isEmpty || commandAdmitsAttachments(descriptor) else {
+            error = "The /\(descriptor.name) command does not accept attachments. Remove them first."; return
+        }
+        var submitted: [JSON] = []
+        for attachment in attachments {
+            guard let wire = CommandSubmitAttachment(attachment.part).wire else {
+                error = "An attachment cannot be submitted with /" + descriptor.name + "."; return
+            }
+            submitted.append(wire)
+        }
+        let host = endpoint
+        submitting = true
+        defer { submitting = false }
+        do {
+            let value = try await api.rpc("commands/execute", args: commandExecuteArguments(agentId: id, line: text, submittedAttachments: submitted))
+            guard host == endpoint, selectedID == id else { return }
+            guard value != .null else { self.error = "Unknown or malformed command: " + text; return }
+            let execution = CommandExecution(value)
+            if !attachments.isEmpty, execution.result.isError {
+                self.error = execution.result.text ?? ("/" + descriptor.name + " failed")
+                return
+            }
+            error = nil
+            if draft.trimmingCharacters(in: .whitespacesAndNewlines) == text { draft = "" }
+            let sent = Set(attachments.map(\.id))
+            if !sent.isEmpty {
+                imageDrafts[imageDraftKey] = imageDrafts[imageDraftKey]?.filter { !sent.contains($0.id) }
+                images.removeAll { sent.contains($0.id) }
+                saveImageDrafts()
+            }
+        } catch { if host == endpoint { self.error = error.localizedDescription } }
     }
     func createDefaultTask() async {
         // Omitting workspaceId uses the Harness server's working directory.
@@ -667,8 +799,8 @@ final class PocketStore: ObservableObject {
         guard let api, connected, item.sessionID == selectedID, item.clientID == clientID,
               interactions.contains(where: { $0.id == item.id }) else { return false }
         do {
-            let value = try await api.rpc("commands/execute", args: ["agentId": .string(item.sessionID),
-                "line": .string("/permission danger-full-access"), "images": .array([])])
+            let value = try await api.rpc("commands/execute", args: commandExecuteArguments(agentId: item.sessionID,
+                line: "/permission danger-full-access", submittedAttachments: []))
             guard value["result"]["kind"].string == "success" else {
                 throw HarnessError(message: value["result"]["text"].string.isEmpty ? "Full access was not confirmed by Harness." : value["result"]["text"].string)
             }

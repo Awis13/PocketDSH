@@ -232,5 +232,117 @@ import Foundation
         waiting.refresh("s1")
         assert(woken == 2, "each publish wakes the waiters registered for it")
         print("PASS: directory ensureReady and waiters")
+
+        // Wire arguments: the exact keys the Host declares. commands/execute
+        // takes submittedAttachments; there is no images parameter, and an
+        // invocation that carries one is rejected.
+        let listArgs = commandListArguments(agentId: "s1")
+        assert(Set(listArgs.keys) == ["agentId"] && listArgs["agentId"] == .string("s1"), "commands/list is addressed by agentId")
+        let executeArgs = commandExecuteArguments(agentId: "s1", line: "/goal set x", submittedAttachments: [])
+        assert(Set(executeArgs.keys) == ["agentId", "line", "submittedAttachments"], "commands/execute carries no images parameter")
+        assert(executeArgs["agentId"] == .string("s1") && executeArgs["line"] == .string("/goal set x"))
+        assert(executeArgs["submittedAttachments"] == .array([]))
+        let imageAttachment = CommandSubmitAttachment(json(#"{"type":"image","mediaType":"image/png","data":"aGk="}"#))
+        let withImage = commandExecuteArguments(agentId: "s1", line: "/x", submittedAttachments: [imageAttachment.wire!])
+        assert(withImage["submittedAttachments"]?.array.count == 1)
+        assert(withImage["images"] == nil, "the removed parameter never reappears")
+        assert(commandDescriptors(json(#"[{"name":"a","description":"d"},{"name":"b","description":"d"}]"#)).map(\.name) == ["a", "b"])
+        assert(commandDescriptors(.null).isEmpty, "a non-array payload reads as an empty catalog")
+        print("PASS: command wire arguments")
+
+        // Submission attachment wire arms: an image carries its media type and
+        // data (name only when present); a file must carry its receipt, and a
+        // receipt-less file has no union arm, so it fails instead of sending "".
+        let plainImage = CommandSubmitAttachment(json(#"{"type":"image","mediaType":"image/png","data":"aGk="}"#)).wire
+        assert(plainImage == .object(["type": .string("image"), "mediaType": .string("image/png"), "data": .string("aGk=")]))
+        let namedImage = CommandSubmitAttachment(json(#"{"type":"image","mediaType":"image/jpeg","data":"aGk=","name":"shot.jpg"}"#)).wire
+        assert(namedImage?["name"] == .string("shot.jpg"))
+        assert(CommandSubmitAttachment(json(#"{"type":"file","receiptId":"r7"}"#)).wire == .object(["type": .string("file"), "receiptId": .string("r7")]))
+        assert(CommandSubmitAttachment(json(#"{"type":"file"}"#)).wire == nil, "a file without a receipt fails instead of sending an empty string")
+        assert(CommandSubmitAttachment(json(#"{"type":"file","receiptId":""}"#)).wire == nil, "an empty receipt is not a union arm")
+        print("PASS: submission attachment wire arms")
+
+        // Attachment admission: only an explicit true admits attachments.
+        assert(commandAdmitsAttachments(full) && !commandAdmitsAttachments(bare) && !commandAdmitsAttachments(off) && !commandAdmitsAttachments(absent))
+        print("PASS: attachment admission")
+
+        // Catalog origin: a subagent session short-circuits before the RPC.
+        assert(commandCatalogRequest(sessionId: "s1", origin: "subagent") == .emptyCatalog)
+        assert(commandCatalogRequest(sessionId: "s1", origin: "primary") == .list(agentId: "s1"), "the session id is the agent id")
+        assert(commandCatalogRequest(sessionId: "s1", origin: "") == .list(agentId: "s1"))
+        print("PASS: catalog origin decision")
+
+        // The three wired invalidation events, against a directory whose
+        // snapshot changes on every pull.
+        var eventPull = 0
+        let evented = CommandDirectory { _ in eventPull += 1; return [descriptor("v\(eventPull)")] }
+        evented.refresh("a"); evented.refresh("b")
+        assert(eventPull == 2)
+        evented.apply(.commandsChanged)
+        assert(eventPull == 4 && evented.status("a") == .ready && evented.status("b") == .ready, "commands/change repulls every touched key, ready snapshots keep serving")
+        let afterSoftA = evented.entries["a"]!.commands.first?.name
+        evented.apply(.agentPresetSelected(sessionId: "a"))
+        assert(eventPull == 5, "agent-preset/selected refetches exactly one session")
+        assert(evented.entries["a"]!.commands.first?.name != afterSoftA, "the reset session's snapshot is replaced")
+        assert(evented.status("b") == .ready, "the other session is untouched")
+        evented.apply(.connectionReset)
+        assert(eventPull == 7 && evented.status("a") == .ready && evented.status("b") == .ready, "connection/reset prewarms every entry")
+        print("PASS: catalog invalidation events")
+
+        // The async seam: the directory mints the epoch and the caller
+        // publishes. A stale outcome is dropped, the latest pull wins, and the
+        // waiters wake only on the winning publish.
+        var starts: [(String, Int)] = []
+        let asyncDirectory = CommandDirectory(startPull: { id, epoch in starts.append((id, epoch)) })
+        assert(asyncDirectory.status("s1") == .cold && starts.isEmpty, "no pull until something asks for one")
+        asyncDirectory.refresh("s1")
+        assert(starts.count == 1 && starts[0].0 == "s1" && starts[0].1 == 1)
+        assert(asyncDirectory.status("s1") == .pending && asyncDirectory.resolve("s1", "x") == nil, "a pull in flight serves nothing")
+        var wokenOnce = 0
+        asyncDirectory.settle("s1") { wokenOnce += 1 }
+        asyncDirectory.publish("s1", epoch: 99, .success([descriptor("stale")]))
+        assert(asyncDirectory.status("s1") == .pending && asyncDirectory.resolve("s1", "stale") == nil, "an outcome under a foreign epoch is dropped")
+        assert(wokenOnce == 0, "a dropped publish wakes nobody")
+        asyncDirectory.refresh("s1")
+        assert(starts.count == 2 && starts[1].1 == 2, "a second pull bumps the epoch")
+        asyncDirectory.publish("s1", epoch: starts[0].1, .success([descriptor("old")]))
+        assert(asyncDirectory.resolve("s1", "old") == nil, "the superseded pull's outcome never lands")
+        asyncDirectory.publish("s1", epoch: starts[1].1, .success([descriptor("new")]))
+        assert(asyncDirectory.status("s1") == .ready && asyncDirectory.resolve("s1", "new") != nil && wokenOnce == 1)
+        asyncDirectory.refresh("s1")
+        assert(starts.count == 3 && asyncDirectory.status("s1") == .ready, "a repull keeps the ready snapshot serving")
+        asyncDirectory.publish("s1", epoch: starts[1].1, .failure(PullError(message: "late")))
+        assert(asyncDirectory.status("s1") == .ready && asyncDirectory.resolve("s1", "new") != nil, "the superseded epoch cannot demote the entry")
+        asyncDirectory.publish("s1", epoch: starts[2].1, .failure(PullError(message: "down")))
+        assert(asyncDirectory.status("s1") == .failed && (asyncDirectory.entries["s1"]!.lastError as? PullError)?.message == "down", "the latest epoch publishes its failure")
+        asyncDirectory.warm("s1")
+        assert(starts.count == 4, "warm repulls a failed entry")
+        asyncDirectory.removeAll()
+        assert(asyncDirectory.status("s1") == .cold && starts.count == 4, "removeAll drops every snapshot without pulling")
+        print("PASS: async pull epoch guard and removeAll")
+
+        // The durable lifecycle fold: run opens a record, done settles it in
+        // place, duplicates are idempotent, a re-delivered run never reopens a
+        // settled command, and a done whose run is outside the window renders.
+        var fold = CommandLifecycleFold()
+        assert(fold.apply(json(#"{"type":"assistant/chunk","seq":1,"data":{}}"#)) == nil, "a non-lifecycle frame changes nothing")
+        assert(fold.apply(json(#"{"type":"command/run","seq":2,"data":{"commandId":"c1","name":"goal","args":" set x"}}"#)) == 0)
+        assert(fold.records.count == 1 && fold.record("c1")?.invocation == "/goal set x")
+        assert(fold.record("c1")?.settled == false && commandRow(fold.record("c1")!).complete == false, "an unsettled command reads running")
+        assert(fold.apply(json(#"{"type":"command/done","seq":3,"data":{"commandId":"c1","kind":"success","text":"goal set","sourceEventSeq":2}}"#)) == 0)
+        assert(fold.records.count == 1 && fold.record("c1")?.outcome?.sourceEventSeq == 2)
+        assert(commandRow(fold.record("c1")!).complete && commandRow(fold.record("c1")!).failed == false)
+        assert(fold.apply(json(#"{"type":"command/done","seq":4,"data":{"commandId":"c1","kind":"success","text":"goal set"}}"#)) == 0 && fold.records.count == 1, "a duplicate done lands on the same record")
+        assert(fold.apply(json(#"{"type":"command/run","seq":5,"data":{"commandId":"c1","name":"other"}}"#)) == 0)
+        assert(fold.record("c1")?.name == "goal" && fold.record("c1")?.outcome != nil, "a re-delivered run never reopens a settled command")
+        assert(fold.apply(json(#"{"type":"command/done","seq":6,"data":{"commandId":"c2","kind":"error","text":"no such command"}}"#)) == 1)
+        assert(fold.record("c2")?.name == nil && fold.record("c2")?.outcome?.isError == true)
+        assert(commandRow(fold.record("c2")!).failed && commandRow(fold.record("c2")!).complete, "a done without its run still renders as failed")
+        assert(fold.apply(json(#"{"type":"command/run","seq":7,"data":{"commandId":"","name":"x"}}"#)) == nil, "an empty commandId is not a record")
+        _ = fold.apply(json(#"{"type":"command/done","seq":8,"data":{"commandId":"c3","kind":"error","text":"boom","sourceEventSeq":9}}"#))
+        assert(fold.record("c3")?.outcome?.sourceEventSeq == nil, "an error's sourceEventSeq is meaningless")
+        _ = fold.apply(json(#"{"type":"command/done","seq":9,"data":{"commandId":"c4","kind":"success","sourceEventSeq":-1}}"#))
+        assert(fold.record("c4")?.outcome?.sourceEventSeq == nil, "a negative seq cannot point at an earlier event")
+        print("PASS: command lifecycle fold")
     }
 }

@@ -126,6 +126,70 @@ func commandDescriptors(_ value: JSON) -> [CommandDescriptor] {
     value.array.map { CommandDescriptor($0) }
 }
 
+// MARK: - RPC wire arguments
+
+extension CommandSubmitAttachment {
+    /// The exact wire object for one submission attachment, or nil when the
+    /// value has no valid union arm at all. An image is the dsh-attachment
+    /// EncodedImageAttachment fields under `type: "image"`; a file is the
+    /// staged receipt reference. The union declares neither an empty receipt
+    /// nor a null form, so a caller that gets nil refuses the submission
+    /// instead of sending an empty receipt the Host would reject.
+    var wire: JSON? {
+        var fields: [String: JSON] = ["type": .string(type)]
+        if isFile {
+            guard let receiptId, !receiptId.isEmpty else { return nil }
+            fields["receiptId"] = .string(receiptId)
+        } else {
+            guard !mediaType.isEmpty, !data.isEmpty else { return nil }
+            fields["mediaType"] = .string(mediaType)
+            fields["data"] = .string(data)
+            if let name { fields["name"] = .string(name) }
+        }
+        return .object(fields)
+    }
+}
+
+/// The `commands/list` wire arguments: `list: (agentId: SessionId)`
+/// (dsh-commands/lib/typert.remote-client.d.ts). Sessions are always
+/// agent-backed, so the session id IS the agent id the Host expects.
+func commandListArguments(agentId: String) -> [String: JSON] {
+    ["agentId": .string(agentId)]
+}
+
+/// The `commands/execute` wire arguments:
+/// `execute: (agentId, line, submittedAttachments)`
+/// (dsh-commands/lib/typert.remote-client.d.ts). The third parameter is
+/// `submittedAttachments`; the Host declares no `images` parameter, so an
+/// invocation carrying attachments under any other name is rejected.
+func commandExecuteArguments(agentId: String, line: String, submittedAttachments: [JSON]) -> [String: JSON] {
+    ["agentId": .string(agentId), "line": .string(line), "submittedAttachments": .array(submittedAttachments)]
+}
+
+/// Whether one command admits an invocation that carries attachments. The
+/// reference refuses the submission otherwise (dsh-client-ui-commands
+/// client.js matchEnter: `desc.input.attachments !== true`), so the caller
+/// keeps the draft and the attachments instead of dropping them.
+func commandAdmitsAttachments(_ descriptor: CommandDescriptor) -> Bool {
+    descriptor.input?.attachments == true
+}
+
+/// Where one session's command catalog comes from.
+enum CommandCatalogRequest: Equatable {
+    /// The `commands/list` RPC, addressed to the session's own agent.
+    case list(agentId: String)
+    /// A subagent session: no RPC, and the catalog is empty.
+    case emptyCatalog
+}
+
+/// Decide one catalog pull. The reference client short-circuits a subagent
+/// session to an empty list before the RPC (dsh-client-ui-commands
+/// client.js:519-524): the subagent has no interactive command surface of its
+/// own, and the Host would answer for the parent's composition.
+func commandCatalogRequest(sessionId: String, origin: String) -> CommandCatalogRequest {
+    origin == "subagent" ? .emptyCatalog : .list(agentId: sessionId)
+}
+
 // MARK: - Line parsing
 
 /// `dsh-commands` parseCommand, ported 1:1. The JS original (lib/index.js)
@@ -188,6 +252,9 @@ private func isCommandLineWhitespace(_ scalar: UInt32) -> Bool {
 
 // MARK: - Directory cache
 
+/// One pull's outcome as a caller reports it back to the directory.
+typealias CommandFetchOutcome = Result<[CommandDescriptor], Error>
+
 /// The session-keyed command catalog cache - a full port of
 /// dsh-client-ui-commands' CommandDirectory (lib/client.js).
 ///
@@ -223,15 +290,43 @@ final class CommandDirectory {
     }
 
     private(set) var entries: [String: Entry] = [:]
-    private let fetchCommands: (String) throws -> [CommandDescriptor]
+    /// The synchronous pull the offline checks drive.
+    private let fetchCommands: ((String) throws -> [CommandDescriptor])?
+    /// The asynchronous pull the app hands to its RPC. The JS fetch is a
+    /// promise, which a Swift closure cannot be, so the pull is split: the
+    /// directory mints the epoch and hands the caller (sessionId, epoch), and
+    /// the caller publishes the outcome back under it.
+    private let startPull: ((String, Int) -> Void)?
 
     init(fetchCommands: @escaping (String) throws -> [CommandDescriptor]) {
         self.fetchCommands = fetchCommands
+        self.startPull = nil
+    }
+
+    /// The async-caller seam: every pull this directory starts (warm,
+    /// invalidateAll, resetSession, resetConnected, ensureReady, refresh) goes
+    /// to `startPull`, whose outcome must be published with `publish`.
+    init(startPull: @escaping (String, Int) -> Void) {
+        self.fetchCommands = nil
+        self.startPull = startPull
     }
 
     /// Current cache status for one session; "cold" when never touched.
     func status(_ sessionId: String) -> State {
         entries[sessionId]?.state ?? .cold
+    }
+
+    /// The hot snapshot one session serves, or [] when the entry is not ready.
+    func snapshot(_ sessionId: String) -> [CommandDescriptor] {
+        guard let entry = entries[sessionId], entry.state == .ready else { return [] }
+        return entry.commands
+    }
+
+    /// Drop every cached entry. The reference directory lives as long as the
+    /// plugin; this client drops it when a connection tears down, so a stale
+    /// snapshot can never answer for the next connection.
+    func removeAll() {
+        entries.removeAll()
     }
 
     /// Synchronous exact-name lookup over one session's hot snapshot;
@@ -282,35 +377,48 @@ final class CommandDirectory {
     /// demoted while the pull flies. Returns the pull's epoch.
     @discardableResult
     func refresh(_ sessionId: String) -> Int {
+        let epoch = beginPull(sessionId)
+        if let startPull {
+            startPull(sessionId, epoch)
+            return epoch
+        }
+        var outcome: CommandFetchOutcome
+        do { outcome = .success(try fetchCommands!(sessionId)) }
+        catch { outcome = .failure(error) }
+        publish(sessionId, epoch: epoch, outcome)
+        return epoch
+    }
+
+    /// Open one pull: bump the key's epoch and mark it pending. A caller whose
+    /// fetch is asynchronous publishes its outcome with `publish` under the
+    /// returned epoch; the synchronous `refresh` is this plus the fetch.
+    @discardableResult
+    func beginPull(_ sessionId: String) -> Int {
         var entry = entries[sessionId] ?? Entry()
         entry.epoch += 1
-        let epoch = entry.epoch
         if entry.state != .ready { entry.state = .pending }
         entries[sessionId] = entry
-        var outcome: Result<[CommandDescriptor], Error>?
-        do { outcome = .success(try fetchCommands(sessionId)) }
-        catch { outcome = .failure(error) }
-        if var current = entries[sessionId] {
-            switch outcome! {
-            case .success(let commands):
-                if epoch == current.epoch {
-                    current.commands = commands
-                    current.state = .ready
-                    current.lastError = nil
-                    entries[sessionId] = current
-                }
-            case .failure(let error):
-                if epoch == current.epoch {
-                    current.commands = []
-                    current.state = .failed
-                    current.lastError = error
-                    entries[sessionId] = current
-                }
-            }
+        return entry.epoch
+    }
+
+    /// Publish one pull's outcome. Ignored unless the epoch is still the key's
+    /// latest pull (the epoch guard) - a stale outcome never lands, and the
+    /// winning publish is what wakes the waiters.
+    func publish(_ sessionId: String, epoch: Int, _ outcome: CommandFetchOutcome) {
+        guard let current = entries[sessionId], current.epoch == epoch else { return }
+        var entry = current
+        switch outcome {
+        case .success(let commands):
+            entry.commands = commands
+            entry.state = .ready
+            entry.lastError = nil
+        case .failure(let error):
+            entry.commands = []
+            entry.state = .failed
+            entry.lastError = error
         }
-        // finally: wake waiters only on a winning publish.
-        if entries[sessionId]?.epoch == epoch { notifyWaiters(sessionId) }
-        return epoch
+        entries[sessionId] = entry
+        notifyWaiters(sessionId)
     }
 
     /// JS settled(entry): register a once-resolve waiter woken by the next
@@ -362,3 +470,36 @@ func commandErrorMessage(_ error: Error?) -> String {
     if let localized = error as? LocalizedError, let description = localized.errorDescription { return description }
     return "\(error)"
 }
+
+// MARK: - Invalidation events
+
+/// The events the reference client wires to the directory
+/// (dsh-client-ui-commands client.js:537-545). Keeping them as values lets the
+/// offline checks assert the cache decision without a transport.
+enum CommandCatalogEvent: Equatable {
+    /// `commands/change`, no args: a registry mutation may affect any session.
+    case commandsChanged
+    /// `agent-preset/selected`, args [sessionId, presetId]: one session's
+    /// effective composition changed.
+    case agentPresetSelected(sessionId: String)
+    /// `connection/reset`: the transport (re)connected, so every snapshot is
+    /// suspect (dsh-api-gateway client.js:1433 emits it on connect).
+    case connectionReset
+}
+
+extension CommandDirectory {
+    /// Apply one wired event, mirroring the reference's three registrations
+    /// one for one: soft invalidation of every touched key, one session's
+    /// reset, or the hard reset of every key.
+    func apply(_ event: CommandCatalogEvent) {
+        switch event {
+        case .commandsChanged: invalidateAll()
+        case .agentPresetSelected(let sessionId): resetSession(sessionId)
+        case .connectionReset: resetConnected()
+        }
+    }
+}
+
+// The durable command lifecycle fold lives in HarnessProtocol.swift, next to
+// Transcript.rows, which consumes it: that file also compiles without this one
+// (scripts/check-protocol.sh, scripts/check-native.sh).

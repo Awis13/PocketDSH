@@ -156,6 +156,109 @@ struct TranscriptRow: Identifiable, Equatable {
     var shell: NativeBlock?
 }
 
+// MARK: - Command lifecycle fold
+
+/// `CommandResult` as the durable `command/done` event carries it. `kind` is
+/// "success" or "error"; `text` is the handler's verbatim outcome when it
+/// produced one.
+struct CommandOutcome: Equatable {
+    var kind = ""
+    var text: String?
+    var sourceEventSeq: Int?
+    var isError: Bool { kind == "error" }
+}
+
+/// One paired command lifecycle record: `command/run` opens it and the
+/// `command/done` with the same commandId settles it - the web chat's command
+/// node (dsh-client-ui-chat client.js:5713-5743 commandFromRun /
+/// commandFromDone). `seq` and `name`/`args` stay at the run's values, so a
+/// settled command keeps its place and its invocation.
+struct CommandRecord: Equatable {
+    var commandId = ""
+    var seq = 0
+    var name: String?
+    var args: String?
+    var outcome: CommandOutcome?
+    var settled: Bool { outcome != nil }
+    /// The invocation as a composer line: "/name" plus the recorded raw input.
+    var invocation: String? { name.map { "/" + $0 + (args ?? "") } }
+}
+
+/// The incremental fold over one session's durable event stream, in arrival
+/// order. Both lifecycle events are log-only appends on the Host, so the fold
+/// is the only durable source for a command's outcome - it survives reconnect
+/// and restart because it is recomputed from the transcript, and duplicate,
+/// re-delivered and out-of-order frames land on the same record.
+struct CommandLifecycleFold {
+    private(set) var records: [CommandRecord] = []
+    private var indexByCommandId: [String: Int] = [:]
+
+    /// Fold one event. An event that is not a command lifecycle frame changes
+    /// nothing and reports nil; otherwise the affected record's index.
+    @discardableResult
+    mutating func apply(_ event: JSON) -> Int? {
+        let type = event["type"].string
+        guard type == "command/run" || type == "command/done" else { return nil }
+        let data = event["data"], commandId = data["commandId"].string
+        guard !commandId.isEmpty else { return nil }
+        if type == "command/run" {
+            // A re-delivered run never reopens a settled command: its payload
+            // is already known, and the outcome is the newer fact.
+            if let i = indexByCommandId[commandId] {
+                if records[i].name == nil {
+                    records[i].name = data["name"].string
+                    if case .string(let args) = data["args"] { records[i].args = args }
+                }
+                return i
+            }
+            var record = CommandRecord(commandId: commandId, seq: event["seq"].int)
+            record.name = data["name"].string
+            if case .string(let args) = data["args"] { record.args = args }
+            return append(record)
+        }
+        // command/done: a success may point at the authoritative domain event;
+        // an error's seq would be meaningless, so the reference drops it.
+        let kind = data["kind"].string
+        var outcome = CommandOutcome(kind: kind)
+        if case .string(let text) = data["text"] { outcome.text = text }
+        if kind == "success", case .number = data["sourceEventSeq"] {
+            let seq = data["sourceEventSeq"].int
+            if seq >= 0 { outcome.sourceEventSeq = seq }
+        }
+        if let i = indexByCommandId[commandId] {
+            records[i].outcome = outcome
+            return i
+        }
+        // A done whose run sits outside the loaded window still renders; the
+        // reference's fallback node carries no name either.
+        return append(CommandRecord(commandId: commandId, seq: event["seq"].int, outcome: outcome))
+    }
+
+    /// The record one commandId folded to, if any.
+    func record(_ commandId: String) -> CommandRecord? {
+        indexByCommandId[commandId].map { records[$0] }
+    }
+
+    private mutating func append(_ record: CommandRecord) -> Int {
+        records.append(record)
+        let i = records.count - 1
+        indexByCommandId[record.commandId] = i
+        return i
+    }
+}
+
+/// One command's transcript row: the invocation plus its settled state. A
+/// command whose done has not landed yet reads as running, exactly like the
+/// reference card's null outcome.
+func commandRow(_ record: CommandRecord) -> TranscriptRow {
+    let invocation = record.invocation ?? "Command"
+    let state = record.outcome.map { $0.text ?? ($0.isError ? "failed" : "done") } ?? "running"
+    return TranscriptRow(id: "command-" + record.commandId, kind: .notice,
+                         text: invocation + " - " + state,
+                         detail: record.outcome?.text ?? "",
+                         complete: record.settled, failed: record.outcome?.isError == true)
+}
+
 // Fold the human transcript, preserving historical messages across compaction.
 // Final assistant messages replace their own streaming blocks, never earlier turns.
 struct Transcript {
@@ -182,9 +285,25 @@ struct Transcript {
             if let i = rows.firstIndex(where: { $0.id == id }) { rows[i].text += text }
             else { rows.append(.init(id: id, kind: kind, text: text, complete: false)) }
         }
+        // Command lifecycle frames are durable log-only appends: their row is
+        // the fold's record, placed at the run's position and settled in place
+        // by the paired done, so a reload rebuilds the same row.
+        var commands = CommandLifecycleFold()
+        func foldCommand(_ event: JSON) {
+            let commandId = event["data"]["commandId"].string
+            guard commands.apply(event) != nil, let record = commands.record(commandId) else { return }
+            let row = commandRow(record)
+            // Locate the row by its stable id: later frames prune and reorder
+            // `rows` (assistant/message drops streamed deltas), so an index
+            // captured at the run would settle the wrong command.
+            if let i = rows.firstIndex(where: { $0.id == row.id }) { rows[i] = row }
+            else { rows.append(row) }
+        }
         for e in events {
             let d = e["data"], type = e["type"].string, seq = e["seq"].int
             switch type {
+            case "command/run", "command/done":
+                foldCommand(e)
             case "user/message":
                 if d["source"]["kind"].string == "user" {
                     rows.append(.init(id: "u-\(seq)", kind: .user, text: d["content"].array.filter { $0["type"].string == "text" }.map { $0["text"].string }.joined(separator: "\n"), images: d["content"].array.filter { $0["type"].string == "image" }.map { $0["attachment"] }))

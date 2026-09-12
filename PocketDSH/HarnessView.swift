@@ -76,6 +76,17 @@ struct HarnessView: View {
         }
         let command = store.draft.trimmingCharacters(in: .whitespacesAndNewlines)
         if commands.contains(where: { $0.0 == command }) { runCommand(command); return }
+        // A catalog command line: a command declaring an input line submits the
+        // line as typed, a bare one only while nothing follows the name
+        // (reference matchEnter, dsh-client-ui-commands client.js:712-758), and
+        // the store refuses attachments the command does not admit. A cold
+        // catalog resolves nothing, so the line stays an ordinary message -
+        // exactly the composer's behaviour before the catalog existed.
+        if let descriptor = store.resolvedCommand(command),
+           descriptor.input != nil || !command.contains(where: { $0.isWhitespace }) {
+            Task { await store.executeCommand(command) }
+            return
+        }
         guard canSend else { return }
         #if !targetEnvironment(macCatalyst)
         composerFocused = false
