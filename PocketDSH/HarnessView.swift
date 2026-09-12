@@ -15,8 +15,8 @@ struct HarnessView: View {
     @State private var commandsDismissed = false
     @State private var creatingTask = false
     /// The backend the routing table is asked about. The decision itself lives
-    /// in ComposerCommandRouting, off the URL scheme, so the checks can drive
-    /// both sides.
+    /// in ComposerCommandRouting and is passed in as this value, so the checks
+    /// can drive both backends without a store or a transport.
     private var composerBackend: ComposerBackend { store.usesNativeHarness ? .nativeHarness : .dsh }
     private var commandPaletteVisible: Bool {
         !commandsDismissed && store.draft.hasPrefix("/") && !store.draft.contains(where: { $0.isWhitespace })
@@ -60,15 +60,28 @@ struct HarnessView: View {
                 guard store.connected else { return }
                 store.draft = ""; creatingTask = true
                 Task { await store.createDefaultTask(); creatingTask = false }
-            default:
-                // The remaining local command is the native editor compaction.
-                // The route only reaches it on the backend whose table has the
-                // row, so there is no name literal here for a later DSH line to
-                // match by accident. A host that does not advertise the
+            case "/compact":
+                // The local editor compaction, named explicitly: a future row
+                // added to the table below must not inherit this action by
+                // falling into a default. The route reaches it on the backend
+                // whose table carries the row only, so a DSH /compact line
+                // never arrives here; a host that does not advertise the
                 // capability still refuses in the store.
                 Task { await store.compactContext(fromEditor: true) }
+            default:
+                // Unreachable: every name in the table is cased above and the
+                // route returns rows from that table only, so a new local
+                // command fails closed here instead of running another one's
+                // action.
+                break
             }
         case .server:
+            // The store strong-waits the session's catalog before deciding, so
+            // this branch normally arrives with the resolved descriptor. A nil
+            // descriptor is unreachable in practice: the host validates every
+            // catalog name against /^[a-z][a-z0-9_-]*$/u (dsh-commands
+            // lib/index.js:71,143), so a catalog row parses back to itself and
+            // resolves. The guard stays as a fail-closed belt.
             guard let descriptor = suggestion.descriptor else { return }
             // A command that declares an input line claims the composer with
             // its leading token; a bare command runs at once (reference
