@@ -363,6 +363,16 @@ import Foundation
         assert(commandCatalogEvent(name: "api-session/status", args: [.string("s1")]) == nil, "an unrelated emit changes nothing")
         print("PASS: emit frame to catalog event mapping")
 
+        // The matchEnter claim decision once the catalog is servable: an input
+        // command claims the line as typed, a no-input command only its bare
+        // token, and an unknown name is never claimed (client.js:735, 747-752).
+        assert(commandClaimsLine("/compact now", descriptor: full), "an input command claims the line as typed")
+        assert(commandClaimsLine("/compact", descriptor: full))
+        assert(commandClaimsLine("/goal", descriptor: bare), "a no-input command claims its bare token")
+        assert(!commandClaimsLine("/goal clear", descriptor: bare), "trailing arguments on a no-input command are not claimed")
+        assert(!commandClaimsLine("/goal clear", descriptor: nil), "an unknown name is not claimed")
+        print("PASS: the matchEnter claim decision")
+
         // The asynchronous strong wait (JS ensureReady, client.js:118-126): a
         // cold entry starts the pull it needs and a pending entry joins the
         // pull in flight; both return the winning snapshot.

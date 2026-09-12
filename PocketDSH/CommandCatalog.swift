@@ -560,6 +560,19 @@ func commandCatalogEvent(name: String, args: [JSON]) -> CommandCatalogEvent? {
     }
 }
 
+/// The reference `matchEnter` claim decision once the catalog is servable: the
+/// command path owns the line only when its name resolves and the command
+/// either declares an input line or the line is its bare token
+/// (dsh-client-ui-commands client.js:747-752). An unknown name (client.js:735)
+/// and trailing arguments on a command that declares no input line
+/// (client.js:751) are not claimed, so the ordinary message path owns them. The
+/// one outcome that is never downgraded is a warmup failure, which is reported
+/// before this decision is reached.
+func commandClaimsLine(_ line: String, descriptor: CommandDescriptor?) -> Bool {
+    guard let descriptor else { return false }
+    return descriptor.input != nil || !line.contains(where: { $0.isWhitespace })
+}
+
 // The durable command lifecycle fold lives in HarnessProtocol.swift, next to
 // Transcript.rows, which consumes it: that file also compiles without this one
 // (scripts/check-protocol.sh, scripts/check-native.sh).

@@ -556,16 +556,18 @@ final class PocketStore: ObservableObject {
 
     /// Execute one command line through the Host's registry
     /// (`commands/execute`), strong-waiting the session's catalog first. Every
-    /// slash line that parses as a command takes this path: a cold, pending or
-    /// failed catalog is waited on - and repulled when it failed - so the line
-    /// is either executed or reported, never silently downgraded into a model
-    /// message (reference `matchEnter` and its "a warmup failure rejects"
-    /// rule, dsh-client-ui-commands client.js:699-711, 733-735). Admission is
-    /// the only immediate answer: the lifecycle (`command/run` /
-    /// `command/done`) is durably logged and folds into the transcript, so a
-    /// successful command is never echoed here. A refused or errored
-    /// invocation that carried attachments leaves the draft and the
-    /// attachments in place for correction, like the reference client.
+    /// slash line that parses as a command takes this path, and the wait is the
+    /// reference's `matchEnter` rule: a warmup failure reports a notice and
+    /// sends nothing ("a warmup failure rejects", dsh-client-ui-commands
+    /// client.js:699-711, 733), while a servable catalog that does not claim
+    /// the line - an unknown name (:735) or trailing arguments on a command
+    /// that declares no input line (:751) - hands it to the ordinary message
+    /// path with its draft and attachments. Admission is the only immediate
+    /// answer: the lifecycle (`command/run` / `command/done`) is durably
+    /// logged and folds into the transcript, so a successful command is never
+    /// echoed here. A refused or errored invocation that carried attachments
+    /// leaves the draft and the attachments in place for correction, like the
+    /// reference client.
     func executeCommand(_ line: String) async {
         guard !usesNativeHarness, connected, let api, let id = selectedID, !submitting, let directory = commandDirectory else { return }
         let host = endpoint
@@ -580,10 +582,13 @@ final class PocketStore: ObservableObject {
             return
         }
         guard host == endpoint, selectedID == id else { return }
-        // The catalog is authoritative once it is servable: a name it does not
-        // carry is reported instead of being submitted as model text.
-        guard let descriptor = descriptors.first(where: { $0.name == name }) else {
-            self.error = "Unknown or malformed command: " + text; return
+        // A servable catalog that does not claim the line leaves it to the
+        // ordinary message path, draft and attachments included.
+        let resolved = descriptors.first { $0.name == name }
+        guard commandClaimsLine(text, descriptor: resolved), let descriptor = resolved else {
+            submitting = false
+            await submit()
+            return
         }
         let attachments = images
         guard attachments.isEmpty || commandAdmitsAttachments(descriptor) else {
