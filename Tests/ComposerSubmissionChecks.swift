@@ -79,6 +79,12 @@ import Foundation
         // during the wait, on the command path as well.
         assert(claimed.draftAfterSend("something else") == "something else", "a new draft survives a successful command")
         assert(claimed.draftAfterSend("  /compact  ") == "", "a draft that differs only in whitespace is the sent content")
+        // The attachment that went out is dropped; anything attached meanwhile
+        // is kept. The composer still holds the sent one, which is what makes
+        // this a cleanup and not a no-op.
+        assert(claimed.imagesAfterSend([a, b]) == [b], "the sent attachment leaves the composer")
+        assert(unknown.imagesAfterSend([a, b, b]) == [b, b], "only the sent attachment leaves the composer")
+        assert(claimed.imagesAfterSend([b]) == [b] && claimed.imagesAfterSend([]) == [], "nothing else is touched")
         let imageOnly = composer(draft: "   ", images: [a])
         assert(imageOnly.draftAfterSend("   ") == "" && imageOnly.text.isEmpty)
         assert(promptContent(imageOnly).count == 1 && imageNames(of: promptContent(imageOnly)) == ["a.jpg"])
