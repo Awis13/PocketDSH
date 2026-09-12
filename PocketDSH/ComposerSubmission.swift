@@ -104,7 +104,7 @@ struct ComposerSubmission {
 /// store's state at the moment a pending action is answered, as one value.
 /// `sessionID` is nil when nothing is selected (or the store is disconnected
 /// from the DSH Host), which no snapshot ever matches.
-struct LiveConnectionIdentity: Equatable {
+struct LiveConnectionIdentity {
     var sessionID: String?
     var endpoint: String
     var catalogGeneration: Int
@@ -167,6 +167,13 @@ enum CommandDispatch: Equatable {
     /// descriptor. The snapshot's attachments ride along only when the command
     /// declares attachment input; that check happens before this case returns.
     case execute(CommandDescriptor)
+    /// The catalog claims the line, and the line is the access escalation: the
+    /// Host applies a permission preset the moment its handler sees the line, so
+    /// this is the one claimed command that asks the user first and is dispatched
+    /// only from that answer (`FullAccessPolicy`, `FullAccessGate`). Deciding it
+    /// here - in the table the offline checks drive - is what keeps the rule out
+    /// of the store, which no gate compiles.
+    case confirmFullAccess(CommandDescriptor)
     /// The catalog does not claim the line: an unknown name, or trailing
     /// arguments on a command that declares no input line. The ordinary message
     /// path owns it, with the snapshot's own text and attachments.
@@ -191,6 +198,11 @@ func resolveCommandDispatch(_ snapshot: ComposerSubmission, descriptors: [Comman
     guard snapshot.images.isEmpty || commandAdmitsAttachments(descriptor) else {
         return .refusesAttachments("The /\(descriptor.name) command does not accept attachments. Remove them first.")
     }
+    // The refusal above comes first: an escalation submitted with attachments is
+    // refused like any other command that takes none, and never reaches the
+    // question. Everything else the catalog claims runs, except the one line that
+    // changes the session's access policy.
+    guard !FullAccessPolicy.isEscalation(line: text) else { return .confirmFullAccess(descriptor) }
     return .execute(descriptor)
 }
 

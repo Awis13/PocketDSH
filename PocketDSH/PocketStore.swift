@@ -350,6 +350,12 @@ final class PocketStore: ObservableObject {
                     guard !Task.isCancelled, self.generation == token else { return }
                     self.socket?.cancel(with: .goingAway, reason: nil)
                     self.connected = false; self.interactions = []
+                    // The escalation question names the connection it was asked
+                    // on; a carrier that comes back is a new one (a new client id
+                    // and a re-warmed catalog), so the unanswered question is
+                    // dropped here as well as on a teardown - a reopened socket
+                    // must not resurrect an action the user has not answered.
+                    self.clearAccessConfirmation()
                     self.error = "Connection interrupted. " + error.localizedDescription
                     self.connectionDiagnostic("websocket-failed", error: error)
                     if attempt < 4 { try? await Task.sleep(nanoseconds: UInt64(min(8, 1 << attempt)) * 1_000_000_000) }
@@ -377,6 +383,11 @@ final class PocketStore: ObservableObject {
             if type == "ready" {
                 clientID = value["clientId"].string; connected = true; connecting = false; error = nil
                 connectionDiagnostic("websocket-connected")
+                // A ready frame is a fresh carrier connection, with its own
+                // client id: an escalation question asked on the previous one is
+                // no longer answerable, so it is dropped before anything can be
+                // dispatched against the new stream.
+                clearAccessConfirmation()
                 // The reference client synthesizes `connection/reset` locally when the
                 // transport (re)connects (dsh-api-gateway client.js:1433), so every
                 // cached catalog is suspect; the directory drops and prewarms them.
@@ -706,15 +717,14 @@ final class PocketStore: ObservableObject {
         case .refusesAttachments(let message):
             error = message
         case .execute(let descriptor):
-            // One claimed line is not a command run but a policy change: the
-            // escalation is the only dispatch that asks first, and its answer is
-            // what sends it (FullAccessPolicy/FullAccessGate). Nothing reaches
-            // `commands/execute` before the user enables full access.
-            guard !FullAccessPolicy.isEscalation(line: snapshot.text) else {
-                requestFullAccess(.command(snapshot, descriptor))
-                return
-            }
             await executeClaimedCommand(snapshot, descriptor: descriptor, api: api)
+        case .confirmFullAccess(let descriptor):
+            // One claimed line is not a command run but a policy change: the
+            // dispatch table marks the escalation, and this is the only route
+            // that asks - and the answer is what sends it (`FullAccessGate`).
+            // Nothing reaches `commands/execute` before the user enables full
+            // access.
+            requestFullAccess(.command(snapshot, descriptor))
         }
     }
 
@@ -1014,7 +1024,7 @@ final class PocketStore: ObservableObject {
         guard accessConfirmation?.id == id else { return }
         accessConfirmation = nil
         let live = connected ? liveConnectionIdentity : nil
-        _ = await fullAccessGate.confirm(id: id, live: live, busy: submitting, command: { [weak self] snapshot, descriptor in
+        let outcome = await fullAccessGate.confirm(id: id, live: live, busy: submitting, command: { [weak self] snapshot, descriptor in
             guard let self, !self.submitting, self.connected, let api = self.api else { return }
             self.submitting = true
             defer { self.submitting = false }
@@ -1025,6 +1035,11 @@ final class PocketStore: ObservableObject {
             defer { self.fullAccessExecuting = false }
             if await self.enableFullAccess(for: item) { await self.answer(item, value: .string("allowed-once")) }
         })
+        // The answer found no action to run - the session or the connection moved
+        // under the question, or another send owns the store - so nothing was
+        // enabled or sent. Saying so beats a dialog that closes as if it had
+        // worked.
+        if outcome == .rejected { error = "Full access was not enabled: the session or the connection changed. Send it again." }
     }
 
     /// Drop an unanswered escalation question without a decision. Its action
