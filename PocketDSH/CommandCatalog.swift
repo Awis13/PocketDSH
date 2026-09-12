@@ -301,7 +301,9 @@ final class CommandDirectory {
     /// generation at mint time, so a token outlives its connection: after
     /// `removeAll` both the generation moved on and the entry is gone, and
     /// neither a fresh pull nor a fresh connection can be addressed with it.
-    struct CommandPullToken: Equatable {
+    /// Hashable so a caller can key its in-flight pulls by identity (the
+    /// store's connection-scoped cancellation does).
+    struct CommandPullToken: Equatable, Hashable {
         let sessionId: String
         let epoch: Int
         let catalogGeneration: Int
