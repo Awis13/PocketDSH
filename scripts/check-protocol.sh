@@ -12,3 +12,9 @@ xcrun swiftc -parse-as-library PocketDSH/HarnessProtocol.swift PocketDSH/Session
 .build/checks/session-projection-checks
 xcrun swiftc -parse-as-library PocketDSH/HarnessProtocol.swift PocketDSH/CommandCatalog.swift Tests/CommandCatalogChecks.swift -o .build/checks/command-catalog-checks
 .build/checks/command-catalog-checks
+# The Remote stream coordinator is the production code PocketStore drives; the
+# check compiles and exercises it, not a copy of its identity rules. Its live
+# probe stays opt-in through DSH_STREAM_CHECK_COOKIE / DSH_LIVE_LOG.
+rm -f .build/checks/stream-checks
+xcrun swiftc -parse-as-library PocketDSH/HarnessProtocol.swift PocketDSH/HarnessAPI.swift PocketDSH/RemoteStreamConnection.swift Tests/HarnessStreamChecks.swift -o .build/checks/stream-checks
+.build/checks/stream-checks
