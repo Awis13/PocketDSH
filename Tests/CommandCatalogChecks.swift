@@ -435,6 +435,10 @@ struct PullError: Error, Equatable, LocalizedError {
         // and a late abandon could fail a healthy catalog.
         try await catalogIdentityChecks()
         print("PASS: catalog pull identity across clears")
+
+        // The store's connection-scoped pull bookkeeping, which lives in
+        // CommandCatalog.swift so this gate can compile and drive it.
+        await commandPullConnectionChecks()
     }
 
     /// The cross-connection regression group. Each check drives the exact
@@ -576,5 +580,182 @@ struct PullError: Error, Equatable, LocalizedError {
                "the synchronous repull replaces the snapshot")
         assert(syncToken != newer, "a fresh pull mints a fresh identity")
         print("PASS: the synchronous repull mints a fresh identity")
+
+        // A wait whose outcome was already published, and whose generation was
+        // cleared in the same main-actor pass before the task could resume.
+        // The publish removes the waiter and resumes the continuation; the
+        // code after it runs before the resumed task does, so removeAll, the
+        // next connection's pull and its publish all happen while that task is
+        // still runnable. The old wait must end cancelled - before the
+        // generation binding it resumed, re-read the map and served the new
+        // connection's snapshot as its own answer.
+        var raced: [CommandDirectory.CommandPullToken] = []
+        let raceDirectory = CommandDirectory(startPull: { token in raced.append(token) })
+        let racy = Task { () -> String in
+            do {
+                let result = try await raceDirectory.ensureReadyAsync("s1")
+                return "SERVED " + (result.first?.name ?? "empty")
+            } catch is CommandDirectory.CommandPullCancelled {
+                return "CANCELLED"
+            } catch {
+                return "FAILED " + commandErrorMessage(error)
+            }
+        }
+        await spin { raceDirectory.entries["s1"]?.waiters.count == 1 }
+        assert(raced.count == 1)
+        raceDirectory.publish(raced[0], .success([descriptor("old")]))
+        raceDirectory.removeAll()
+        let fresh = raceDirectory.refresh("s1")
+        raceDirectory.publish(fresh, .success([descriptor("NEW CONNECTION")]))
+        let racedOutcome = await racy.value
+        assert(racedOutcome == "CANCELLED", "a wait cleared before its task resumed must end cancelled, got \(racedOutcome)")
+        assert(raceDirectory.status("s1") == .ready && raceDirectory.resolve("s1", "NEW CONNECTION") != nil,
+               "the new connection's own catalog is untouched by the old wait")
+        print("PASS: a wait cleared before its task resumed ends cancelled")
+    }
+
+    /// A stand-in for the RPC one pull issues. It answers only when the gate
+    /// is opened, which is what lets a check hold a pull inside its request.
+    actor FakeCommandAPI {
+        private(set) var calls = 0
+        private(set) var parked = 0
+        private var waiting: [CheckedContinuation<Void, Never>] = []
+
+        /// Every request parks until it is released: the checks decide when the
+        /// transport answers, so a teardown can land before it, during it, or
+        /// long after it.
+        func rpc() async -> [CommandDescriptor] {
+            calls += 1
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                parked += 1
+                waiting.append(continuation)
+            }
+            return [descriptor("goal")]
+        }
+
+        func release() {
+            let held = waiting
+            waiting = []
+            for continuation in held { continuation.resume() }
+        }
+    }
+
+    /// The store's connection-scoped pull table: everything a pull does about
+    /// its connection is decided here, on the main actor, before the transport
+    /// is touched. Each case gets its own table and its own transport, so the
+    /// request count of one case cannot be confused with another's.
+    @MainActor
+    static func commandPullConnectionChecks() async {
+        let directory = CommandDirectory(startPull: { _ in })
+
+        /// The pull body as the store writes it, with the transport replaced
+        /// by a fake: the stale guards and the publish/abandon arms are the
+        /// production ones.
+        @MainActor func run(_ token: CommandDirectory.CommandPullToken,
+                            _ connection: CommandPullConnection,
+                            _ api: FakeCommandAPI) async {
+            let attempt = directory.catalogGeneration
+            func publish(_ outcome: Result<[CommandDescriptor], Error>) {
+                if attempt == directory.catalogGeneration {
+                    directory.publish(token, outcome)
+                } else {
+                    directory.abandon(token, reason: PullError(message: "the connection was reset"))
+                }
+            }
+            guard !connection.isStale(token), !Task.isCancelled else { return }
+            guard !connection.isStale(token), !Task.isCancelled else {
+                publish(.failure(PullError(message: "the DSH connection is not ready")))
+                return
+            }
+            let commands = await api.rpc()
+            publish(.success(commands))
+        }
+
+        // 1. A normal pull: the table holds it before its body can run, one
+        // request, ready, and the table is left clean.
+        let normalConnection = CommandPullConnection(directory: directory)
+        let normalAPI = FakeCommandAPI()
+        directory.refresh("s1")
+        let normal = directory.currentToken("s1")!
+        normalConnection.bind(normal) { await run(normal, normalConnection, normalAPI) }
+        assert(normalConnection.jobs[normal] != nil, "bind registers the pull before its task can run")
+        while await normalAPI.parked == 0 { await Task.yield() }
+        await normalAPI.release()
+        await spin { directory.status("s1") == .ready && normalConnection.jobs.isEmpty }
+        let normalCalls = await normalAPI.calls
+        assert(normalCalls == 1 && directory.resolve("s1", "goal") != nil,
+               "a normal pull issues one request, publishes and leaves the table")
+        print("PASS: a normal pull publishes and leaves the connection table")
+
+        // 2. The regression the reviewer reproduced: the pull's connection
+        // dies before the body runs. The pull is in the table from bind time,
+        // so stop() cancels that very task and removeAll() kills its identity;
+        // when the body finally runs it must observe both and issue nothing.
+        // The pre-fix store registered the pull one task hop late and captured
+        // the connection identity inside the body, so this pull issued its
+        // request against the next connection's transport.
+        let lateConnection = CommandPullConnection(directory: directory)
+        let lateAPI = FakeCommandAPI()
+        directory.refresh("s2")
+        let late = directory.currentToken("s2")!
+        lateConnection.bind(late) {
+            await Task.yield()                       // the pre-fix extra task hop
+            guard !lateConnection.isStale(late), !Task.isCancelled else { return }
+            _ = await lateAPI.rpc()
+        }
+        lateConnection.stop()
+        directory.removeAll()
+        await Task.yield()
+        await Task.yield()
+        let lateCalls = await lateAPI.calls
+        assert(lateCalls == 0, "a pull whose connection died before its body ran issues no request")
+        assert(directory.status("s2") == .cold, "the dead pull's outcome never lands")
+        print("PASS: a pull whose connection died before its RPC is not issued")
+
+        // 3. Disconnect while the RPC is in flight: the late outcome of the
+        // dead connection must be dropped, it cannot land on the new pull.
+        let flyingConnection = CommandPullConnection(directory: directory)
+        let flyingAPI = FakeCommandAPI()
+        directory.refresh("s3")
+        let flying = directory.currentToken("s3")!
+        flyingConnection.bind(flying) { await run(flying, flyingConnection, flyingAPI) }
+        while await flyingAPI.parked == 0 { await Task.yield() }
+        flyingConnection.stop()
+        directory.removeAll()
+        directory.refresh("s3")
+        let replacement = directory.currentToken("s3")!
+        assert(replacement != flying, "the new connection mints a different identity")
+        await flyingAPI.release()                            // the dead RPC finally answers
+        await Task.yield()
+        await Task.yield()
+        assert(directory.status("s3") == .pending,
+               "the dead connection's late outcome is dropped, the new pull stays in flight")
+        directory.publish(replacement, .success([descriptor("fresh")]))
+        assert(directory.status("s3") == .ready && directory.resolve("s3", "fresh") != nil)
+        assert(directory.resolve("s3", "goal") == nil, "the dead connection's snapshot never lands")
+        print("PASS: a disconnect during the RPC drops the dead outcome")
+
+        // 4. The wait of the dead connection ends cancelled and is not
+        // re-homed: the new connection's pull serves only its own waiter.
+        let parkedConnection = CommandPullConnection(directory: directory)
+        let parkedAPI = FakeCommandAPI()
+        directory.refresh("s4")
+        let parked = directory.currentToken("s4")!
+        parkedConnection.bind(parked) { await run(parked, parkedConnection, parkedAPI) }
+        let oldWait = Task { try await directory.ensureReadyAsync("s4") }
+        await spin { directory.entries["s4"]?.waiters.count == 1 }
+        parkedConnection.stop()
+        directory.removeAll()
+        do {
+            _ = try await oldWait.value
+            assert(false, "the old wait must not resume with the new connection's data")
+        } catch is CommandDirectory.CommandPullCancelled {
+        } catch { assert(false, "unexpected error: \(error)") }
+        let newWait = Task { try await directory.ensureReadyAsync("s4") }
+        await spin { directory.entries["s4"]?.waiters.count == 1 }
+        directory.publish(directory.currentToken("s4")!, .success([descriptor("fresh")]))
+        let served = try? await newWait.value
+        assert(served == [descriptor("fresh")], "the new connection's waiter is served its own snapshot")
+        print("PASS: the dead connection's wait ends cancelled and only the new waiter is served")
     }
 }
