@@ -264,12 +264,6 @@ final class PocketStore: ObservableObject {
     }
     func disconnect() {
         nativeReconnect?.cancel(); nativeReconnect = nil
-        // The generation is the connection's identity and rotating it is how
-        // the teardown is announced to everything already in flight, so the
-        // outgoing value has to be read first: the pulls below are keyed by
-        // it, and after the rotation they would look like the new
-        // connection's and be left running.
-        let dead = generation
         generation = UUID(); connectionTask?.cancel(); connectionTask = nil
         nativeShell?.disconnect(); nativeShell = nil
         native?.disconnect(); native = nil; nativeRequests = []; nativeProtocolNotices = []; nativeCompaction = nil; nativeSupportsCompaction = false; nativeCompactionPending = false; nativeQueue = []; nativeQueueOmitted = 0; nativeSupportsQueue = false; nativeDiff = nil; nativeSupportsDiff = false; nativeDiffLoading = false; nativeDiffTimeout?.cancel(); nativeDiffTimeout = nil; nativeReady = false; nativeSubmission = nil; queueTextHandlers.removeAll(); api = nil
@@ -280,9 +274,9 @@ final class PocketStore: ObservableObject {
         // dead connection must not go on flying. Cancelling is best effort
         // (an RPC already on the wire cannot be recalled), but it does stop
         // the pulls that have not issued their RPC yet: every pull of this
-        // connection is in the table before its task can run, and the cancel
-        // sets the task's flag synchronously on the main actor while the body
-        // re-checks its identity before it touches the transport. The
+        // connection is in the table before its task can run, so the stop
+        // below reaches them all, and their bodies re-check the identity this
+        // generation rotation invalidates before touching the transport. The
         // directory's identity guard makes the outcome of an already-sent
         // RPC harmless.
         commandConnection.stop()

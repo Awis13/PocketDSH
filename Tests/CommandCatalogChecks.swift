@@ -662,8 +662,13 @@ struct PullError: Error, Equatable, LocalizedError {
                     directory.abandon(token, reason: PullError(message: "the connection was reset"))
                 }
             }
+            // The first guard is the store's pre-RPC check: a stale identity
+            // or a cancelled task means the pull belongs to a dead connection
+            // and nothing is attempted at all. The second is the store's
+            // readiness check, which reports a failure only while the
+            // identity is still current - the operation has to hear back.
             guard !connection.isStale(token), !Task.isCancelled else { return }
-            guard !connection.isStale(token), !Task.isCancelled else {
+            guard !connection.isStale(token) else {
                 publish(.failure(PullError(message: "the DSH connection is not ready")))
                 return
             }
