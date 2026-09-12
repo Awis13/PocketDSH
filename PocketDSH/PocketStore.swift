@@ -748,16 +748,21 @@ final class PocketStore: ObservableObject {
         defer { submitting = false }
         do {
             _ = try await api.rpc("session/prompt", args: ["request": .object(["sessionId": .string(id), "requestId": .string(request.id), "mode": .string(mode), "clientTimeZone": .string(TimeZone.current.identifier), "content": .array(promptContent(frozen))])])
-            // What leaves the composer is decided by the snapshot, not by the
-            // response: only a composer that still holds what this action sent
-            // loses it.
-            guard frozen.stillApplies(sessionID: selectedID, endpoint: endpoint, catalogGeneration: commandDirectory.catalogGeneration) else { return }
+            // A successful send removes exactly what it sent. The sending
+            // session is the one whose saved composer it cleans: that session's
+            // draft store loses what went out even if the user selected another
+            // session while the RPC was in flight - returning to it must not
+            // resurrect a message that already left - while the live composer is
+            // touched only while it still shows that session.
             let key = frozen.imageDraftKey
-            if let existing = imageDrafts[key] { imageDrafts[key] = frozen.imagesAfterSend(existing) }
-            images = frozen.imagesAfterSend(images)
-            saveImageDrafts(key: key)
-            draft = frozen.draftAfterSend(draft)
+            if endpoint == frozen.endpoint, let existing = imageDrafts[key] {
+                imageDrafts[key] = frozen.imagesAfterSend(existing)
+                saveImageDrafts(key: key)
+            }
             if drafts[id] == sentDraft { drafts[id] = "" }
+            guard frozen.stillApplies(sessionID: selectedID, endpoint: endpoint, catalogGeneration: commandDirectory.catalogGeneration) else { return }
+            images = frozen.imagesAfterSend(images)
+            draft = frozen.draftAfterSend(draft)
             error = nil
             reconcilePending()
         } catch { self.error = "Send not confirmed: \(error.localizedDescription). Check the conversation before retrying." }
