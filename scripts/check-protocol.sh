@@ -14,6 +14,12 @@ xcrun swiftc -parse-as-library PocketDSH/HarnessProtocol.swift PocketDSH/Command
 .build/checks/command-catalog-checks
 xcrun swiftc -parse-as-library PocketDSH/HarnessProtocol.swift PocketDSH/HarnessAPI.swift PocketDSH/ImageAttachments.swift PocketDSH/CommandCatalog.swift PocketDSH/ComposerSubmission.swift PocketDSH/FullAccessConfirmation.swift Tests/FullAccessConfirmationChecks.swift -o .build/checks/full-access-checks
 .build/checks/full-access-checks
+# The carrier-lifecycle check compiles the real carrier loop and the production
+# confirmation seam together: a pending full-access confirmation is dropped by the
+# carrier's failure and ready edges, so the combined carrier -> confirmation path
+# is exercised, not the two isolated halves.
+xcrun swiftc -parse-as-library PocketDSH/HarnessProtocol.swift PocketDSH/HarnessAPI.swift PocketDSH/ImageAttachments.swift PocketDSH/CommandCatalog.swift PocketDSH/ComposerSubmission.swift PocketDSH/FullAccessConfirmation.swift PocketDSH/RemoteStreamConnection.swift Tests/FullAccessCarrierLifecycleChecks.swift -o .build/checks/full-access-carrier-checks
+.build/checks/full-access-carrier-checks
 # The routing check compiles no native wire: the raw-input ownership it used to
 # restate is NativeCompactionInfo's, checked by Tests/NativeContextChecks.swift.
 xcrun swiftc -parse-as-library PocketDSH/HarnessProtocol.swift PocketDSH/CommandCatalog.swift PocketDSH/ComposerCommandRouting.swift Tests/ComposerCommandRoutingChecks.swift -o .build/checks/composer-command-routing-checks

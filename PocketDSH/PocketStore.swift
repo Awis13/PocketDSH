@@ -212,6 +212,10 @@ final class PocketStore: ObservableObject {
     /// the card stays disabled until the Host has taken the decision.
     @Published private(set) var fullAccessExecuting = false
     private lazy var fullAccessGate = FullAccessGate()
+    /// The seam the carrier's failure and ready edges drop the pending
+    /// confirmation through, so the invalidation the carrier triggers is the
+    /// same production logic the offline integration checks drive.
+    private lazy var confirmationLifecycle = ConfirmationLifecycle(fullAccessGate)
     var selected: HarnessSession? { sessions.first { $0.id == selectedID } }
     var running: Bool { (selected?.running ?? false) || compactingContext }
     var liveReasoning: TranscriptRow? {
@@ -363,7 +367,7 @@ final class PocketStore: ObservableObject {
                 // question is dropped on a carrier failure as well as on a teardown
                 // - a reopened socket must not resurrect an action the user has not
                 // answered.
-                self.clearAccessConfirmation()
+                self.confirmationLifecycle.carrierFailed(); self.accessConfirmation = nil
                 self.error = "Connection interrupted. " + error.localizedDescription
                 self.connectionDiagnostic("websocket-failed", error: error, details: ["closeCode": closeCode, "attempt": attempt.index])
             } onFinish: { [weak self] in
@@ -435,7 +439,7 @@ final class PocketStore: ObservableObject {
                 // client id: an escalation question asked on the previous one is
                 // no longer answerable, so it is dropped before anything can be
                 // dispatched against the new stream.
-                clearAccessConfirmation()
+                confirmationLifecycle.attemptReady(); accessConfirmation = nil
                 // The reference client synthesizes `connection/reset` locally when the
                 // transport (re)connects (dsh-api-gateway client.js:1433), so every
                 // cached catalog is suspect; the directory drops and prewarms them.
@@ -1133,7 +1137,7 @@ final class PocketStore: ObservableObject {
     /// question: after a switch, a reconnect or a teardown there is nothing left
     /// for the user to be answering.
     private func clearAccessConfirmation() {
-        fullAccessGate.clear()
+        confirmationLifecycle.reset()
         accessConfirmation = nil
     }
 

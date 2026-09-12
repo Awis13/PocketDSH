@@ -162,3 +162,28 @@ final class FullAccessGate {
         }
     }
 }
+
+/// The production orchestration seam behind the full-access gate's lifecycle.
+///
+/// The store creates one and wires its carrier's failure and ready edges to it,
+/// so a pending confirmation is dropped the moment the socket it was asked on
+/// fails or a new attempt becomes ready. The invalidation lives here - in the
+/// file the offline gate compiles - not in the store's private carrier glue,
+/// which no offline check can reach: the store keeps only its published
+/// `accessConfirmation` surface and the request/confirm/cancel legs it answers
+/// from, while the question's lifetime across carrier events is the seam's.
+@MainActor
+final class ConfirmationLifecycle {
+    /// The gate the seam owns; the store reads it for `request` and `confirm`.
+    let gate: FullAccessGate
+    init(_ gate: FullAccessGate) { self.gate = gate }
+
+    /// The carrier's current attempt failed and is gone: its pending
+    /// confirmation is stale and must not dispatch against a dead socket.
+    func carrierFailed() { gate.clear() }
+    /// A new attempt is ready - a fresh client id, a re-warmed catalog: an old
+    /// attempt's confirmation no longer names the connection the user answers.
+    func attemptReady() { gate.clear() }
+    /// Selection or teardown dropped the composer the question was asked on.
+    func reset() { gate.clear() }
+}
