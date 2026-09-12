@@ -14,3 +14,5 @@ xcrun swiftc -parse-as-library PocketDSH/HarnessProtocol.swift PocketDSH/Command
 .build/checks/command-catalog-checks
 xcrun swiftc -parse-as-library PocketDSH/HarnessProtocol.swift PocketDSH/HarnessAPI.swift PocketDSH/ImageAttachments.swift PocketDSH/CommandCatalog.swift PocketDSH/ComposerSubmission.swift PocketDSH/FullAccessConfirmation.swift Tests/FullAccessConfirmationChecks.swift -o .build/checks/full-access-checks
 .build/checks/full-access-checks
+xcrun swiftc -parse-as-library Shared/NativeWire.swift PocketDSH/HarnessProtocol.swift PocketDSH/CommandCatalog.swift PocketDSH/ComposerCommandRouting.swift Tests/ComposerCommandRoutingChecks.swift -o .build/checks/composer-command-routing-checks
+.build/checks/composer-command-routing-checks
