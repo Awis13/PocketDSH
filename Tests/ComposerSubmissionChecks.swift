@@ -26,8 +26,9 @@ import Foundation
         OutgoingImage(id: UUID(), data: Data(name.utf8), mediaType: "image/jpeg", name: name)
     }
     static func composer(draft: String, images: [OutgoingImage] = [], session: String = "s1",
-                         endpoint: String = host, generation: Int = 1) -> ComposerSubmission {
-        ComposerSubmission(draft: draft, images: images, sessionID: session, endpoint: endpoint, catalogGeneration: generation)
+                         endpoint: String = host, generation: Int = 1, version: Int = 0) -> ComposerSubmission {
+        ComposerSubmission(draft: draft, images: images, sessionID: session, endpoint: endpoint,
+                           catalogGeneration: generation, draftVersion: version)
     }
     /// The text part of a `session/prompt` content array, or nil for an
     /// image-only submission.
@@ -55,7 +56,7 @@ import Foundation
             assert(imageNames(of: content) == ["a.jpg"], "the fallback sends the frozen attachment, not the new one")
         default: assert(false, "an unknown name must fall through to the message path")
         }
-        assert(unknown.draftAfterSend(liveDraft) == "a completely new draft", "the draft typed during the wait is not erased by the sent command")
+        assert(unknown.draftAfterSend(liveDraft, version: 0) == "a completely new draft", "the draft typed during the wait is not erased by the sent command")
         assert(unknown.imagesAfterSend(liveImages) == [b], "the attachment added during the wait stays")
         print("PASS: unknown command sends the frozen draft and attachments and keeps the new ones")
 
@@ -72,18 +73,25 @@ import Foundation
         let submitted = executeArgs["submittedAttachments"]!.array
         assert(submitted.count == 1 && submitted[0]["name"].string == "a.jpg", "commands/execute carries the frozen attachment")
         assert(submitted[0]["data"].string == a.data.base64EncodedString() && executeArgs["line"]!.string == "/compact")
-        assert(claimed.draftAfterSend("") == "" && claimed.imagesAfterSend([b]) == [b], "the swapped attachment is not dropped")
+        assert(claimed.draftAfterSend("", version: 0) == "" && claimed.imagesAfterSend([b]) == [b], "the swapped attachment is not dropped")
         print("PASS: claimed command sends the frozen attachment and keeps the replacement")
 
         // 3. The draft is not the send's to erase once the user typed a new one
         // during the wait, on the command path as well.
-        assert(claimed.draftAfterSend("something else") == "something else", "a new draft survives a successful command")
-        assert(claimed.draftAfterSend("  /compact  ") == "", "a draft that differs only in whitespace is the sent content")
+        assert(claimed.draftAfterSend("something else", version: 0) == "something else", "a new draft survives a successful command")
+        assert(claimed.draftAfterSend("  /compact  ", version: 0) == "", "a draft that differs only in whitespace is the sent content")
         // The sent line is recognised through surrounding whitespace, and a
         // newer draft is not the sent one - the rule both the live composer and
         // the persisted session table are cleaned by.
-        assert(claimed.isSentDraft("/compact") && claimed.isSentDraft("  /compact  "), "the sent line is the sent content")
-        assert(!claimed.isSentDraft("something else") && !claimed.isSentDraft("") && !claimed.isSentDraft("/compact now"), "a newer draft is not the sent one")
+        assert(claimed.isSentDraft("/compact", version: 0) && claimed.isSentDraft("  /compact  ", version: 0), "the sent line is the sent content")
+        assert(!claimed.isSentDraft("something else", version: 0) && !claimed.isSentDraft("", version: 0) && !claimed.isSentDraft("/compact now", version: 0), "a newer draft is not the sent one")
+        // The version, not the text, is what makes a draft the sent one: the
+        // user clearing the line and typing the same text again owns a new
+        // draft, and a late reply must leave it alone.
+        assert(!claimed.isSentDraft("/compact", version: 1) && !claimed.isSentDraft("  /compact  ", version: 7), "the same text retyped is a new draft")
+        assert(claimed.draftAfterSend("/compact", version: 1) == "/compact", "a retyped identical draft is kept")
+        assert(composer(draft: "/compact", version: 3).isSentDraft("/compact", version: 3), "an untouched draft of the same version is the sent one")
+        print("PASS: a retyped identical draft is not the sent draft")
         // The attachment that went out is dropped; anything attached meanwhile
         // is kept. The composer still holds the sent one, which is what makes
         // this a cleanup and not a no-op.
@@ -91,7 +99,7 @@ import Foundation
         assert(unknown.imagesAfterSend([a, b, b]) == [b, b], "only the sent attachment leaves the composer")
         assert(claimed.imagesAfterSend([b]) == [b] && claimed.imagesAfterSend([]) == [], "nothing else is touched")
         let imageOnly = composer(draft: "   ", images: [a])
-        assert(imageOnly.draftAfterSend("   ") == "" && imageOnly.text.isEmpty)
+        assert(imageOnly.draftAfterSend("   ", version: 0) == "" && imageOnly.text.isEmpty)
         assert(promptContent(imageOnly).count == 1 && imageNames(of: promptContent(imageOnly)) == ["a.jpg"])
         print("PASS: cleanup clears only what was sent")
 

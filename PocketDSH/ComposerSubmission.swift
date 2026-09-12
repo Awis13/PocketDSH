@@ -35,6 +35,12 @@ struct ComposerSubmission {
     var sessionID: String
     var endpoint: String
     var catalogGeneration: Int
+    /// The version of the sending session's draft line at freeze time - bumped
+    /// by every write that changes it. Content alone cannot tell the draft the
+    /// composer still holds from one the user cleared and typed again: the
+    /// second is a new draft the user owns, even when its text matches the sent
+    /// one, and clearing it would eat a message they never sent.
+    var draftVersion: Int
 
     /// The text this action sends: the draft without surrounding whitespace,
     /// which is what the reference trims before `matchEnter` and before
@@ -60,20 +66,23 @@ struct ComposerSubmission {
         request.session == sessionID && request.text == text && request.imageIDs == imageIDs
     }
 
-    /// Whether a draft the composer (or its saved session table) holds is the
-    /// content this snapshot sent. Surrounding whitespace does not make it a
-    /// different draft: the reference trims the line it submits, so a composer
-    /// holding "  /compact  " holds the line that went out.
-    func isSentDraft(_ current: String) -> Bool {
-        current.trimmingCharacters(in: .whitespacesAndNewlines) == text
+    /// Whether a draft the composer (or its saved session table) still holds is
+    /// the very draft this snapshot sent: untouched since the freeze (`version`
+    /// unchanged) and carrying the sent text. Both halves are needed - the
+    /// version says the user did not write here again, and the text says the
+    /// value really is the one that went out. Surrounding whitespace does not
+    /// make it a different draft: the reference trims the line it submits, so a
+    /// composer holding "  /compact  " holds the line that went out.
+    func isSentDraft(_ current: String, version: Int) -> Bool {
+        version == draftVersion && current.trimmingCharacters(in: .whitespacesAndNewlines) == text
     }
 
     /// The draft the composer keeps after this snapshot was actually sent: the
-    /// text that went out is cleared, and anything the user typed meanwhile -
-    /// including the same text retyped as a new draft - is not this action's to
-    /// erase.
-    func draftAfterSend(_ current: String) -> String {
-        isSentDraft(current) ? "" : current
+    /// text that went out is cleared, and a draft the user wrote meanwhile -
+    /// including the same text cleared and typed again - is not this action's
+    /// to erase.
+    func draftAfterSend(_ current: String, version: Int) -> String {
+        isSentDraft(current, version: version) ? "" : current
     }
 
     /// The attachments the composer keeps after this snapshot was sent: only
