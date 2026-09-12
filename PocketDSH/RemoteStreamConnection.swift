@@ -286,9 +286,10 @@ final class RemoteStreamConnection {
     /// Each attempt gets a fresh identity from `beginAttempt`; `onAttempt` runs
     /// before the body (per-attempt state), `onFailure` only for an attempt
     /// that is still current, and `onFinish` exactly once when every attempt
-    /// failed. A body that returns - cancellation, or a connection that was
-    /// replaced - ends the loop with no retry and no `onFinish`, because the
-    /// carrier that replaced it owns the state from then on.
+    /// failed. A body that returns ends the loop with no retry and no
+    /// `onFinish`: it has ended its own carrier, so the attempt it still owns
+    /// is discarded as well, while a connection that replaced this run owns the
+    /// state from then on.
     ///
     /// A failed attempt is invalidated before anything is awaited: its stream
     /// IDs, its history pages and its owned ping/refresh work end with it, so
