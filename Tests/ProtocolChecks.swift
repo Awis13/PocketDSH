@@ -37,6 +37,39 @@ import ImageIO
         {"type":"user/message","seq":4,"data":{"source":{"kind":"context"},"content":[{"type":"text","text":"internal"}]}}
         """)))
         assert(transcript.rows.count == 2, "internal injected context must not impersonate the user")
+        // Command lifecycle rows settle in place by commandId, not by a
+        // positional index: the final assistant message prunes the streamed
+        // delta row, so an index captured at the run would rename the wrong row.
+        var lifecycle = Transcript()
+        lifecycle.replace(json("""
+        [{"event":{"type":"assistant/chunk","seq":0,"data":{"turn":1,"step":1,"chunk":{"type":"text-delta","index":0,"text":"Wor"}}}}]
+        """).array, cursor: 0)
+        assert(lifecycle.rows.map(\.id) == ["a-1-1-0"])
+        assert(lifecycle.append(json(#"{"type":"command/run","seq":1,"data":{"commandId":"c1","name":"goal","args":" clear","source":{"kind":"user"}}}"#)))
+        assert(lifecycle.rows.map(\.id) == ["a-1-1-0", "command-c1"], "the run opens a row after the delta")
+        assert(!lifecycle.rows[1].complete && lifecycle.rows[1].text == "/goal clear - running")
+        assert(lifecycle.append(json("""
+        {"type":"assistant/message","seq":2,"data":{"turn":1,"step":1,"message":{"content":[{"type":"text","text":"Working"}]}}}
+        """)))
+        assert(lifecycle.rows.map(\.id) == ["command-c1", "a-1-1-0"], "the pruned delta returns as the final message")
+        assert(lifecycle.append(json(#"{"type":"command/done","seq":3,"data":{"commandId":"c1","kind":"success","text":"goal cleared"}}"#)))
+        assert(lifecycle.rows.map(\.id) == ["command-c1", "a-1-1-0"], "the done settles the run's row in place")
+        assert(lifecycle.rows[0].text == "/goal clear - goal cleared" && lifecycle.rows[0].complete && !lifecycle.rows[0].failed)
+        assert(lifecycle.rows[1].text == "Working" && lifecycle.rows[1].kind == .assistant, "the done must not overwrite the assistant row")
+        // A duplicate done and a re-delivered run are idempotent.
+        assert(lifecycle.append(json(#"{"type":"command/done","seq":4,"data":{"commandId":"c1","kind":"success","text":"goal cleared"}}"#)))
+        assert(lifecycle.append(json(#"{"type":"command/run","seq":5,"data":{"commandId":"c1","name":"other"}}"#)))
+        assert(lifecycle.rows.count == 2 && lifecycle.rows[0].text.hasPrefix("/goal clear"), "a re-delivered run never reopens a settled command")
+        // A done whose run sits outside the loaded window still renders, and the
+        // late run names the row it could not open.
+        var orphan = Transcript()
+        orphan.replace(json("""
+        [{"event":{"type":"command/done","seq":0,"data":{"commandId":"c9","kind":"error","text":"no such command"}}},
+         {"event":{"type":"command/run","seq":1,"data":{"commandId":"c9","name":"goal"}}}]
+        """).array, cursor: 1)
+        assert(orphan.rows.count == 1 && orphan.rows[0].id == "command-c9")
+        assert(orphan.rows[0].failed && orphan.rows[0].complete && orphan.rows[0].text == "/goal - no such command")
+        print("PASS: command lifecycle rows settle in place across pruning, duplicates and an orphan done")
         var changes = Transcript()
         changes.replace(json("""
         [{"event":{"type":"tool/result","seq":0,"data":{"meta":{"diffs":[{"path":"sample.swift","oldText":"let value = 1","newText":"let value = 2"}]},"message":{"source":{"callId":"edit-1"},"content":[{"type":"tool-result","content":[{"type":"text","text":"edited"}]}]}}}}]

@@ -8,3 +8,5 @@ xcrun swiftc -parse-as-library PocketDSH/SavedConnections.swift Tests/SavedConne
 .build/checks/connection-checks
 xcrun swiftc -parse-as-library PocketDSH/HarnessProtocol.swift PocketDSH/SessionProjection.swift Tests/SessionProjectionChecks.swift -o .build/checks/session-projection-checks
 .build/checks/session-projection-checks
+xcrun swiftc -parse-as-library PocketDSH/HarnessProtocol.swift PocketDSH/CommandCatalog.swift Tests/CommandCatalogChecks.swift -o .build/checks/command-catalog-checks
+.build/checks/command-catalog-checks
