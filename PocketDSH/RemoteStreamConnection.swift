@@ -289,6 +289,13 @@ final class RemoteStreamConnection {
     /// failed. A body that returns - cancellation, or a connection that was
     /// replaced - ends the loop with no retry and no `onFinish`, because the
     /// carrier that replaced it owns the state from then on.
+    ///
+    /// A failed attempt is invalidated before anything is awaited: its stream
+    /// IDs, its history pages and its owned ping/refresh work end with it, so
+    /// the backoff - and the state after the carrier gives up - cannot accept a
+    /// late result of the socket that failed. Only the attempt this run still
+    /// owns is discarded, so a stale run can never retire the attempt of the
+    /// carrier that replaced it.
     func run(attempts: Int = 5,
              backoff: @escaping @MainActor (Int) -> Duration = { .seconds(min(8, 1 << $0)) },
              sleep: @escaping @MainActor (Duration) async throws -> Void = { try await Task.sleep(for: $0) },
@@ -303,9 +310,24 @@ final class RemoteStreamConnection {
             onAttempt(attempt)
             do {
                 try await body(attempt)
+                // A body that returned has ended its carrier: retire whatever
+                // this run still owns, so no stream ID, ping or refresh of a
+                // stopped carrier outlives it. A run that was superseded owns
+                // nothing here - the attempt is no longer its own - and a
+                // torn-down carrier already discarded it.
+                if isCurrent(attempt) { discardAttempt() }
                 return
             } catch {
                 guard isCurrent(attempt), !Task.isCancelled else { return }
+                // The attempt is dead the moment its reader threw: retire its
+                // identity and the work it owned synchronously, before the
+                // backoff is awaited. Otherwise a delayed result of the failed
+                // socket - a refresh success or error, a history page, a ping -
+                // would still be accepted while the retry is sleeping, and
+                // would stay accepted forever once the carrier gave up. The
+                // guard above is what keeps a stale run from invalidating the
+                // attempt of a carrier that replaced it.
+                discardAttempt()
                 onFailure(attempt, error)
                 guard index < limit else { break }
                 do { try await sleep(backoff(index - 1)) } catch { return }
