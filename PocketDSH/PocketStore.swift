@@ -174,14 +174,24 @@ final class PocketStore: ObservableObject {
     /// ported CommandDirectory. Created on first use and never replaced, so a
     /// pull always has somewhere to publish and a strong-wait can never be
     /// stranded on a missing directory.
-    private lazy var commandDirectory = CommandDirectory(startPull: { [weak self] sessionId, epoch in
-        self?.startCommandPull(sessionId, epoch: epoch)
+    private lazy var commandDirectory = CommandDirectory(startPull: { [weak self] token in
+        self?.startCommandPull(token)
     })
     /// The selected session's catalog snapshot as the composer palette renders
     /// it, plus the cache state behind it. The directory is not observable, so
     /// every publish and invalidation republishes these for SwiftUI.
     @Published private(set) var commandCatalog: [CommandDescriptor] = []
     @Published private(set) var commandCatalogState: CommandDirectory.State = .cold
+    /// The catalog pulls of this connection. The table lives in
+    /// `CommandPullConnection` (CommandCatalog.swift) because PocketStore is
+    /// in no gate-compilable target: the connection-scoped bookkeeping - a
+    /// pull registered before its task can run, work of a dead generation
+    /// recognised before the transport, the teardown cancelling exactly the
+    /// pulls of the connection that is closing - is checkable there. A late
+    /// outcome is dropped by the directory's identity guard as well: the
+    /// cancellation is what stops the work, the guard is what keeps it from
+    /// landing.
+    private lazy var commandConnection = CommandPullConnection(directory: commandDirectory)
     var selected: HarnessSession? { sessions.first { $0.id == selectedID } }
     var running: Bool { (selected?.running ?? false) || compactingContext }
     var liveReasoning: TranscriptRow? {
@@ -260,7 +270,16 @@ final class PocketStore: ObservableObject {
         socket?.cancel(with: .goingAway, reason: nil); socket = nil
         connected = false; connecting = false; loadingHistory = false; interactions = []; clientID = ""
         // A catalog belongs to one Host connection: the next connection must
-        // never serve a snapshot the previous one warmed.
+        // never serve a snapshot the previous one warmed, and a pull of the
+        // dead connection must not go on flying. Cancelling is best effort
+        // (an RPC already on the wire cannot be recalled), but it does stop
+        // the pulls that have not issued their RPC yet: every pull of this
+        // connection is in the table before its task can run, so the stop
+        // below reaches them all, and their bodies re-check the identity this
+        // generation rotation invalidates before touching the transport. The
+        // directory's identity guard makes the outcome of an already-sent
+        // RPC harmless.
+        commandConnection.stop()
         commandDirectory.removeAll(); syncCommandCatalog()
     }
     func transcribeVoice(_ data: Data, endpoint: String) async throws -> String {
@@ -506,10 +525,12 @@ final class PocketStore: ObservableObject {
 
     /// The directory's pull seam. The ported directory drives its pulls
     /// synchronously, while the RPC cannot be, so the pull is handed to the
-    /// main actor and its outcome published under the epoch the directory
+    /// main actor and its outcome published under the token the directory
     /// minted (`CommandDirectory.publish`).
-    private nonisolated func startCommandPull(_ sessionId: String, epoch: Int) {
-        Task { @MainActor [weak self] in await self?.pullCommandCatalog(sessionId: sessionId, epoch: epoch) }
+    private func startCommandPull(_ token: CommandDirectory.CommandPullToken) {
+        commandConnection.bind(token) { [weak self] in
+            await self?.pullCommandCatalog(token)
+        }
     }
 
     /// Issue one catalog pull for one session. A subagent session has no
@@ -517,25 +538,45 @@ final class PocketStore: ObservableObject {
     /// instead of calling `commands/list`. Every pull ends in a publish or an
     /// explicit abandon: a silently dropped outcome would leave the key pending
     /// and strand a strong-wait.
-    private func pullCommandCatalog(sessionId: String, epoch: Int) async {
-        let attempt = generation
+    private func pullCommandCatalog(_ token: CommandDirectory.CommandPullToken) async {
+        let sessionId = token.sessionId
+        let attempt = commandDirectory.catalogGeneration
         func publish(_ outcome: Result<[CommandDescriptor], Error>) {
-            guard attempt == generation else {
-                commandDirectory.abandon(sessionId, epoch: epoch,
+            // Both arms republish the directory's current state: a pull whose
+            // connection died abandons its token, but the published catalog
+            // and its state must still match the directory afterwards - the
+            // abandon may have dropped a pending entry the palette is showing.
+            if attempt == commandDirectory.catalogGeneration {
+                commandDirectory.publish(token, outcome)
+            } else {
+                commandDirectory.abandon(token,
                                          reason: HarnessError(message: "the connection was reset before the command catalog arrived"))
-                return
             }
-            commandDirectory.publish(sessionId, epoch: epoch, outcome)
             syncCommandCatalog()
         }
+        // One connection, one context: the socket, the api and the selection
+        // of this pull belong to the generation it was started in. The guards
+        // below are synchronous with respect to that generation (the main
+        // actor never interleaves them with a teardown), and the last one is
+        // re-checked after the RPC so a cancelled pull can never install its
+        // outcome on the next connection's directory. The task handle belongs
+        // to `commandConnection`, which drops it on every exit.
+        guard !commandConnection.isStale(token), !Task.isCancelled else { return }
         guard !usesNativeHarness else { publish(.success([])); return }
         switch commandCatalogRequest(sessionId: sessionId, origin: sessions.first { $0.id == sessionId }?.raw["origin"].string ?? "") {
         case .emptyCatalog:
             publish(.success([]))
         case .list(let agentId):
-            guard connected, let api else { publish(.failure(HarnessError(message: "the DSH connection is not ready"))); return }
-            do { publish(.success(commandDescriptors(try await api.rpc("commands/list", args: commandListArguments(agentId: agentId))))) }
-            catch { publish(.failure(error)) }
+            guard connected, let api, !commandConnection.isStale(token), !Task.isCancelled else {
+                publish(.failure(HarnessError(message: "the DSH connection is not ready")))
+                return
+            }
+            do {
+                let commands = commandDescriptors(try await api.rpc("commands/list", args: commandListArguments(agentId: agentId)))
+                publish(.success(commands))
+            } catch {
+                publish(.failure(error))
+            }
         }
     }
 
@@ -574,17 +615,29 @@ final class PocketStore: ObservableObject {
     func executeCommand(_ line: String) async {
         guard !usesNativeHarness, connected, let api, let id = selectedID, !submitting else { return }
         let host = endpoint
+        // The connection this dispatch belongs to. The endpoint and the
+        // session id cannot express it: a reconnect to the same server with
+        // the same session selected leaves both unchanged, so the old
+        // dispatch would keep going and issue its RPC against the new
+        // connection. The generation is the identity a teardown rotates.
+        let generation = commandDirectory.catalogGeneration
         let text = line.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let name = parseCommand(text)?.name, !name.isEmpty else { return }
         submitting = true
         defer { submitting = false }
         let descriptors: [CommandDescriptor]
         do { descriptors = try await commandDirectory.ensureReadyAsync(id) }
-        catch {
+        catch is CommandDirectory.CommandPullCancelled {
+            // The connection changed under the wait and the catalog it was
+            // warming is gone. Nothing is wrong and nothing may be sent: a
+            // command for the old connection must not fall through to the
+            // message path of the new one.
+            return
+        } catch {
             self.error = "Could not load the command catalog: " + commandErrorMessage(error)
             return
         }
-        guard host == endpoint, selectedID == id else { return }
+        guard host == endpoint, selectedID == id, generation == commandDirectory.catalogGeneration else { return }
         // A servable catalog that does not claim the line leaves it to the
         // ordinary message path, draft and attachments included.
         let resolved = descriptors.first { $0.name == name }
@@ -605,6 +658,7 @@ final class PocketStore: ObservableObject {
             submitted.append(wire)
         }
         do {
+            guard generation == commandDirectory.catalogGeneration else { return }
             let value = try await api.rpc("commands/execute", args: commandExecuteArguments(agentId: id, line: text, submittedAttachments: submitted))
             guard host == endpoint, selectedID == id else { return }
             guard value != .null else { self.error = "Unknown or malformed command: " + text; return }

@@ -267,11 +267,17 @@ typealias CommandFetchOutcome = Result<[CommandDescriptor], Error>
 /// off-actor read of `entries` racing a publish is a data race, not a test
 /// nuance.
 ///
-/// Epoch guard: every refresh bumps the entry's epoch; only the latest epoch
-/// may publish its outcome, in the success arm and in the failure arm. A
-/// ready snapshot is never demoted while a pull flies - except when that
-/// pull's own outcome is a failure, which publishes failed (the reference
-/// semantics, kept exactly).
+/// Pull identity: an outcome lands only while the full identity it was
+/// minted under is still the key's current one. The identity is a
+/// `CommandPullToken` - the session key, the entry's epoch, and the
+/// catalog generation. The epoch orders the pulls of one connection
+/// (a ready snapshot is never demoted while a pull flies - except when that
+/// pull's own outcome is a failure, which publishes failed, the reference
+/// semantics kept exactly); the generation orders the connections, because
+/// it is bumped by `removeAll` and the epoch alone restarts at 1 after a
+/// clear, so a late outcome of a dead connection would otherwise collide
+/// with a fresh pull of the next one. Success, failure and abandon are
+/// shielded identically.
 @MainActor
 final class CommandDirectory {
     /// The entry states: cold (untouched), pending (a pull is in flight),
@@ -286,7 +292,21 @@ final class CommandDirectory {
         var epoch = 0
         var lastError: Error?
         /// JS settled() waiters: once-resolve closures woken by the drain.
-        var waiters: [() -> Void] = []
+        /// `true` is a clear (cancellation), `false` a winning publish.
+        var waiters: [(Bool) -> Void] = []
+    }
+
+    /// One pull's identity, minted by `beginPull` and required back by
+    /// `publish` and `abandon`. `catalogGeneration` is the directory's
+    /// generation at mint time, so a token outlives its connection: after
+    /// `removeAll` both the generation moved on and the entry is gone, and
+    /// neither a fresh pull nor a fresh connection can be addressed with it.
+    /// Hashable so a caller can key its in-flight pulls by identity (the
+    /// store's connection-scoped cancellation does).
+    struct CommandPullToken: Equatable, Hashable {
+        let sessionId: String
+        let epoch: Int
+        let catalogGeneration: Int
     }
 
     /// ensureReady's failure; mirrors the JS `command directory warmup failed: ...` throw.
@@ -294,14 +314,25 @@ final class CommandDirectory {
         var reason = ""
     }
 
+    /// The distinct outcome of a wait whose catalog was cleared under it
+    /// (a connection tearing down). It is not a pull failure: nothing was
+    /// attempted and nothing may be retried, so `ensureReadyAsync` reports
+    /// it instead of repulling, and the app treats it as a quiet no-op.
+    struct CommandPullCancelled: Error, Equatable {
+        var reason = "the command catalog was dropped with its connection"
+    }
+
     private(set) var entries: [String: Entry] = [:]
+    /// Bumped whenever `removeAll` clears the map. Every token minted before
+    /// the bump carries the old value and can never address an entry again.
+    private(set) var catalogGeneration = 0
     /// The synchronous pull the offline checks drive.
     private let fetchCommands: ((String) throws -> [CommandDescriptor])?
     /// The asynchronous pull the app hands to its RPC. The JS fetch is a
     /// promise, which a Swift closure cannot be, so the pull is split: the
-    /// directory mints the epoch and hands the caller (sessionId, epoch), and
-    /// the caller publishes the outcome back under it.
-    private let startPull: ((String, Int) -> Void)?
+    /// directory mints the token and hands it to the caller, and the caller
+    /// publishes the outcome back under it.
+    private let startPull: ((CommandPullToken) -> Void)?
 
     init(fetchCommands: @escaping (String) throws -> [CommandDescriptor]) {
         self.fetchCommands = fetchCommands
@@ -311,7 +342,7 @@ final class CommandDirectory {
     /// The async-caller seam: every pull this directory starts (warm,
     /// invalidateAll, resetSession, resetConnected, ensureReady, refresh) goes
     /// to `startPull`, whose outcome must be published with `publish`.
-    init(startPull: @escaping (String, Int) -> Void) {
+    init(startPull: @escaping (CommandPullToken) -> Void) {
         self.fetchCommands = nil
         self.startPull = startPull
     }
@@ -327,15 +358,25 @@ final class CommandDirectory {
         return entry.commands
     }
 
-    /// Drop every cached entry. The reference directory lives as long as the
-    /// plugin; this client drops it when a connection tears down, so a stale
-    /// snapshot can never answer for the next connection. Waiters are woken
-    /// first: a strong-wait must re-read the state (and repull or reject)
-    /// instead of suspending forever on a connection that has gone away.
+    /// Drop every cached entry and open a new catalog generation. The
+    /// reference directory lives as long as the plugin; this client drops it
+    /// when a connection tears down, so a stale snapshot can never answer for
+    /// the next connection - and the generation bump is what keeps a late
+    /// outcome of the dead connection (a success, a failure, or an abandon)
+    /// from landing on the cleared map, where the next connection's pull
+    /// restarts at epoch 1 with the same session key.
+    ///
+    /// Waiters parked on the cleared entries end here, deterministically, with
+    /// `CommandPullCancelled`: they must neither re-home onto the next
+    /// connection nor be rejected by the dead connection's outcome, so the
+    /// wait is cancelled instead of being woken into another pull. The new
+    /// generation is installed before the waiters run, so a waiter that
+    /// registers a fresh pull during the drain does so against the new one.
     func removeAll() {
         let woken = entries.values.flatMap(\.waiters)
         entries.removeAll()
-        for wake in woken { wake() }
+        catalogGeneration += 1
+        for wake in woken { wake(true) }
     }
 
     /// Synchronous exact-name lookup over one session's hot snapshot;
@@ -381,40 +422,43 @@ final class CommandDirectory {
         if entry.state == .cold || entry.state == .failed { refresh(sessionId) }
     }
 
-    /// Start one pull for one session. Publishes ready/failed only while it
-    /// is still the key's latest pull (epoch guard); a ready snapshot is not
-    /// demoted while the pull flies. Returns the pull's epoch.
+    /// Start one pull for one session. Publishes ready/failed only while its
+    /// token is still the key's current identity; a ready snapshot is not
+    /// demoted while the pull flies. Returns the pull's token.
     @discardableResult
-    func refresh(_ sessionId: String) -> Int {
-        let epoch = beginPull(sessionId)
+    func refresh(_ sessionId: String) -> CommandPullToken {
+        let token = beginPull(sessionId)
         if let startPull {
-            startPull(sessionId, epoch)
-            return epoch
+            startPull(token)
+            return token
         }
         var outcome: CommandFetchOutcome
         do { outcome = .success(try fetchCommands!(sessionId)) }
         catch { outcome = .failure(error) }
-        publish(sessionId, epoch: epoch, outcome)
-        return epoch
+        publish(token, outcome)
+        return token
     }
 
-    /// Open one pull: bump the key's epoch and mark it pending. A caller whose
-    /// fetch is asynchronous publishes its outcome with `publish` under the
-    /// returned epoch; the synchronous `refresh` is this plus the fetch.
+    /// Open one pull: bump the key's epoch and mark it pending, under the
+    /// directory's current generation. A caller whose fetch is asynchronous
+    /// publishes its outcome with `publish` under the returned token; the
+    /// synchronous `refresh` is this plus the fetch.
     @discardableResult
-    func beginPull(_ sessionId: String) -> Int {
+    func beginPull(_ sessionId: String) -> CommandPullToken {
         var entry = entries[sessionId] ?? Entry()
         entry.epoch += 1
         if entry.state != .ready { entry.state = .pending }
         entries[sessionId] = entry
-        return entry.epoch
+        return CommandPullToken(sessionId: sessionId, epoch: entry.epoch, catalogGeneration: catalogGeneration)
     }
 
-    /// Publish one pull's outcome. Ignored unless the epoch is still the key's
-    /// latest pull (the epoch guard) - a stale outcome never lands, and the
-    /// winning publish is what wakes the waiters.
-    func publish(_ sessionId: String, epoch: Int, _ outcome: CommandFetchOutcome) {
-        guard let current = entries[sessionId], current.epoch == epoch else { return }
+    /// Publish one pull's outcome. Ignored unless the token is still the key's
+    /// current identity - both the generation and the epoch (the identity
+    /// guard) - so a stale outcome never lands, on a newer pull of this
+    /// connection or on a later one after a clear, and the winning publish is
+    /// what wakes the waiters.
+    func publish(_ token: CommandPullToken, _ outcome: CommandFetchOutcome) {
+        guard isCurrent(token), let current = entries[token.sessionId] else { return }
         var entry = current
         switch outcome {
         case .success(let commands):
@@ -426,24 +470,46 @@ final class CommandDirectory {
             entry.state = .failed
             entry.lastError = error
         }
-        entries[sessionId] = entry
-        notifyWaiters(sessionId)
+        entries[token.sessionId] = entry
+        notifyWaiters(token.sessionId)
     }
 
     /// Publish a pull that can no longer report its real outcome because the
     /// connection it belonged to is gone. Dropping such an outcome silently
     /// would leave the key pending forever and strand a strong-wait, so the
-    /// pull abandons its epoch instead; the epoch guard still keeps an
-    /// abandoned pull from touching a newer entry.
-    func abandon(_ sessionId: String, epoch: Int, reason: Error) {
-        publish(sessionId, epoch: epoch, .failure(reason))
+    /// pull abandons its token instead; the identity guard keeps an abandoned
+    /// pull from touching a newer entry, exactly like a late publish.
+    func abandon(_ token: CommandPullToken, reason: Error) {
+        publish(token, .failure(reason))
+    }
+
+    /// The token that addresses one session's current identity right now:
+    /// its live epoch under the current catalog generation. Nil when the
+    /// session has no entry (nothing was ever pulled for it), because there
+    /// is then no epoch to name. A caller that has to bind an operation to
+    /// the connection outside a pull (the store's command path does) mints
+    /// its token here and re-checks it with `isCurrent` after every
+    /// suspension: if the generation moved, the token is stale.
+    func currentToken(_ sessionId: String) -> CommandPullToken? {
+        guard let entry = entries[sessionId] else { return nil }
+        return CommandPullToken(sessionId: sessionId, epoch: entry.epoch, catalogGeneration: catalogGeneration)
+    }
+
+    /// Whether one token still addresses the key's current identity: the
+    /// same generation and the same epoch. The generation check is what a
+    /// bare epoch cannot express after a clear, when the epoch restarts.
+    /// This is also the connection test the store's pull table uses: a token
+    /// minted under an older generation is work of a dead connection.
+    func isCurrent(_ token: CommandPullToken) -> Bool {
+        guard token.catalogGeneration == catalogGeneration, let entry = entries[token.sessionId] else { return false }
+        return entry.epoch == token.epoch
     }
 
     /// JS settled(entry): register a once-resolve waiter woken by the next
     /// winning publish. `ensureReadyAsync` drives this from the app; the JS
-    /// abort-signal handling has no counterpart here, so `removeAll` waking
+    /// abort-signal handling has no counterpart here, so `removeAll` cancelling
     /// the waiters is what keeps a wait from outliving its connection.
-    func settle(_ sessionId: String, _ waiter: @escaping () -> Void) {
+    func settle(_ sessionId: String, _ waiter: @escaping (_ cancelled: Bool) -> Void) {
         var entry = entries[sessionId] ?? Entry()
         entry.waiters.append(waiter)
         entries[sessionId] = entry
@@ -477,50 +543,72 @@ final class CommandDirectory {
     /// returns at once, cold/failed launch a fresh pull, pending joins the
     /// pull in flight. A failed pull rejects the wait (the reference's "never a
     /// silent downgrade") and repulls on the next wait instead of poisoning the
-    /// key.
+    /// key. A tear-down cancels the wait with `CommandPullCancelled`: the wait
+    /// neither continues on the next connection nor is rejected by the dead
+    /// connection's outcome.
+    ///
+    /// The wait is bound to the catalog generation it started in, and every
+    /// suspension re-checks that binding. The generation can move while this
+    /// task is runnable but not yet running - `removeAll` may clear the map in
+    /// the same main-actor pass that published the outcome this wait was
+    /// waiting for - so a wait that outlived its generation must end
+    /// cancelled. Without the re-check the loop would read the next
+    /// connection's `.ready` entry and serve its snapshot as if it were the
+    /// answer to the old operation.
     func ensureReadyAsync(_ sessionId: String) async throws -> [CommandDescriptor] {
+        let generation = catalogGeneration
         while true {
+            if catalogGeneration != generation { throw CommandPullCancelled() }
             switch status(sessionId) {
             case .ready:
+                if catalogGeneration != generation { throw CommandPullCancelled() }
                 return entries[sessionId]?.commands ?? []
             case .pending:
                 break
             case .cold, .failed:
                 refresh(sessionId)
             }
-            await waitForPublish(sessionId)
+            if let cancellation = await waitForPublish(sessionId) { throw cancellation }
+            if catalogGeneration != generation { throw CommandPullCancelled() }
             if status(sessionId) == .failed, let entry = entries[sessionId] {
                 throw WarmupFailure(reason: "command directory warmup failed: " + commandErrorMessage(entry.lastError))
             }
         }
     }
 
-    /// One settlement tick: suspend until the key's next winning publish. A
-    /// publish that already landed never registers a waiter, so a synchronous
-    /// pull cannot deadlock the wait, and a tear-down wakes the wait instead of
-    /// stranding it.
-    private func waitForPublish(_ sessionId: String) async {
-        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+    /// One settlement tick: suspend until the key's next winning publish, or
+    /// until the catalog generation is cleared under the wait. A publish that
+    /// already landed never registers a waiter, so a synchronous pull cannot
+    /// deadlock the wait; a tear-down ends the wait instead of stranding it.
+    /// Non-nil is the cancellation the wait must report, never re-enter.
+    private func waitForPublish(_ sessionId: String) async -> CommandPullCancelled? {
+        await withCheckedContinuation { (continuation: CheckedContinuation<CommandPullCancelled?, Never>) in
             let gate = OnceGate(continuation)
-            if status(sessionId) == .pending { settle(sessionId) { gate.resume() } }
+            if status(sessionId) == .pending { settle(sessionId) { cancelled in cancelled ? gate.cancel() : gate.resume() } }
             else { gate.resume() }
         }
     }
 
     /// Resume-once guard: a waiter may be woken by a publish and by a tear-down
     /// in the same tick, and a checked continuation must resume exactly once.
+    /// The continuation carries the cancellation when the wake was a clear.
     private final class OnceGate {
-        private var continuation: CheckedContinuation<Void, Never>?
-        init(_ continuation: CheckedContinuation<Void, Never>) { self.continuation = continuation }
-        func resume() { let pending = continuation; continuation = nil; pending?.resume() }
+        private var continuation: CheckedContinuation<CommandPullCancelled?, Never>?
+        init(_ continuation: CheckedContinuation<CommandPullCancelled?, Never>) { self.continuation = continuation }
+        /// A winning publish: the wait's continuation with no cancellation.
+        func resume() { let pending = continuation; continuation = nil; pending?.resume(returning: nil) }
+        /// A clear: the wait ends with the catalog's cancellation.
+        func cancel() { let pending = continuation; continuation = nil; pending?.resume(returning: CommandPullCancelled()) }
     }
 
+    /// A winning publish: wake the waiters it was registered for with "not
+    /// cancelled". A dropped publish (a stale token) wakes nobody.
     private func notifyWaiters(_ sessionId: String) {
         guard var entry = entries[sessionId] else { return }
         let woken = entry.waiters
         entry.waiters = []
         entries[sessionId] = entry
-        for wake in woken { wake() }
+        for wake in woken { wake(false) }
     }
 }
 
@@ -531,6 +619,79 @@ func commandErrorMessage(_ error: Error?) -> String {
     guard let error else { return "unknown error" }
     if let localized = error as? LocalizedError, let description = localized.errorDescription { return description }
     return "\(error)"
+}
+
+// MARK: - Connection-scoped pull table
+
+/// One catalog pull a connection has running: the identity it was started
+/// under and the cancellable task that carries it.
+struct CommandPullJob {
+    let token: CommandDirectory.CommandPullToken
+    let task: Task<Void, Never>
+}
+
+/// The pulls of one Host connection, in a form the offline checks can drive.
+///
+/// The store's connection handling used to live entirely inside PocketStore,
+/// which no offline check target compiles, so its defects could only be found
+/// by reading: a queued pull was registered one task-hop late and the
+/// connection identity was captured inside the task, so a pull queued before
+/// a disconnect was neither in the table when the teardown drained it nor
+/// aware of which connection it belonged to, and it went on to issue its RPC
+/// against the next connection's transport. The pull table is therefore a
+/// value the gate compiles, and its invariants are checked directly:
+///
+/// - `bind` is called synchronously by the directory's pull seam, so a pull
+///   is in the table before its task can run, whatever the executor did
+///   first;
+/// - the connection identity is not a second counter that could drift from
+///   the directory's: a token names the catalog generation it was minted
+///   under, and a token whose generation is not the directory's current one
+///   is work of a dead connection (`isStale`);
+/// - `stop` cancels exactly those pulls and empties the table, so a queued
+///   body observes its own cancellation and never touches the transport.
+@MainActor
+final class CommandPullConnection {
+    private weak var directory: CommandDirectory?
+    private(set) var jobs: [CommandDirectory.CommandPullToken: CommandPullJob] = [:]
+
+    init(directory: CommandDirectory) {
+        self.directory = directory
+    }
+
+    /// Register one pull and start it. The task handle is stored before the
+    /// body can run, and the body removes it on every exit.
+    func bind(_ token: CommandDirectory.CommandPullToken,
+              _ body: @escaping @MainActor () async -> Void) {
+        let job = CommandPullJob(token: token, task: Task { @MainActor in
+            await body()
+            self.jobs.removeValue(forKey: token)
+        })
+        jobs[token] = job
+    }
+
+    /// Whether one identity belongs to a connection that is no longer the
+    /// directory's current one. Re-checked after every suspension, and
+    /// before the transport is touched.
+    func isStale(_ token: CommandDirectory.CommandPullToken) -> Bool {
+        guard let directory else { return true }
+        return !directory.isCurrent(token)
+    }
+
+    /// Whether the session key still exists in the directory's current
+    /// generation. A session that was only ever pulled by the dead
+    /// connection has no entry at all, which is already not current.
+    func hasEntry(_ sessionId: String) -> Bool {
+        directory?.currentToken(sessionId) != nil
+    }
+
+    /// Tear the connection down: cancel every pull it still has and empty
+    /// the table. The directory's own `removeAll` is the caller's to run
+    /// (it opens the new generation every token above then fails).
+    func stop() {
+        for job in jobs.values { job.task.cancel() }
+        jobs.removeAll()
+    }
 }
 
 // MARK: - Invalidation events
