@@ -244,6 +244,17 @@ final class ManualClock {
         park.release()
         let d = try unwrapped(try await switching.value, "the new selection opens after the cancel")
         assert(carrier.admit(snapshot(d)) != nil && carrier.admit(snapshot(c)) == nil)
+        // A history page belongs to the stream it was started for. While that
+        // stream is live the page may land; once it was replaced it is dropped;
+        // and once it is gone entirely (deselect, teardown) the store must also
+        // release the page's loading flag - the check pins the rule the store
+        // uses, because no snapshot of a retired stream can arrive to clear it.
+        assert(carrier.ownsConversationPage(d), "the page of the live conversation stream may land")
+        assert(!carrier.ownsConversationPage(c), "the page of a replaced stream is dropped")
+        transport.gate = nil
+        try await carrier.cancel(.conversation, on: transport)
+        assert(!carrier.ownsConversationPage(d) && carrier.streams[.conversation].isEmpty,
+               "a deselected stream is gone, so the store releases the page's loading flag")
         print("PASS A to B to nil: retire-before-await, one open per selection and no stream for a deselect")
     }
 
@@ -416,9 +427,13 @@ final class ManualClock {
             ids.append(id)
         }
         assert(ids.allSatisfy { carrier.admit(baseline($0)) != nil })
+        let conversation = ids[3]
+        assert(carrier.ownsConversationPage(conversation), "the live conversation stream owns its history page")
         carrier.beginAttempt(index: 2)
         assert(ids.allSatisfy { carrier.admit(baseline($0)) == nil },
                "a control/jobs baseline of the dead socket cannot land on the new attempt")
+        assert(!carrier.ownsConversationPage(conversation) && carrier.streams[.conversation].isEmpty,
+               "a reconnect also ends the old page's wait, so its loading flag is released")
         assert(HarnessStreamSet.Kind.allCases.allSatisfy { carrier.streams[$0].isEmpty })
         assert(!carrier.hasOwnedWork)
         // The fresh attempt mints new IDs for every stream, and the old ones

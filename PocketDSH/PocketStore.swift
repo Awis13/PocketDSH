@@ -594,12 +594,16 @@ final class PocketStore: ObservableObject {
         let stream = carrier.streams[.conversation]
         guard !stream.isEmpty else { return }
         loadingHistory = true
-        defer { if stream == carrier.streams[.conversation] { loadingHistory = false } }
+        // The flag is released when the page lands for its own stream, and when
+        // that stream is gone entirely (a deselect or a teardown): no snapshot
+        // of a retired stream can ever arrive to clear it, so the comparison
+        // alone would leave the list waiting forever.
+        defer { if carrier.ownsConversationPage(stream) || carrier.streams[.conversation].isEmpty { loadingHistory = false } }
         do {
             let page = try await api.rpc("session/page", args: ["request": .object(["address": .object(["kind": .string("session"), "sessionId": .string(id)]), "throughSeq": .number(Double(transcript.cursor)), "beforeSeq": .number(Double(beforeSeq)), "maxMessages": .number(50)])])
-            guard stream == carrier.streams[.conversation] else { return }
+            guard carrier.ownsConversationPage(stream) else { return }
             transcript.prepend(page["records"].array); rows = assistantLive.merged(with: transcript.rows); hasMore = page["hasMore"].bool
-        } catch { if stream == carrier.streams[.conversation] { self.error = error.localizedDescription } }
+        } catch { if carrier.ownsConversationPage(stream) { self.error = error.localizedDescription } }
     }
 
     // MARK: - Session command catalog
