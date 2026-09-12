@@ -304,9 +304,7 @@ struct HarnessView: View {
                     if let catalogStatus {
                         Text(catalogStatus).font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary).padding(.horizontal, 10).padding(.vertical, 6)
                     }
-                    if !commandMatches.isEmpty {
-                        Text("↑↓ choose · Tab complete · Enter run · Esc dismiss").font(.system(size: 10, design: .monospaced)).foregroundStyle(.secondary).padding(.horizontal, 10).padding(.top, 4)
-                    }
+                    Text("↑↓ choose · Tab complete · Enter run · Esc dismiss").font(.system(size: 10, design: .monospaced)).foregroundStyle(.secondary).padding(.horizontal, 10).padding(.top, 4)
                 }.fontDesign(.monospaced).padding(6).background(theme.surface.opacity(0.6), in: RoundedRectangle(cornerRadius: 8)).frame(maxWidth: 540, alignment: .leading)
             }
             if creatingTask { ProgressView("Creating task…").font(.caption) }
