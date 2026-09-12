@@ -9,12 +9,23 @@ import Foundation
         let result = parseCommand(line)!
         return (result.name, result.rawInput)
     }
-    /// Yield until the background wait reaches the expected state. A bounded
-    /// spin keeps the asynchronous checks deterministic without sleeping.
+    /// Wait until the background wait reaches the expected state. The condition
+    /// is polled with a short sleep up to a generous deadline: a fixed number of
+    /// yields is not a wait, and under a sanitizer - or a slow machine - it is
+    /// not enough for the awaiting task to register its waiter.
+    @MainActor
     static func spin(_ reached: () -> Bool) async {
-        for _ in 0..<10_000 { if reached() { return }; await Task.yield() }
-        assert(false, "the background wait never reached the expected state")
+        let deadline = ContinuousClock.now + .seconds(20)
+        while ContinuousClock.now < deadline {
+            if reached() { return }
+            try? await Task.sleep(for: .milliseconds(2))
+        }
+        assert(reached(), "the background wait never reached the expected state")
     }
+    /// The directory is `@MainActor` by construction; driving the checks on the
+    /// main actor is what makes the wait/join interleavings deterministic
+    /// instead of a race between the test body and the awaited pull.
+    @MainActor
     static func main() async throws {
         // Descriptors: input absent, present with attachments true/false,
         // and attachments absent inside a present input.

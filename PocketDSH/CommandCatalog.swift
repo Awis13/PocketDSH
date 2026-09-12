@@ -258,16 +258,21 @@ typealias CommandFetchOutcome = Result<[CommandDescriptor], Error>
 /// The session-keyed command catalog cache - a full port of
 /// dsh-client-ui-commands' CommandDirectory (lib/client.js).
 ///
-/// Threading: the JS original runs on a single UI thread; this port keeps
-/// that assumption. The fetch closure runs synchronously inside refresh, so
-/// a pull is "in flight" only while that closure executes; tests drive the
-/// class with deterministic closures and no concurrency.
+/// Isolation: the JS original runs on one UI thread and the app keeps that
+/// shape - PocketStore is `@MainActor`, a pull is handed back with
+/// `Task { @MainActor in ... }` and `ensureReadyAsync` is awaited from main-
+/// actor code - so the class is `@MainActor` and every cache mutation is
+/// serialized by construction. The offline checks drive it on the main actor
+/// too, which is what makes the wait/join interleavings deterministic: an
+/// off-actor read of `entries` racing a publish is a data race, not a test
+/// nuance.
 ///
 /// Epoch guard: every refresh bumps the entry's epoch; only the latest epoch
 /// may publish its outcome, in the success arm and in the failure arm. A
 /// ready snapshot is never demoted while a pull flies - except when that
 /// pull's own outcome is a failure, which publishes failed (the reference
 /// semantics, kept exactly).
+@MainActor
 final class CommandDirectory {
     /// The entry states: cold (untouched), pending (a pull is in flight),
     /// ready (a snapshot serves), failed (the last winning publish failed).
@@ -423,6 +428,15 @@ final class CommandDirectory {
         }
         entries[sessionId] = entry
         notifyWaiters(sessionId)
+    }
+
+    /// Publish a pull that can no longer report its real outcome because the
+    /// connection it belonged to is gone. Dropping such an outcome silently
+    /// would leave the key pending forever and strand a strong-wait, so the
+    /// pull abandons its epoch instead; the epoch guard still keeps an
+    /// abandoned pull from touching a newer entry.
+    func abandon(_ sessionId: String, epoch: Int, reason: Error) {
+        publish(sessionId, epoch: epoch, .failure(reason))
     }
 
     /// JS settled(entry): register a once-resolve waiter woken by the next

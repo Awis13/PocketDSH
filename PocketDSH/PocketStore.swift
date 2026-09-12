@@ -171,8 +171,12 @@ final class PocketStore: ObservableObject {
     private var pendingRequest: (id: String, text: String, session: String, imageIDs: [UUID])?
     private var projectionStores: [String: SessionProjectionStore] = [:]
     /// The per-session command catalog (`commands/list`), epoch-guarded by the
-    /// ported CommandDirectory. nil until the connection is set up.
-    private var commandDirectory: CommandDirectory?
+    /// ported CommandDirectory. Created on first use and never replaced, so a
+    /// pull always has somewhere to publish and a strong-wait can never be
+    /// stranded on a missing directory.
+    private lazy var commandDirectory = CommandDirectory(startPull: { [weak self] sessionId, epoch in
+        self?.startCommandPull(sessionId, epoch: epoch)
+    })
     /// The selected session's catalog snapshot as the composer palette renders
     /// it, plus the cache state behind it. The directory is not observable, so
     /// every publish and invalidation republishes these for SwiftUI.
@@ -197,11 +201,6 @@ final class PocketStore: ObservableObject {
         if restoringPrimary, let data = UserDefaults.standard.data(forKey: "harness.primaryPane.v1"),
            let state = try? JSONDecoder().decode(SavedPane.self, from: data) { restorePane(state) }
         primaryPane = restoringPrimary
-        // The directory's fetch is an RPC, so the pull is handed back here and
-        // the outcome is published under the epoch the directory minted.
-        commandDirectory = CommandDirectory(startPull: { [weak self] sessionId, epoch in
-            self?.startCommandPull(sessionId, epoch: epoch)
-        })
         SavedConnections.remember(endpoint)
     }
 
@@ -262,7 +261,7 @@ final class PocketStore: ObservableObject {
         connected = false; connecting = false; loadingHistory = false; interactions = []; clientID = ""
         // A catalog belongs to one Host connection: the next connection must
         // never serve a snapshot the previous one warmed.
-        commandDirectory?.removeAll(); syncCommandCatalog()
+        commandDirectory.removeAll(); syncCommandCatalog()
     }
     func transcribeVoice(_ data: Data, endpoint: String) async throws -> String {
         guard connected, self.endpoint == endpoint, let api else { throw HarnessError(message: "Reconnect to DSH and retry transcription.") }
@@ -345,13 +344,13 @@ final class PocketStore: ObservableObject {
                 // The reference client synthesizes `connection/reset` locally when the
                 // transport (re)connects (dsh-api-gateway client.js:1433), so every
                 // cached catalog is suspect; the directory drops and prewarms them.
-                commandDirectory?.apply(.connectionReset)
+                commandDirectory.apply(.connectionReset)
                 try await open("workspace/follow", id: "workspaces")
                 try await open("session/control", id: "control")
                 // Refresh the list after readiness; later event frames stay buffered in the socket.
                 await refresh()
                 // A selection restored before this connection has no warm entry yet.
-                if let id = selectedID { commandDirectory?.warm(id) }
+                if let id = selectedID { commandDirectory.warm(id) }
                 syncCommandCatalog()
                 if selectedID != nil { try await followSelected() }
             } else if type == "waterfall" {
@@ -372,7 +371,7 @@ final class PocketStore: ObservableObject {
                 // (dsh-client-ui-commands client.js:537-545); the mapping itself
                 // lives in CommandCatalog.swift so the offline gates can pin it.
                 if let catalogEvent = commandCatalogEvent(name: event, args: args) {
-                    commandDirectory?.apply(catalogEvent); syncCommandCatalog()
+                    commandDirectory.apply(catalogEvent); syncCommandCatalog()
                 }
             }
         } else if id == "workspaces" {
@@ -472,7 +471,7 @@ final class PocketStore: ObservableObject {
         // The catalog belongs to the selected session: republish (or clear) it
         // before any early return, so a disconnected or native switch can never
         // leave the previous session's rows in the palette.
-        if !usesNativeHarness, connected, let id { commandDirectory?.warm(id) }
+        if !usesNativeHarness, connected, let id { commandDirectory.warm(id) }
         syncCommandCatalog()
         guard connected else { return }
         if let native {
@@ -515,14 +514,18 @@ final class PocketStore: ObservableObject {
 
     /// Issue one catalog pull for one session. A subagent session has no
     /// catalog of its own, so the reference short-circuits it to an empty list
-    /// instead of calling `commands/list`; a pull that outlives its connection
-    /// publishes nothing.
+    /// instead of calling `commands/list`. Every pull ends in a publish or an
+    /// explicit abandon: a silently dropped outcome would leave the key pending
+    /// and strand a strong-wait.
     private func pullCommandCatalog(sessionId: String, epoch: Int) async {
-        guard let directory = commandDirectory else { return }
         let attempt = generation
         func publish(_ outcome: Result<[CommandDescriptor], Error>) {
-            guard attempt == generation else { return }
-            directory.publish(sessionId, epoch: epoch, outcome)
+            guard attempt == generation else {
+                commandDirectory.abandon(sessionId, epoch: epoch,
+                                         reason: HarnessError(message: "the connection was reset before the command catalog arrived"))
+                return
+            }
+            commandDirectory.publish(sessionId, epoch: epoch, outcome)
             syncCommandCatalog()
         }
         guard !usesNativeHarness else { publish(.success([])); return }
@@ -540,8 +543,8 @@ final class PocketStore: ObservableObject {
     /// directory itself is not observable, so every publish and invalidation
     /// ends here.
     private func syncCommandCatalog() {
-        commandCatalog = commandDirectory?.snapshot(selectedID ?? "") ?? []
-        commandCatalogState = commandDirectory?.status(selectedID ?? "") ?? .cold
+        commandCatalog = commandDirectory.snapshot(selectedID ?? "")
+        commandCatalogState = commandDirectory.status(selectedID ?? "")
     }
 
     /// Whether one composer line is a command line at all: the Host's own
@@ -569,14 +572,14 @@ final class PocketStore: ObservableObject {
     /// leaves the draft and the attachments in place for correction, like the
     /// reference client.
     func executeCommand(_ line: String) async {
-        guard !usesNativeHarness, connected, let api, let id = selectedID, !submitting, let directory = commandDirectory else { return }
+        guard !usesNativeHarness, connected, let api, let id = selectedID, !submitting else { return }
         let host = endpoint
         let text = line.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let name = parseCommand(text)?.name, !name.isEmpty else { return }
         submitting = true
         defer { submitting = false }
         let descriptors: [CommandDescriptor]
-        do { descriptors = try await directory.ensureReadyAsync(id) }
+        do { descriptors = try await commandDirectory.ensureReadyAsync(id) }
         catch {
             self.error = "Could not load the command catalog: " + commandErrorMessage(error)
             return
