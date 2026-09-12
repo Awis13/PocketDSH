@@ -6,6 +6,8 @@ xcrun swiftc -parse-as-library PocketDSH/HarnessProtocol.swift PocketDSH/Harness
 .build/checks/protocol-checks
 xcrun swiftc -parse-as-library PocketDSH/SavedConnections.swift Tests/SavedConnectionChecks.swift -o .build/checks/connection-checks
 .build/checks/connection-checks
+xcrun swiftc -parse-as-library PocketDSH/HarnessProtocol.swift PocketDSH/HarnessAPI.swift PocketDSH/ImageAttachments.swift PocketDSH/CommandCatalog.swift PocketDSH/ComposerSubmission.swift Tests/ComposerSubmissionChecks.swift -o .build/checks/composer-submission-checks
+.build/checks/composer-submission-checks
 xcrun swiftc -parse-as-library PocketDSH/HarnessProtocol.swift PocketDSH/SessionProjection.swift Tests/SessionProjectionChecks.swift -o .build/checks/session-projection-checks
 .build/checks/session-projection-checks
 xcrun swiftc -parse-as-library PocketDSH/HarnessProtocol.swift PocketDSH/CommandCatalog.swift Tests/CommandCatalogChecks.swift -o .build/checks/command-catalog-checks
