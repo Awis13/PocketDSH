@@ -265,6 +265,12 @@ final class PocketStore: ObservableObject {
     }
     func disconnect() {
         nativeReconnect?.cancel(); nativeReconnect = nil
+        // The generation is the connection's identity and rotating it is how
+        // the teardown is announced to everything already in flight, so the
+        // outgoing value has to be read first: the pulls below are keyed by
+        // it, and after the rotation they would look like the new
+        // connection's and be left running.
+        let dead = generation
         generation = UUID(); connectionTask?.cancel(); connectionTask = nil
         nativeShell?.disconnect(); nativeShell = nil
         native?.disconnect(); native = nil; nativeRequests = []; nativeProtocolNotices = []; nativeCompaction = nil; nativeSupportsCompaction = false; nativeCompactionPending = false; nativeQueue = []; nativeQueueOmitted = 0; nativeSupportsQueue = false; nativeDiff = nil; nativeSupportsDiff = false; nativeDiffLoading = false; nativeDiffTimeout?.cancel(); nativeDiffTimeout = nil; nativeReady = false; nativeSubmission = nil; queueTextHandlers.removeAll(); api = nil
@@ -273,9 +279,11 @@ final class PocketStore: ObservableObject {
         // A catalog belongs to one Host connection: the next connection must
         // never serve a snapshot the previous one warmed, and a pull of the
         // dead connection must not go on flying. Cancelling is best effort
-        // (an RPC already on the wire cannot be recalled); the directory's
-        // identity guard is what makes a late outcome harmless.
-        let dead = generation
+        // (an RPC already on the wire cannot be recalled), but it does stop
+        // the pulls that have not issued their RPC yet: the cancel sets the
+        // task's flag synchronously on the main actor and the pull re-checks
+        // it before it touches the transport. The directory's identity guard
+        // makes the outcome of an already-sent RPC harmless.
         for pull in commandPulls.values where pull.generation == dead { pull.task.cancel() }
         commandPulls.removeAll()
         commandDirectory.removeAll(); syncCommandCatalog()
@@ -544,12 +552,16 @@ final class PocketStore: ObservableObject {
         let sessionId = token.sessionId
         let attempt = generation
         func publish(_ outcome: Result<[CommandDescriptor], Error>) {
-            guard attempt == generation else {
+            // Both arms republish the directory's current state: a pull whose
+            // connection died abandons its token, but the published catalog
+            // and its state must still match the directory afterwards - the
+            // abandon may have dropped a pending entry the palette is showing.
+            if attempt == generation {
+                commandDirectory.publish(token, outcome)
+            } else {
                 commandDirectory.abandon(token,
                                          reason: HarnessError(message: "the connection was reset before the command catalog arrived"))
-                return
             }
-            commandDirectory.publish(token, outcome)
             syncCommandCatalog()
         }
         /// Every exit drops the task handle; the pull is over, whatever it
