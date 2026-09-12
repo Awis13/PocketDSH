@@ -14,36 +14,21 @@ struct HarnessView: View {
     @State private var commandIndex = 0
     @State private var commandsDismissed = false
     @State private var creatingTask = false
-    /// One composer-palette row. A local entry carries no catalog descriptor;
-    /// a row the session's catalog serves carries it, so the run path can tell
-    /// a command that claims an argument from a bare one.
-    private struct CommandSuggestion {
-        var name: String
-        var detail: String
-        var descriptor: CommandDescriptor?
-    }
-    private let localCommands = [("/view", "Switch chat / terminal"), ("/model", "Search models"), ("/new", "New task in default workspace"), ("/compact", "Compact model context")]
+    /// The backend the routing table is asked about. The decision itself lives
+    /// in ComposerCommandRouting, off the URL scheme, so the checks can drive
+    /// both sides.
+    private var composerBackend: ComposerBackend { store.usesNativeHarness ? .nativeHarness : .dsh }
     private var commandPaletteVisible: Bool {
         !commandsDismissed && store.draft.hasPrefix("/") && !store.draft.contains(where: { $0.isWhitespace })
     }
-    /// The palette rows: the local entries first, then the session's catalog
-    /// snapshot, deduped by name with the local entry winning - /compact is a
-    /// native editor action as well as a host command, and it stays ours.
-    private var commandMatches: [CommandSuggestion] {
+    /// The palette rows for the live draft, straight from the routing table:
+    /// the backend's local entries first, then the session's catalog snapshot,
+    /// deduped by name with the local entry winning. On the DSH backend
+    /// /compact is not a local entry, so the host command's own catalog row is
+    /// what the palette offers - and a cold or failed catalog offers none.
+    private var commandMatches: [ComposerPaletteRow] {
         guard commandPaletteVisible else { return [] }
-        let query = store.draft.lowercased()
-        var rows = localCommands.map { CommandSuggestion(name: $0.0, detail: $0.1, descriptor: nil) }
-        let localNames = Set(rows.map(\.name))
-        for descriptor in store.commandCatalog.sorted(by: { $0.name < $1.name }) {
-            let name = "/" + descriptor.name
-            guard !localNames.contains(name) else { continue }
-            // The reference shows the input hint when the command declares one
-            // (dsh-client-ui-commands client.js:643); the description is the
-            // fallback for a command with no input line.
-            let hint = descriptor.input?.hint ?? ""
-            rows.append(CommandSuggestion(name: name, detail: hint.isEmpty ? descriptor.description : hint, descriptor: descriptor))
-        }
-        return rows.filter { $0.name.hasPrefix(query) }
+        return ComposerCommandRouting.paletteRows(backend: composerBackend, catalog: store.commandCatalog, query: store.draft)
     }
     /// A cold or warming catalog has no rows to render yet; it says so instead
     /// of leaving the palette empty (the native harness has no host catalog).
@@ -55,20 +40,35 @@ struct HarnessView: View {
         case .ready: return nil
         }
     }
-    private func runCommand(_ suggestion: CommandSuggestion) {
+    private func runCommand(_ suggestion: ComposerPaletteRow) {
         guard !creatingTask else { return }
-        switch suggestion.name {
-        case "/compact": Task { await store.compactContext(fromEditor: true) }
-        case "/view": store.draft = ""; terminalInput.toggle(); store.composerFocusRequest = UUID()
-        case "/model":
-            store.draft = ""
-            if store.usesNativeHarness { store.error = "Native Harness uses the model configured on its host: " + store.modelLabel }
-            else { modelPalette = true }
-        case "/new":
-            guard store.connected else { return }
-            store.draft = ""; creatingTask = true
-            Task { await store.createDefaultTask(); creatingTask = false }
-        default:
+        // One route per line, from the same table the palette was built from:
+        // a local name runs the editor action, and everything else on the DSH
+        // backend is the host's own command path. /compact is local on the
+        // native backend only - on DSH it is the server's command (its catalog
+        // row reaches here with a bare descriptor), so no local branch may
+        // intercept it.
+        switch ComposerCommandRouting.route(line: suggestion.name, backend: composerBackend) {
+        case .local(let local):
+            switch local.name {
+            case "/view": store.draft = ""; terminalInput.toggle(); store.composerFocusRequest = UUID()
+            case "/model":
+                store.draft = ""
+                if store.usesNativeHarness { store.error = "Native Harness uses the model configured on its host: " + store.modelLabel }
+                else { modelPalette = true }
+            case "/new":
+                guard store.connected else { return }
+                store.draft = ""; creatingTask = true
+                Task { await store.createDefaultTask(); creatingTask = false }
+            default:
+                // The remaining local command is the native editor compaction.
+                // The route only reaches it on the backend whose table has the
+                // row, so there is no name literal here for a later DSH line to
+                // match by accident. A host that does not advertise the
+                // capability still refuses in the store.
+                Task { await store.compactContext(fromEditor: true) }
+            }
+        case .server:
             guard let descriptor = suggestion.descriptor else { return }
             // A command that declares an input line claims the composer with
             // its leading token; a bare command runs at once (reference
@@ -81,6 +81,8 @@ struct HarnessView: View {
                 store.draft = suggestion.name
                 if let submission = store.composerSubmission() { Task { await store.executeCommand(submission) } }
             }
+        case .none:
+            return
         }
     }
     private func moveCommand(_ delta: Int) {
@@ -128,8 +130,12 @@ struct HarnessView: View {
             runCommand(commandMatches[min(commandIndex, commandMatches.count - 1)]); return
         }
         let command = store.draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        if let local = localCommands.first(where: { $0.0 == command }) {
-            runCommand(CommandSuggestion(name: local.0, detail: local.1, descriptor: nil)); return
+        // A typed line runs through the same resolver the palette row does, so
+        // the backend decision cannot diverge between the two entry points. A
+        // local row runs as the editor action it is; there is no
+        // backend-independent /compact branch here any more.
+        if case .local(let local) = ComposerCommandRouting.route(line: command, backend: composerBackend) {
+            runCommand(ComposerPaletteRow(name: local.name, detail: local.detail, descriptor: nil)); return
         }
         // A slash line that parses as a command always takes the command path:
         // the store strong-waits the session's catalog - repulling it when the

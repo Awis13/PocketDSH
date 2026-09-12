@@ -21,6 +21,7 @@
 		482A92E75B9971A16249ED4D /* MarkdownBlocks.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9D6E11C03392FD115F72A46C /* MarkdownBlocks.swift */; };
 		4A02EBFCFE7F078CC03880F1 /* Appearance.swift in Sources */ = {isa = PBXBuildFile; fileRef = E44CCE33FA506477977F2202 /* Appearance.swift */; };
 		4B32DCC7FD423731DE545A37 /* ShellBlockViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 44B25DCB6141C9DBACE0EE9B /* ShellBlockViews.swift */; };
+		4DC609D7909E1E9BC2D8AC74 /* ComposerCommandRouting.swift in Sources */ = {isa = PBXBuildFile; fileRef = 45CB0496F0D0E83DA4BC8F39 /* ComposerCommandRouting.swift */; };
 		5860D86558FAB4821B9CBDF9 /* HarnessProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0A6ACA8367AD55DAF03625A7 /* HarnessProtocol.swift */; };
 		5B7831444E6CA8DC8A8A89BF /* ImageViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = A786C1D5582F6223B62081F3 /* ImageViews.swift */; };
 		5F0BE3F9C6B8F326C84C8411 /* ComposerSubmission.swift in Sources */ = {isa = PBXBuildFile; fileRef = E44B318D23987DA240BA7317 /* ComposerSubmission.swift */; };
@@ -81,6 +82,7 @@
 		3F19FB2A62A2A1ADAA7337ED /* Simulator.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Simulator.entitlements; sourceTree = "<group>"; };
 		44B25DCB6141C9DBACE0EE9B /* ShellBlockViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShellBlockViews.swift; sourceTree = "<group>"; };
 		4536C46B3F5C4076165E8409 /* ContextStatusView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContextStatusView.swift; sourceTree = "<group>"; };
+		45CB0496F0D0E83DA4BC8F39 /* ComposerCommandRouting.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerCommandRouting.swift; sourceTree = "<group>"; };
 		486CDE1EAA2F792AC9153AB0 /* AssistantMarkdown.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AssistantMarkdown.swift; sourceTree = "<group>"; };
 		51A0DE6E9EE1DD8033673D14 /* ShellBlockInteraction.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShellBlockInteraction.swift; sourceTree = "<group>"; };
 		56106B6E42C165653F7CEDA4 /* QueueDockView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QueueDockView.swift; sourceTree = "<group>"; };
@@ -160,6 +162,7 @@
 				07CDD0CC0057F5866D24FF20 /* Assets.xcassets */,
 				486CDE1EAA2F792AC9153AB0 /* AssistantMarkdown.swift */,
 				1257454757A244737686E29E /* CommandCatalog.swift */,
+				45CB0496F0D0E83DA4BC8F39 /* ComposerCommandRouting.swift */,
 				E44B318D23987DA240BA7317 /* ComposerSubmission.swift */,
 				F88F3CD3883D2F6BFE7D5AE7 /* ConnectionView.swift */,
 				4536C46B3F5C4076165E8409 /* ContextStatusView.swift */,
@@ -348,6 +351,7 @@
 				4A02EBFCFE7F078CC03880F1 /* Appearance.swift in Sources */,
 				FE7F024F37CCF50D8A612C40 /* AssistantMarkdown.swift in Sources */,
 				73D3D093291C0C1068444FCD /* CommandCatalog.swift in Sources */,
+				4DC609D7909E1E9BC2D8AC74 /* ComposerCommandRouting.swift in Sources */,
 				5F0BE3F9C6B8F326C84C8411 /* ComposerSubmission.swift in Sources */,
 				C103524CD83608A91CE30F86 /* ConnectionView.swift in Sources */,
 				B3E5A6229657B8C03CA87DEB /* ContextStatusView.swift in Sources */,
