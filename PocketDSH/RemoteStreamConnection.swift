@@ -184,6 +184,15 @@ final class RemoteStreamConnection {
     /// end means.
     func end(_ kind: Kind) { streams.retire(kind) }
 
+    /// Whether a history page started for `streamId` may still land: only while
+    /// that ID is still the live conversation stream. A page whose stream was
+    /// replaced, deselected or torn down belongs to nobody - and because no
+    /// snapshot of a retired stream can arrive, the caller treats "the stream
+    /// is gone" as the end of that page's wait, not only as a dropped result.
+    func ownsConversationPage(_ streamId: String) -> Bool {
+        !streamId.isEmpty && streams[.conversation] == streamId
+    }
+
     /// The store's only door for incoming frames. A frame - data, error or end
     /// alike - whose ID is not a live one is discarded here, before any state
     /// is touched.
