@@ -756,8 +756,17 @@ final class PocketStore: ObservableObject {
     /// this call reads the composer exactly once: the RPC payload and the
     /// cleanup below both work from that value.
     func submit(mode: String = "queue", snapshot: ComposerSubmission? = nil) async {
-        if native != nil { await submitNative(mode: mode); return }
-        guard let api, connected, let id = selectedID, !submitting else { return }
+        // The native queue is its own flow, and a frozen DSH snapshot is never
+        // re-homed onto it: that send belonged to the DSH connection the
+        // snapshot names, so a backend switch between the tap and this call
+        // cancels the action instead of sending whatever the native composer
+        // holds by now. A caller that froze nothing (the native path itself)
+        // still reaches the native send.
+        if native != nil {
+            if snapshot != nil { return }
+            await submitNative(mode: mode); return
+        }
+        guard !usesNativeHarness, let api, connected, let id = selectedID, !submitting else { return }
         guard !preparingImages, !selectingModel else { return }
         let frozen = snapshot ?? ComposerSubmission(draft: draft, images: images, sessionID: id, endpoint: endpoint, catalogGeneration: commandDirectory.catalogGeneration)
         // A snapshot of another session - or of a connection that has since been
