@@ -155,5 +155,51 @@ import Foundation
         assert(submissionAttachments([invalid]) == nil && submissionAttachments([])?.isEmpty == true)
         assert(submissionAttachments([a])?.count == 1 && composer(draft: "/x").imageDraftKey == host + "|s1")
         print("PASS: submission attachments validate their wire union")
+
+        // 9. The whole sequence as the store runs it, not a helper with a
+        // hand-set version: the user types (the `draft` observer), the action
+        // freezes, the send succeeds, `ComposerDrafts.applySent` decides and
+        // writes, and the observer then writes what is left back through the
+        // same ledger - `lines` is exactly what the store persists and the next
+        // `select` restores.
+        var table = ComposerDrafts()
+        table.write("hello", for: "s1")                                    // the user types
+        let sending = composer(draft: "hello", version: table.version(of: "s1"))
+        let cleared = table.applySent(sending, liveSession: "s1", liveDraft: "hello")
+        assert(cleared == ComposerDrafts.SendOutcome(liveDraft: "", forgotSavedLine: true), "an untouched sent draft is cleared")
+        table.write(cleared.liveDraft ?? "hello", for: "s1")               // the draft observer writes it back
+        assert(table.lines["s1"] == "" && table.version(of: "s1") == sending.draftVersion + 1,
+               "the sent draft stays gone through the observer and the persisted table")
+
+        // The same text cleared and typed again before the reply: a new draft.
+        var retyped = ComposerDrafts()
+        retyped.write("hello", for: "s1")
+        let earlier = composer(draft: "hello", version: retyped.version(of: "s1"))
+        retyped.write("", for: "s1")
+        retyped.write("hello", for: "s1")
+        let kept = retyped.applySent(earlier, liveSession: "s1", liveDraft: "hello")
+        assert(kept == ComposerDrafts.SendOutcome(), "a retyped identical draft is not the sent one")
+        retyped.write(kept.liveDraft ?? "hello", for: "s1")
+        assert(retyped.lines["s1"] == "hello", "the retyped draft survives the observer and the persisted table")
+
+        // A draft the user writes while the send is in flight.
+        var edited = ComposerDrafts()
+        edited.write("hello", for: "s1")
+        let inflight = composer(draft: "hello", version: edited.version(of: "s1"))
+        edited.write("a newer draft", for: "s1")
+        let keptEdited = edited.applySent(inflight, liveSession: "s1", liveDraft: "a newer draft")
+        assert(keptEdited == ComposerDrafts.SendOutcome(), "a newer draft is not the sent one")
+        edited.write(keptEdited.liveDraft ?? "a newer draft", for: "s1")
+        assert(edited.lines["s1"] == "a newer draft", "a newer draft survives the observer and the persisted table")
+
+        // The user moved to another session: the sending session's line is
+        // forgotten, the live composer is another session's and stays.
+        var moved = ComposerDrafts()
+        moved.write("hello", for: "s1")
+        let away = composer(draft: "hello", version: moved.version(of: "s1"))
+        let movedOutcome = moved.applySent(away, liveSession: "s2", liveDraft: "another session's draft")
+        assert(movedOutcome == ComposerDrafts.SendOutcome(liveDraft: nil, forgotSavedLine: true), "the saved line is forgotten")
+        assert(moved.lines["s1"] == "" && moved.lines["s2"] == nil, "only the sending session's line is forgotten")
+        print("PASS: the send cleanup sequence holds through the observer and the persisted table")
     }
 }

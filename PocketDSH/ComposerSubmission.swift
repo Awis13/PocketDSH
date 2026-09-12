@@ -94,6 +94,57 @@ struct ComposerSubmission {
     }
 }
 
+/// The composer's draft lines and their versions - the bookkeeping the send
+/// path needs, because the text alone cannot tell the draft a composer still
+/// holds from one the user cleared and typed again.
+///
+/// The store owns one of these and sends every draft write through it: the
+/// `draft` observer (a keystroke), a palette completion, the native path's
+/// clear. A write that changes a line is an edit and moves that session's
+/// version; a write that restores the same line (a `select` putting a
+/// session's own draft back) is not.
+struct ComposerDrafts {
+    /// Every session's saved draft line, exactly what `select` restores from.
+    var lines: [String: String] = [:]
+    /// How many times each session's line has changed. Kept across a bulk
+    /// reload of `lines` (both describe the same composer).
+    private(set) var versions: [String: Int] = [:]
+
+    /// Record one write to one session's line. Every write in the app goes
+    /// through here, so the version cannot drift from the line it describes.
+    mutating func write(_ text: String, for session: String) {
+        if (lines[session] ?? "") != text { versions[session, default: 0] += 1 }
+        lines[session] = text
+    }
+
+    /// The version of one session's line; 0 when nothing was written yet.
+    func version(of session: String) -> Int { versions[session] ?? 0 }
+
+    /// What one successful send leaves behind.
+    struct SendOutcome: Equatable {
+        /// The live composer must become this line; nil leaves it alone (the
+        /// send does not own it, or the user has written since).
+        var liveDraft: String?
+        /// Whether the sending session's saved line was forgotten, so the
+        /// caller persists the table the next `select` reloads.
+        var forgotSavedLine = false
+    }
+
+    /// Apply one successful send to the drafts. The decision is taken once,
+    /// before either place is written: forgetting the saved line moves the
+    /// session's version past the snapshot's, and a comparison taken after
+    /// that would leave the live composer holding a draft the send already
+    /// carried. A line the user wrote since - including the sent text cleared
+    /// and typed again - is not this send's to erase, and is left untouched.
+    @discardableResult
+    mutating func applySent(_ sent: ComposerSubmission, liveSession: String?, liveDraft: String) -> SendOutcome {
+        let untouched = sent.isSentDraft(lines[sent.sessionID] ?? liveDraft, version: version(of: sent.sessionID))
+        guard untouched else { return SendOutcome() }
+        write("", for: sent.sessionID)
+        return SendOutcome(liveDraft: liveSession == sent.sessionID ? "" : nil, forgotSavedLine: true)
+    }
+}
+
 /// What one frozen command action does once its session's catalog is servable.
 enum CommandDispatch: Equatable {
     /// The catalog claims the line, so it goes to `commands/execute` with this

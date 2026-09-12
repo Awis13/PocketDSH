@@ -73,7 +73,7 @@ final class PocketStore: ObservableObject {
     @Published var selectingModel = false
     @Published var draft = "" {
         didSet {
-            if let id = selectedID { saveDraft(draft, for: id) }
+            if let id = selectedID { draftTable.write(draft, for: id); persistDrafts() }
         }
     }
     @Published var images: [OutgoingImage] = []
@@ -161,12 +161,17 @@ final class PocketStore: ObservableObject {
     private var generation = UUID()
     private var followID = ""
     private var clientID = ""
-    private var drafts: [String: String] = [:]
-    /// How many times each session's draft line has changed. The store cannot
-    /// tell a restored line from a retyped one by its text, so the send path
-    /// compares this version instead: a draft the user cleared and typed again
-    /// is a new draft even when its text matches what was sent.
-    private var draftVersions: [String: Int] = [:]
+    /// The composer's draft lines and their versions (`ComposerDrafts`). The
+    /// version is what tells a pending send whether the line it carried is
+    /// still there; the text alone cannot.
+    private var draftTable = ComposerDrafts()
+    /// The saved lines, as the rest of the store reads and reloads them. A
+    /// bulk reload replaces the lines and keeps the versions: both describe the
+    /// same composer.
+    private var drafts: [String: String] {
+        get { draftTable.lines }
+        set { draftTable.lines = newValue }
+    }
     private var pendingRequest: (id: String, text: String, session: String, imageIDs: [UUID])?
     private var projectionStores: [String: SessionProjectionStore] = [:]
     /// The per-session command catalog (`commands/list`), epoch-guarded by the
@@ -605,7 +610,7 @@ final class PocketStore: ObservableObject {
     /// session to address.
     func composerSubmission() -> ComposerSubmission? {
         guard !usesNativeHarness, connected, let id = selectedID else { return nil }
-        return ComposerSubmission(draft: draft, images: images, sessionID: id, endpoint: endpoint, catalogGeneration: commandDirectory.catalogGeneration, draftVersion: draftVersions[id] ?? 0)
+        return ComposerSubmission(draft: draft, images: images, sessionID: id, endpoint: endpoint, catalogGeneration: commandDirectory.catalogGeneration, draftVersion: draftTable.version(of: id))
     }
 
     /// The draft map as it is persisted for the connected Host - the copy
@@ -614,32 +619,22 @@ final class PocketStore: ObservableObject {
         UserDefaults.standard.dictionary(forKey: "harness.drafts." + endpoint) as? [String: String] ?? [:]
     }
 
-    /// Record one session's draft line the way the `draft` observer does: in
-    /// the session table and in the persisted map. Both matter, because a
-    /// session table reloaded from the map would otherwise resurrect a line
-    /// this session already sent.
-    private func saveDraft(_ text: String, for session: String) {
-        // Only a write that changes the line is an edit: restoring the stored
-        // value (`select` putting a session's own draft back) is not, and must
-        // not make a pending send believe the user wrote something new.
-        if (drafts[session] ?? "") != text { draftVersions[session, default: 0] += 1 }
-        drafts[session] = text
-        var saved = savedDrafts
-        saved[session] = text
-        UserDefaults.standard.set(saved, forKey: "harness.drafts." + endpoint)
+    /// Persist the draft lines for the connected Host - the copy `select`
+    /// reloads the session table from, so a line a send forgot stays forgotten.
+    private func persistDrafts() {
+        UserDefaults.standard.set(draftTable.lines, forKey: "harness.drafts." + endpoint)
     }
 
-    /// Forget the sending session's draft line once its table still holds the
-    /// very draft this snapshot sent - the same rule the live composer follows
-    /// (`draftAfterSend`), applied to the table `select` restores from, so a
-    /// sent message does not come back when the user returns to its session. A
-    /// draft the user wrote meanwhile stays, even when its text is identical to
-    /// the sent one: the version, not the text, says whether it is still the
-    /// sent draft.
-    private func forgetSentDraft(_ sent: ComposerSubmission) {
-        guard let held = drafts[sent.sessionID],
-              sent.isSentDraft(held, version: draftVersions[sent.sessionID] ?? 0) else { return }
-        saveDraft("", for: sent.sessionID)
+    /// One successful send's effect on the composer's drafts, applied in the
+    /// order that makes it correct: `ComposerDrafts.applySent` decides before it
+    /// writes, and the live line it returns is assigned by the caller only
+    /// after its own identity guard. Returns the line the live composer must
+    /// take, or nil when this send does not own it.
+    private func applySentDraftCleanup(_ sent: ComposerSubmission) -> String? {
+        guard endpoint == sent.endpoint else { return nil }
+        let outcome = draftTable.applySent(sent, liveSession: selectedID, liveDraft: draft)
+        if outcome.forgotSavedLine { persistDrafts() }
+        return outcome.liveDraft
     }
 
     /// Run one frozen composer action through the Host's registry
@@ -722,13 +717,14 @@ final class PocketStore: ObservableObject {
             // its attachments. The live composer and the notice below belong to
             // the selected session, so they stay behind `current()`.
             let declined = value == .null || (!snapshot.images.isEmpty && execution.result.isError)
-            if !declined, endpoint == snapshot.endpoint {
+            var liveSentDraft: String?
+            if !declined {
                 let key = snapshot.imageDraftKey
                 if !snapshot.images.isEmpty, let existing = imageDrafts[key] {
                     imageDrafts[key] = snapshot.imagesAfterSend(existing)
                     saveImageDrafts(key: key)
                 }
-                forgetSentDraft(snapshot)
+                liveSentDraft = applySentDraftCleanup(snapshot)
             }
             guard current() else { return }
             guard value != .null else { self.error = "Unknown or malformed command: " + snapshot.text; return }
@@ -737,7 +733,7 @@ final class PocketStore: ObservableObject {
                 return
             }
             error = nil
-            draft = snapshot.draftAfterSend(draft, version: draftVersions[snapshot.sessionID] ?? 0)
+            if let liveSentDraft { draft = liveSentDraft }
             if !snapshot.images.isEmpty { images = snapshot.imagesAfterSend(images) }
         } catch { if current() { self.error = error.localizedDescription } }
     }
@@ -780,7 +776,7 @@ final class PocketStore: ObservableObject {
         }
         guard !usesNativeHarness, let api, connected, let id = selectedID, !submitting else { return }
         guard !preparingImages, !selectingModel else { return }
-        let frozen = snapshot ?? ComposerSubmission(draft: draft, images: images, sessionID: id, endpoint: endpoint, catalogGeneration: commandDirectory.catalogGeneration, draftVersion: draftVersions[id] ?? 0)
+        let frozen = snapshot ?? ComposerSubmission(draft: draft, images: images, sessionID: id, endpoint: endpoint, catalogGeneration: commandDirectory.catalogGeneration, draftVersion: draftTable.version(of: id))
         // A snapshot of another session - or of a connection that has since been
         // torn down - is never sent here: the user moved on and this action is
         // not theirs any more.
@@ -801,17 +797,18 @@ final class PocketStore: ObservableObject {
             // another session while the RPC was in flight - returning to it
             // must not resurrect a message that already left - while the live
             // composer is touched only while it still shows that session.
+            var liveSentDraft: String?
             if endpoint == frozen.endpoint {
                 let key = frozen.imageDraftKey
                 if let existing = imageDrafts[key] {
                     imageDrafts[key] = frozen.imagesAfterSend(existing)
                     saveImageDrafts(key: key)
                 }
-                forgetSentDraft(frozen)
+                liveSentDraft = applySentDraftCleanup(frozen)
             }
             guard frozen.stillApplies(sessionID: selectedID, endpoint: endpoint, catalogGeneration: commandDirectory.catalogGeneration) else { return }
             images = frozen.imagesAfterSend(images)
-            draft = frozen.draftAfterSend(draft, version: draftVersions[frozen.sessionID] ?? 0)
+            if let liveSentDraft { draft = liveSentDraft }
             error = nil
             reconcilePending()
         } catch { self.error = "Send not confirmed: \(error.localizedDescription). Check the conversation before retrying." }
@@ -1059,11 +1056,9 @@ extension PocketStore {
             saveShellAttachments(remaining, key: contextKey)
             let remainingDiffs = (shellDiffDrafts[contextKey] ?? savedShellDiffAttachments(key: contextKey)).filter { !submission.diffAttachmentIDs.contains($0.id) }
             saveShellDiffAttachments(remainingDiffs, key: contextKey)
-            let key = "harness.drafts." + endpoint
-            var saved = UserDefaults.standard.dictionary(forKey: key) as? [String: String] ?? [:]
-            if saved[submission.session]?.trimmingCharacters(in: .whitespacesAndNewlines) == submission.draft {
-                saved[submission.session] = ""; drafts[submission.session] = ""
-                UserDefaults.standard.set(saved, forKey: key)
+            if savedDrafts[submission.session]?.trimmingCharacters(in: .whitespacesAndNewlines) == submission.draft {
+                draftTable.write("", for: submission.session)
+                persistDrafts()
             }
             pendingRequest = nil; pendingText = nil; nativeSubmission = nil
             UserDefaults.standard.removeObject(forKey: nativeRequestKey(submission.session))
