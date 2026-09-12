@@ -14,14 +14,50 @@ struct HarnessView: View {
     @State private var commandIndex = 0
     @State private var commandsDismissed = false
     @State private var creatingTask = false
-    private let commands = [("/view", "Switch chat / terminal"), ("/model", "Search models"), ("/new", "New task in default workspace"), ("/compact", "Compact model context")]
-    private var commandMatches: [(String, String)] {
-        guard !commandsDismissed, store.draft.hasPrefix("/"), !store.draft.contains(where: { $0.isWhitespace }) else { return [] }
-        return commands.filter { $0.0.hasPrefix(store.draft.lowercased()) }
+    /// One composer-palette row. A local entry carries no catalog descriptor;
+    /// a row the session's catalog serves carries it, so the run path can tell
+    /// a command that claims an argument from a bare one.
+    private struct CommandSuggestion {
+        var name: String
+        var detail: String
+        var descriptor: CommandDescriptor?
     }
-    private func runCommand(_ command: String) {
+    private let localCommands = [("/view", "Switch chat / terminal"), ("/model", "Search models"), ("/new", "New task in default workspace"), ("/compact", "Compact model context")]
+    private var commandPaletteVisible: Bool {
+        !commandsDismissed && store.draft.hasPrefix("/") && !store.draft.contains(where: { $0.isWhitespace })
+    }
+    /// The palette rows: the local entries first, then the session's catalog
+    /// snapshot, deduped by name with the local entry winning - /compact is a
+    /// native editor action as well as a host command, and it stays ours.
+    private var commandMatches: [CommandSuggestion] {
+        guard commandPaletteVisible else { return [] }
+        let query = store.draft.lowercased()
+        var rows = localCommands.map { CommandSuggestion(name: $0.0, detail: $0.1, descriptor: nil) }
+        let localNames = Set(rows.map(\.name))
+        for descriptor in store.commandCatalog.sorted(by: { $0.name < $1.name }) {
+            let name = "/" + descriptor.name
+            guard !localNames.contains(name) else { continue }
+            // The reference shows the input hint when the command declares one
+            // (dsh-client-ui-commands client.js:643); the description is the
+            // fallback for a command with no input line.
+            let hint = descriptor.input?.hint ?? ""
+            rows.append(CommandSuggestion(name: name, detail: hint.isEmpty ? descriptor.description : hint, descriptor: descriptor))
+        }
+        return rows.filter { $0.name.hasPrefix(query) }
+    }
+    /// A cold or warming catalog has no rows to render yet; it says so instead
+    /// of leaving the palette empty (the native harness has no host catalog).
+    private var catalogStatus: String? {
+        guard !store.usesNativeHarness else { return nil }
+        switch store.commandCatalogState {
+        case .cold, .pending: return "Loading commands..."
+        case .failed: return "Commands unavailable"
+        case .ready: return nil
+        }
+    }
+    private func runCommand(_ suggestion: CommandSuggestion) {
         guard !creatingTask else { return }
-        switch command {
+        switch suggestion.name {
         case "/compact": Task { await store.compactContext(fromEditor: true) }
         case "/view": store.draft = ""; terminalInput.toggle(); store.composerFocusRequest = UUID()
         case "/model":
@@ -32,7 +68,19 @@ struct HarnessView: View {
             guard store.connected else { return }
             store.draft = ""; creatingTask = true
             Task { await store.createDefaultTask(); creatingTask = false }
-        default: return
+        default:
+            guard let descriptor = suggestion.descriptor else { return }
+            // A command that declares an input line claims the composer with
+            // its leading token; a bare command runs at once (reference
+            // dispatch, dsh-client-ui-commands client.js:682-688). The store
+            // refuses attachments the command does not admit.
+            if descriptor.input != nil {
+                store.draft = suggestion.name + " "
+                store.composerFocusRequest = UUID()
+            } else {
+                store.draft = suggestion.name
+                Task { await store.executeCommand(suggestion.name) }
+            }
         }
     }
     private func moveCommand(_ delta: Int) {
@@ -41,7 +89,7 @@ struct HarnessView: View {
     }
     private func completeCommand() {
         guard !commandMatches.isEmpty else { return }
-        store.draft = commandMatches[min(commandIndex, commandMatches.count - 1)].0
+        store.draft = commandMatches[min(commandIndex, commandMatches.count - 1)].name
     }
     @AppStorage("harness.terminalInput") private var savedTerminalInput = false
     private var terminalInput: Bool {
@@ -72,10 +120,12 @@ struct HarnessView: View {
     }
     private func sendPrompt() {
         if !commandMatches.isEmpty {
-            runCommand(commandMatches[min(commandIndex, commandMatches.count - 1)].0); return
+            runCommand(commandMatches[min(commandIndex, commandMatches.count - 1)]); return
         }
         let command = store.draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        if commands.contains(where: { $0.0 == command }) { runCommand(command); return }
+        if let local = localCommands.first(where: { $0.0 == command }) {
+            runCommand(CommandSuggestion(name: local.0, detail: local.1, descriptor: nil)); return
+        }
         // A catalog command line: a command declaring an input line submits the
         // line as typed, a bare one only while nothing follows the name
         // (reference matchEnter, dsh-client-ui-commands client.js:712-758), and
@@ -238,20 +288,25 @@ struct HarnessView: View {
                     Text(store.usesNativeHarness ? "Native" : "DSH").foregroundStyle(theme.accent)
                 }.font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
             }
-            if !commandMatches.isEmpty {
+            if commandPaletteVisible && (!commandMatches.isEmpty || catalogStatus != nil) {
                 VStack(alignment: .leading, spacing: 2) {
-                    ForEach(Array(commandMatches.enumerated()), id: \.element.0) { index, command in
-                        Button { runCommand(command.0) } label: {
+                    ForEach(Array(commandMatches.enumerated()), id: \.element.name) { index, command in
+                        Button { runCommand(command) } label: {
                             HStack(spacing: 12) {
                                 Text(index == commandIndex ? "❯" : " ").foregroundStyle(theme.accent)
-                                Text(command.0).frame(width: 68, alignment: .leading)
-                                Text(command.1).foregroundStyle(.secondary).lineLimit(1)
+                                Text(command.name).frame(minWidth: 68, alignment: .leading)
+                                Text(command.detail).foregroundStyle(.secondary).lineLimit(1)
                                 Spacer(minLength: 0)
                             }.font(.system(size: 13, design: .monospaced)).padding(.horizontal, 10).padding(.vertical, 8)
                                 .background(index == commandIndex ? theme.accent.opacity(0.12) : .clear, in: RoundedRectangle(cornerRadius: 5))
-                        }.buttonStyle(.plain).disabled(creatingTask).accessibilityIdentifier("command" + command.0)
+                        }.buttonStyle(.plain).disabled(creatingTask).accessibilityIdentifier("command" + command.name)
                     }
-                    Text("↑↓ choose · Tab complete · Enter run · Esc dismiss").font(.system(size: 10, design: .monospaced)).foregroundStyle(.secondary).padding(.horizontal, 10).padding(.top, 4)
+                    if let catalogStatus {
+                        Text(catalogStatus).font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary).padding(.horizontal, 10).padding(.vertical, 6)
+                    }
+                    if !commandMatches.isEmpty {
+                        Text("↑↓ choose · Tab complete · Enter run · Esc dismiss").font(.system(size: 10, design: .monospaced)).foregroundStyle(.secondary).padding(.horizontal, 10).padding(.top, 4)
+                    }
                 }.fontDesign(.monospaced).padding(6).background(theme.surface.opacity(0.6), in: RoundedRectangle(cornerRadius: 8)).frame(maxWidth: 540, alignment: .leading)
             }
             if creatingTask { ProgressView("Creating task…").font(.caption) }
