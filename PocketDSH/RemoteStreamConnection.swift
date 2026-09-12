@@ -184,14 +184,38 @@ final class RemoteStreamConnection {
     /// end means.
     func end(_ kind: Kind) { streams.retire(kind) }
 
-    /// Whether a history page started for `streamId` may still land: only while
-    /// that ID is still the live conversation stream. A page whose stream was
-    /// replaced, deselected or torn down belongs to nobody - and because no
-    /// snapshot of a retired stream can arrive, the caller treats "the stream
-    /// is gone" as the end of that page's wait, not only as a dropped result.
-    func ownsConversationPage(_ streamId: String) -> Bool {
-        !streamId.isEmpty && streams[.conversation] == streamId
+    /// The identity of one outstanding history page: the conversation stream it
+    /// was started for and the page number that owns the store's loading flag.
+    /// A page lands only while its own stream is still live, and it releases
+    /// the flag only while it is still the newest page - so a page whose stream
+    /// a reconnect re-followed still ends its own wait (no newer page exists),
+    /// while a page that a newer page superseded cannot clear the newer one's
+    /// state. No snapshot of a retired stream can arrive, so ending the wait is
+    /// the caller's job and not something the socket will do for it.
+    struct PageWait: Equatable {
+        let stream: String
+        let number: Int
     }
+
+    private var pageNumber = 0
+
+    /// Begin one history page on the live conversation stream; nil when there
+    /// is no live stream to page into.
+    func beginPage() -> PageWait? {
+        let stream = streams[.conversation]
+        guard !stream.isEmpty else { return nil }
+        pageNumber += 1
+        return PageWait(stream: stream, number: pageNumber)
+    }
+
+    /// Whether the page may still land: only while its own stream is still the
+    /// live conversation stream.
+    func owns(_ page: PageWait) -> Bool {
+        !page.stream.isEmpty && streams[.conversation] == page.stream
+    }
+
+    /// Whether the page still owns the loading flag: only the newest page does.
+    func isNewest(_ page: PageWait) -> Bool { page.number == pageNumber }
 
     /// The store's only door for incoming frames. A frame - data, error or end
     /// alike - whose ID is not a live one is discarded here, before any state

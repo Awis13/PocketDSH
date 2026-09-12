@@ -226,6 +226,7 @@ final class ManualClock {
         assert(carrier.admit(snapshot(a)) == nil && carrier.admit(delta(a)) == nil, "no frame of the left session lands")
         assert(carrier.admit(snapshot(b)) == nil, "the deselected session stops streaming too")
         assert(carrier.streams[.conversation].isEmpty)
+        assert(carrier.beginPage() == nil, "a deselect leaves no stream to page into")
         let sent = transport.frames.count
         try await carrier.cancel(.conversation, on: transport)
         assert(transport.frames.count == sent, "a deselect with nothing live sends nothing")
@@ -244,17 +245,29 @@ final class ManualClock {
         park.release()
         let d = try unwrapped(try await switching.value, "the new selection opens after the cancel")
         assert(carrier.admit(snapshot(d)) != nil && carrier.admit(snapshot(c)) == nil)
-        // A history page belongs to the stream it was started for. While that
-        // stream is live the page may land; once it was replaced it is dropped;
-        // and once it is gone entirely (deselect, teardown) the store must also
-        // release the page's loading flag - the check pins the rule the store
-        // uses, because no snapshot of a retired stream can arrive to clear it.
-        assert(carrier.ownsConversationPage(d), "the page of the live conversation stream may land")
-        assert(!carrier.ownsConversationPage(c), "the page of a replaced stream is dropped")
+        // A history page belongs to the stream it was started for, and its wait
+        // belongs to the page itself. While that stream is live the page may
+        // land; a replaced stream owns no page; and a page whose stream was
+        // re-followed as a fresh one (a reconnect) still ends its own wait,
+        // because no newer page exists and its snapshot can never arrive.
+        let page = try unwrapped(carrier.beginPage(), "a page starts on the live conversation stream")
+        assert(carrier.owns(page) && carrier.isNewest(page), "the page of the live stream may land and owns the flag")
+        let replaced = try unwrapped(carrier.beginPage(), "the next page starts on the same stream")
+        assert(!carrier.isNewest(page) && carrier.isNewest(replaced),
+               "a newer page owns the loading flag, so the older one cannot clear it")
+        assert(!carrier.owns(RemoteStreamConnection.PageWait(stream: c, number: replaced.number)),
+               "the page of a replaced stream is dropped")
+        carrier.beginAttempt(index: 2)
+        assert(!carrier.owns(replaced), "a reconnect drops the page of the stream it replaced")
+        assert(carrier.isNewest(replaced),
+               "the re-followed stream mints no newer page, so that page still ends its own wait")
         transport.gate = nil
-        try await carrier.cancel(.conversation, on: transport)
-        assert(!carrier.ownsConversationPage(d) && carrier.streams[.conversation].isEmpty,
-               "a deselected stream is gone, so the store releases the page's loading flag")
+        _ = try await carrier.subscribe(.conversation, endpoint: "session/follow",
+                                        args: conversationArgs("session-e"), on: transport)
+        assert(!carrier.owns(replaced), "the page stays dropped after the re-follow")
+        let afterReconnect = try unwrapped(carrier.beginPage(), "a page starts on the re-followed stream")
+        assert(carrier.owns(afterReconnect) && !carrier.isNewest(replaced),
+               "a page started after the reconnect owns the flag; the stale one can no longer clear it")
         print("PASS A to B to nil: retire-before-await, one open per selection and no stream for a deselect")
     }
 
@@ -427,13 +440,16 @@ final class ManualClock {
             ids.append(id)
         }
         assert(ids.allSatisfy { carrier.admit(baseline($0)) != nil })
-        let conversation = ids[3]
-        assert(carrier.ownsConversationPage(conversation), "the live conversation stream owns its history page")
+        let page = try unwrapped(carrier.beginPage(), "the live conversation stream takes a page")
+        assert(carrier.owns(page) && carrier.isNewest(page))
         carrier.beginAttempt(index: 2)
         assert(ids.allSatisfy { carrier.admit(baseline($0)) == nil },
                "a control/jobs baseline of the dead socket cannot land on the new attempt")
-        assert(!carrier.ownsConversationPage(conversation) && carrier.streams[.conversation].isEmpty,
-               "a reconnect also ends the old page's wait, so its loading flag is released")
+        assert(!carrier.owns(page) && carrier.streams[.conversation].isEmpty,
+               "a reconnect drops the page of its dead stream")
+        assert(carrier.isNewest(page),
+               "the reconnect mints no newer page, so the dropped page still ends its own wait")
+        assert(carrier.beginPage() == nil, "a torn-down attempt has no stream to page into")
         assert(HarnessStreamSet.Kind.allCases.allSatisfy { carrier.streams[$0].isEmpty })
         assert(!carrier.hasOwnedWork)
         // The fresh attempt mints new IDs for every stream, and the old ones

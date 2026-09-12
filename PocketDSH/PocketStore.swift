@@ -346,11 +346,12 @@ final class PocketStore: ObservableObject {
                 self.connected = false; self.interactions = []
                 self.error = "Connection interrupted. " + error.localizedDescription
                 self.connectionDiagnostic("websocket-failed", error: error, details: ["closeCode": closeCode, "attempt": attempt.index])
-            } onFinish: {
+            } onFinish: { [weak self] in
                 // Only the carrier whose connection is still the current one
                 // reports its end: a superseded carrier must not clear the
                 // state of the connection that replaced it.
-                if self.generation == token { self.connecting = false }
+                guard let self, self.generation == token else { return }
+                self.connecting = false
             }
         }
     }
@@ -360,8 +361,11 @@ final class PocketStore: ObservableObject {
     private func carrierAttempt(_ attempt: RemoteStreamConnection.Attempt, api: HarnessAPI, generation token: UUID) async throws {
         let socket = api.socket()
         self.socket = socket
-        carrier.startPing(ping: { try await socket.ping() }, onFailure: { attempt, error in
-            self.connectionDiagnostic("ping-failed", error: error, details: ["attempt": attempt.index])
+        // The ping's callbacks are weakly held: the job is owned by the
+        // coordinator, which the store owns, and a closure that captured the
+        // store strongly would keep it alive for as long as a ping hangs.
+        carrier.startPing(ping: { try await socket.ping() }, onFailure: { [weak self] attempt, error in
+            self?.connectionDiagnostic("ping-failed", error: error, details: ["attempt": attempt.index])
         })
         try await carrier.subscribe(.events, endpoint: "$events", on: socket)
         while !Task.isCancelled {
@@ -591,19 +595,19 @@ final class PocketStore: ObservableObject {
         // The history page belongs to the conversation stream it was started
         // for: a page that lands after a switch, a deselect or a reconnect is
         // dropped instead of being prepended to another session's transcript.
-        let stream = carrier.streams[.conversation]
-        guard !stream.isEmpty else { return }
+        guard let page = carrier.beginPage() else { return }
         loadingHistory = true
-        // The flag is released when the page lands for its own stream, and when
-        // that stream is gone entirely (a deselect or a teardown): no snapshot
-        // of a retired stream can ever arrive to clear it, so the comparison
-        // alone would leave the list waiting forever.
-        defer { if carrier.ownsConversationPage(stream) || carrier.streams[.conversation].isEmpty { loadingHistory = false } }
+        // This flag describes exactly this page's wait, and only one page can
+        // be in flight, so the page that is still the newest one ends it - even
+        // when its own stream was replaced meanwhile (a reconnect that
+        // re-followed a fresh stream): no other code path would ever clear it,
+        // because the page's snapshot can no longer arrive.
+        defer { if carrier.isNewest(page) { loadingHistory = false } }
         do {
-            let page = try await api.rpc("session/page", args: ["request": .object(["address": .object(["kind": .string("session"), "sessionId": .string(id)]), "throughSeq": .number(Double(transcript.cursor)), "beforeSeq": .number(Double(beforeSeq)), "maxMessages": .number(50)])])
-            guard carrier.ownsConversationPage(stream) else { return }
-            transcript.prepend(page["records"].array); rows = assistantLive.merged(with: transcript.rows); hasMore = page["hasMore"].bool
-        } catch { if carrier.ownsConversationPage(stream) { self.error = error.localizedDescription } }
+            let result = try await api.rpc("session/page", args: ["request": .object(["address": .object(["kind": .string("session"), "sessionId": .string(id)]), "throughSeq": .number(Double(transcript.cursor)), "beforeSeq": .number(Double(beforeSeq)), "maxMessages": .number(50)])])
+            guard carrier.owns(page) else { return }
+            transcript.prepend(result["records"].array); rows = assistantLive.merged(with: transcript.rows); hasMore = result["hasMore"].bool
+        } catch { if carrier.owns(page) { self.error = error.localizedDescription } }
     }
 
     // MARK: - Session command catalog
