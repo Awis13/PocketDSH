@@ -174,8 +174,8 @@ final class PocketStore: ObservableObject {
     /// ported CommandDirectory. Created on first use and never replaced, so a
     /// pull always has somewhere to publish and a strong-wait can never be
     /// stranded on a missing directory.
-    private lazy var commandDirectory = CommandDirectory(startPull: { [weak self] sessionId, epoch in
-        self?.startCommandPull(sessionId, epoch: epoch)
+    private lazy var commandDirectory = CommandDirectory(startPull: { [weak self] token in
+        self?.startCommandPull(token)
     })
     /// The selected session's catalog snapshot as the composer palette renders
     /// it, plus the cache state behind it. The directory is not observable, so
@@ -506,10 +506,10 @@ final class PocketStore: ObservableObject {
 
     /// The directory's pull seam. The ported directory drives its pulls
     /// synchronously, while the RPC cannot be, so the pull is handed to the
-    /// main actor and its outcome published under the epoch the directory
+    /// main actor and its outcome published under the token the directory
     /// minted (`CommandDirectory.publish`).
-    private nonisolated func startCommandPull(_ sessionId: String, epoch: Int) {
-        Task { @MainActor [weak self] in await self?.pullCommandCatalog(sessionId: sessionId, epoch: epoch) }
+    private nonisolated func startCommandPull(_ token: CommandDirectory.CommandPullToken) {
+        Task { @MainActor [weak self] in await self?.pullCommandCatalog(token) }
     }
 
     /// Issue one catalog pull for one session. A subagent session has no
@@ -517,15 +517,16 @@ final class PocketStore: ObservableObject {
     /// instead of calling `commands/list`. Every pull ends in a publish or an
     /// explicit abandon: a silently dropped outcome would leave the key pending
     /// and strand a strong-wait.
-    private func pullCommandCatalog(sessionId: String, epoch: Int) async {
+    private func pullCommandCatalog(_ token: CommandDirectory.CommandPullToken) async {
+        let sessionId = token.sessionId
         let attempt = generation
         func publish(_ outcome: Result<[CommandDescriptor], Error>) {
             guard attempt == generation else {
-                commandDirectory.abandon(sessionId, epoch: epoch,
+                commandDirectory.abandon(token,
                                          reason: HarnessError(message: "the connection was reset before the command catalog arrived"))
                 return
             }
-            commandDirectory.publish(sessionId, epoch: epoch, outcome)
+            commandDirectory.publish(token, outcome)
             syncCommandCatalog()
         }
         guard !usesNativeHarness else { publish(.success([])); return }
