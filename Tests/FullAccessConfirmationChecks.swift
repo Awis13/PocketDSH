@@ -91,21 +91,42 @@ final class RecordingTransport {
         assert(!FullAccessPolicy.isEscalation(line: "/permissions danger-full-access"), "another command name is not the switch")
         assert(!FullAccessPolicy.isEscalation(line: "permission danger-full-access"), "a line that does not parse as a command never escalates")
         assert(!FullAccessPolicy.isEscalation(line: ""))
+        // Every character `String.prototype.trim()` removes around the argument
+        // is trimmed here too, on both sides: a class that missed one would send
+        // a line this client read as an ordinary command while the Host trims it,
+        // finds the preset and applies it - an escalation without a question.
+        let jsTrim = ["\u{0009}", "\u{000A}", "\u{000B}", "\u{000C}", "\u{000D}", "\u{0020}", "\u{00A0}",
+                      "\u{1680}", "\u{2000}", "\u{2005}", "\u{200A}", "\u{2028}", "\u{2029}", "\u{202F}",
+                      "\u{205F}", "\u{3000}", "\u{FEFF}"]
+        for space in jsTrim {
+            let scalar = String(space.unicodeScalars.first!.value, radix: 16, uppercase: true)
+            assert(FullAccessPolicy.isEscalation(line: "/permission \(space)danger-full-access"), "a leading U+\(scalar) is trimmed like the Host trims it")
+            assert(FullAccessPolicy.isEscalation(line: "/permission danger-full-access\(space)"), "a trailing U+\(scalar) is trimmed like the Host trims it")
+            assert(!FullAccessPolicy.isEscalation(line: "/permission danger\(space)full-access"), "an inner U+\(scalar) is not the preset the Host applies")
+        }
         print("PASS: only the exact /permission danger-full-access line escalates")
 
         // 2. The catalog still decides what is a command at all: the escalation
         // is reached only through a row the session's catalog serves, and every
         // ordinary claimed line runs without a question.
-        guard case .execute(let claimed) = resolveCommandDispatch(composer(draft: "/permission danger-full-access"), descriptors: catalog) else {
-            return assert(false, "the catalog row claims its own line")
+        let asked = resolveCommandDispatch(composer(draft: "/permission danger-full-access"), descriptors: catalog)
+        guard case .confirmFullAccess(let claimed) = asked else {
+            return assert(false, "the claimed escalation is the one line that asks first, got \(asked)")
         }
         assert(claimed.name == "permission" && FullAccessPolicy.isEscalation(line: "/permission danger-full-access"))
         for line in ["/compact", "/goal", "/help", "/permission", "/permission workspace-write"] {
             guard case .execute(let row) = resolveCommandDispatch(composer(draft: line), descriptors: catalog) else {
-                return assert(false, "\(line) is claimed by the catalog")
+                return assert(false, "\(line) is claimed by the catalog and runs without asking")
             }
             assert(row.name == submittedCommandName(line), "the row is the catalog's own description of the line")
             assert(!FullAccessPolicy.isEscalation(line: line), "\(line) is an ordinary command and asks nothing")
+        }
+        // The escalation with attachments is refused before the question, so a
+        // line the Host would reject never produces an alert at all.
+        if case .refusesAttachments(let message) = resolveCommandDispatch(composer(draft: "/permission danger-full-access", images: [image("a.jpg")]), descriptors: catalog) {
+            assert(message == "The /permission command does not accept attachments. Remove them first.")
+        } else {
+            assert(false, "an escalation carrying attachments is refused like any command that takes none")
         }
         // A line no catalog row claims never reaches the escalation: it falls
         // through to the message path, exactly like any other unknown command.

@@ -256,9 +256,18 @@ private func decode(_ scalars: ArraySlice<Unicode.Scalar>) -> String {
     String(decoding: scalars.map { $0.value }, as: UTF32.self)
 }
 
-/// JS trim()/\s whitespace, ASCII plus NBSP.
+/// JS trim()/\s whitespace: the WhiteSpace and LineTerminator set of the
+/// language, which is what `String.prototype.trim()` removes - TAB, LF, VT, FF,
+/// CR, SPACE, NBSP, OGHAM SPACE MARK, the EN QUAD..HAIR SPACE run, LINE/PARAGRAPH
+/// SEPARATOR, NARROW NO-BREAK SPACE, MEDIUM MATHEMATICAL SPACE, IDEOGRAPHIC SPACE
+/// and ZWNBSP. The gap matters: the Host compares `/permission`'s argument with
+/// the same trim, so a class that misses U+FEFF or U+3000 would send a line the
+/// Host reads as the escalation while this client saw an ordinary command.
 private func isCommandLineWhitespace(_ scalar: UInt32) -> Bool {
-    (9...13).contains(scalar) || scalar == 32 || scalar == 160
+    if (9...13).contains(scalar) || scalar == 32 || scalar == 160 || scalar == 0x1680 { return true }
+    if (0x2000...0x200A).contains(scalar) || scalar == 0x2028 || scalar == 0x2029 { return true }
+    if scalar == 0x202F || scalar == 0x205F || scalar == 0x3000 || scalar == 0xFEFF { return true }
+    return false
 }
 
 // MARK: - Directory cache

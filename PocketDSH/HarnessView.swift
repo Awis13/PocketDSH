@@ -254,6 +254,7 @@ struct HarnessView: View {
             .onChange(of: store.draft) { _, text in
                 commandIndex = 0; commandsDismissed = false
             }
+            .fullAccessConfirmation(store)
     }
     private var bottomPanel: some View {
         VStack(spacing: 0) {
@@ -1051,6 +1052,40 @@ private final class PaletteTextField: UITextField {
     @objc private func closePalette() { cancel?() }
 }
 
+/// The escalation question of one store, rendered wherever that store's UI is.
+///
+/// The question belongs to a store and not to the app: a desktop workspace
+/// renders one `PocketStore` per pane (`WorkspaceModel.render`), so a question
+/// asked in a split pane would never be seen if only the app's own store could
+/// present it - and the approval card's button used to own a local alert that
+/// worked in any pane. Both routes publish the same pending confirmation into
+/// their own store, and `FullAccessPolicy` supplies the strings, so every pane
+/// asks the same question exactly once.
+///
+/// Presentation only: the pending value is the store's, each button ends it
+/// through the store, and a dismissal that carries no decision (a session
+/// switch, a reconnect, a teardown) ends it there - a closed alert never leaves
+/// an action armed.
+struct FullAccessConfirmationAlert: ViewModifier {
+    @ObservedObject var store: PocketStore
+    func body(content: Content) -> some View {
+        content.alert(FullAccessPolicy.title, isPresented: Binding(get: { store.accessConfirmation != nil }, set: { _ in }),
+                      presenting: store.accessConfirmation) { pending in
+            Button(FullAccessPolicy.cancelLabel, role: .cancel) { store.cancelFullAccess(pending.id) }
+            Button(pending.enableLabel, role: .destructive) { Task { await store.confirmFullAccess(pending.id) } }
+        } message: { _ in
+            Text(FullAccessPolicy.message)
+        }
+    }
+}
+
+extension View {
+    /// Present one store's pending escalation question on that store's surface.
+    func fullAccessConfirmation(_ store: PocketStore) -> some View {
+        modifier(FullAccessConfirmationAlert(store: store))
+    }
+}
+
 #if DEBUG
 struct ApprovalKeyboardPreview: View {
     @StateObject private var store = PocketStore()
@@ -1065,6 +1100,7 @@ struct ApprovalKeyboardPreview: View {
                 .environmentObject(store).frame(maxWidth: 560)
             Text(decision).accessibilityIdentifier("previewDecision")
         }.padding(30).task { store.connected = true; store.interactions = [item, item, item] }
+            .fullAccessConfirmation(store)
     }
 }
 #endif

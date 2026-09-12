@@ -9,6 +9,7 @@
 /* Begin PBXBuildFile section */
 		01462F8C0CA4072255F2C695 /* DiffReviewView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 98AC5E64694BD203ECD59670 /* DiffReviewView.swift */; };
 		03B819346632AC4A00020F68 /* FullAccessConfirmation.swift in Sources */ = {isa = PBXBuildFile; fileRef = F69B120ED2F48AADB9929C31 /* FullAccessConfirmation.swift */; };
+		060F97E68B0FE8B107CB8860 /* FullAccessConfirmationUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1422AFAC70E95BDC32EFD933 /* FullAccessConfirmationUITests.swift */; };
 		07B0636E1F8662F3B84B0B0C /* HomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6DA2E6D500176C6992989EE1 /* HomeView.swift */; };
 		17DB52B0576409D2EA9E2C0C /* SymbolsNerdFontMono-Regular.ttf in Resources */ = {isa = PBXBuildFile; fileRef = 0C0F59F2281C005DD28D2339 /* SymbolsNerdFontMono-Regular.ttf */; };
 		2BE9481F5EB86B12C151E7FD /* ImageAttachments.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8742D0DC00E6185285EF6EC5 /* ImageAttachments.swift */; };
@@ -67,6 +68,7 @@
 		0C0F59F2281C005DD28D2339 /* SymbolsNerdFontMono-Regular.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "SymbolsNerdFontMono-Regular.ttf"; sourceTree = "<group>"; };
 		10B1E247125D45F27D6465B8 /* SwiftTerm */ = {isa = PBXFileReference; lastKnownFileType = folder; name = SwiftTerm; path = Vendor/SwiftTerm; sourceTree = SOURCE_ROOT; };
 		1257454757A244737686E29E /* CommandCatalog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CommandCatalog.swift; sourceTree = "<group>"; };
+		1422AFAC70E95BDC32EFD933 /* FullAccessConfirmationUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FullAccessConfirmationUITests.swift; sourceTree = "<group>"; };
 		19B8B07078D82DC7A7EE6EC4 /* HarnessView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HarnessView.swift; sourceTree = "<group>"; };
 		1A005021572717D11BE5AED6 /* PaneFocusNavigator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneFocusNavigator.swift; sourceTree = "<group>"; };
 		212067D3F85E4C892F86FBAD /* TurnNotifications.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TurnNotifications.swift; sourceTree = "<group>"; };
@@ -137,6 +139,7 @@
 		3F91B83645725470796F30BB /* PocketDSHUITests */ = {
 			isa = PBXGroup;
 			children = (
+				1422AFAC70E95BDC32EFD933 /* FullAccessConfirmationUITests.swift */,
 				2857133C101D3C58E9BF2E69 /* PocketDSHUITests.swift */,
 			);
 			path = PocketDSHUITests;
@@ -333,6 +336,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				060F97E68B0FE8B107CB8860 /* FullAccessConfirmationUITests.swift in Sources */,
 				F82514CECEDCCADF6AFEEEC6 /* PocketDSHUITests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
