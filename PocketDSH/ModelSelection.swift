@@ -146,28 +146,32 @@ final class ModelSelectionGate {
 
     /// The operation that now owns the busy state, or nil when idle.
     private(set) var active: Operation?
+    /// The busy closure of the active operation, retained so invalidateCurrent
+    /// can release the busy state of an operation it drops.
+    private var busy: (@MainActor (Bool) -> Void)?
 
-    /// Run one selection. "live" reports whether "op" is still the active
-    /// operation on a live session and connection; "rpc" is the transport. A
-    /// response is applied only while "live" holds at that response boundary,
-    /// so a deferred response cannot land after a newer request owns the seat.
+    /// Run one selection. "op" is the operation the caller created - and
+    /// thereby owns - and keeps for its own ownership checks after the
+    /// response. "live" reports whether "op" is still the active operation on
+    /// a live session and connection; "rpc" is the transport. A response is
+    /// applied only while "live" holds at that response boundary, so a
+    /// deferred response cannot land after a newer request owns the seat.
     /// "onAccepted" receives the full accepted response - the caller extracts
     /// the selection from it; "onCatalog" receives the refreshed catalog.
     /// "onBusy(true)" marks the operation active, "onBusy(false)" releases the
     /// busy state - only the operation that was still active does.
-    func select(provider: String, model: String, effort: String?,
-                sessionID: String, endpoint: String, generation: UUID, epoch: UUID, attempt: RemoteStreamConnection.RefreshToken?,
-                onBusy: @MainActor (Bool) -> Void,
+    func select(_ op: Operation, provider: String, model: String, effort: String?,
+                onBusy: @escaping @MainActor (Bool) -> Void,
                 rpc: @MainActor (String, [String: JSON]) async throws -> JSON,
                 live: @MainActor (Operation) -> Bool,
                 onAccepted: @MainActor (JSON) -> Void,
                 onCatalog: @MainActor (JSON) -> Void) async -> (outcome: Outcome, operation: Operation) {
-        let op = Operation(sessionID: sessionID, endpoint: endpoint, generation: generation, epoch: epoch, attempt: attempt)
         active = op
+        busy = onBusy
         onBusy(true)
         var catalogOK = true
         do {
-            let value = try await rpc("session/selectModel", selectModelRequest(provider: provider, model: model, effort: effort, sessionID: sessionID))
+            let value = try await rpc("session/selectModel", selectModelRequest(provider: provider, model: model, effort: effort, sessionID: op.sessionID))
             guard live(op), active === op else { return settle(op, .stale, onBusy: onBusy) }
             onAccepted(value)
             do {
@@ -191,5 +195,17 @@ final class ModelSelectionGate {
     private func settle(_ op: Operation, _ outcome: Outcome, onBusy: (Bool) -> Void) -> (outcome: Outcome, operation: Operation) {
         if active === op { active = nil; onBusy(false) }
         return (outcome, op)
+    }
+
+    /// The session or the connection itself has moved on: the in-flight
+    /// operation can no longer land, so its ownership - and the busy state it
+    /// owns - are dropped immediately. The new context starts unblocked
+    /// without waiting for the old request's response; a late response of the
+    /// dropped operation settles stale and touches nothing, because the seat
+    /// no longer holds it.
+    func invalidateCurrent() {
+        guard active != nil else { return }
+        active = nil
+        busy?(false)
     }
 }

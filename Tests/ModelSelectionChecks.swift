@@ -23,7 +23,14 @@ import Foundation
 //     distinct from a rejected selection;
 //   * session identity - a session switch, A -> B -> A (session-id equality
 //     alone must not revive the old request), a disconnect generation rotation
-//     and a carrier attempt rotation each invalidate the in-flight request;
+//     and a carrier attempt rotation each invalidate the in-flight request,
+//     dropping its seat and busy state before the old response can land;
+//   * the production store path - the real PocketStore driven with a parked
+//     HarnessAPI transport: a session switch, a disconnect and a same-session
+//     supersede each release the busy state immediately, a stale response
+//     writes no error and no state, and a superseded selection's late list
+//     refresh (success or failure) never overwrites the newer selection's
+//     sessions or error;
 //   * the catalog policy - no reasoning means no selector, empty efforts mean
 //     no selector, no advertised default means a "Default" row, custom and
 //     unknown effort ids are preserved verbatim.
@@ -56,6 +63,8 @@ final class DeferredTransport {
         return try await withCheckedThrowingContinuation { call.continuation = $0 }
     }
     func selectModelRequest(_ index: Int) -> JSON { parked[index].args["request"] ?? .null }
+    /// The parked calls of one method, in arrival order.
+    func calls(_ method: String) -> [ParkedCall] { parked.filter { $0.method == method } }
 }
 
 /// PocketStore.selectModel's wiring, on the production gate: the busy flag,
@@ -76,6 +85,9 @@ final class SelectionHarness {
     var catalogCount = 0
     var error: String?
     private var lastError: Error?
+    /// The store's seat: the selection the store last started. Post-response
+    /// effects belong only to the operation holding it.
+    private(set) var activeSelection: ModelSelectionGate.Operation?
 
     // The live identity PocketStore keeps; the tests rotate these parts.
     var session: String?
@@ -90,11 +102,13 @@ final class SelectionHarness {
         return op.endpoint == endpoint && op.generation == generation && op.epoch == epoch && acceptsAttempt(op.attempt)
     }
 
-    /// PocketStore.selectModel, on the production gate.
+    /// PocketStore.selectModel, on the production gate: the store creates the
+    /// operation, takes the seat, and hands the same instance to the gate.
     func select(_ provider: String, _ model: String, effort: String? = nil, sessionID: String) async -> (outcome: ModelSelectionGate.Outcome, operation: ModelSelectionGate.Operation) {
         let id = sessionID
-        let result = await gate.select(provider: provider, model: model, effort: effort,
-                                       sessionID: id, endpoint: endpoint, generation: generation, epoch: epoch, attempt: currentAttempt,
+        let op = ModelSelectionGate.Operation(sessionID: id, endpoint: endpoint, generation: generation, epoch: epoch, attempt: currentAttempt)
+        activeSelection = op
+        let result = await gate.select(op, provider: provider, model: model, effort: effort,
                                        onBusy: { [weak self] in self?.busy = $0 },
                                        rpc: { [weak self] method, args in
                                            do { return try await self?.transport.rpc(method, args: args) ?? .null }
@@ -111,13 +125,35 @@ final class SelectionHarness {
                                            self.catalogCount += 1
                                            self.catalog = value
                                        })
+        let owned = activeSelection === result.operation
         switch result.outcome {
-        case .applied: error = nil
-        case .catalogFailed: error = "Model selected, but the catalog did not refresh."
-        case .rejected: error = "Could not confirm the selected model: " + (lastError?.localizedDescription ?? "request failed")
-        case .stale: break
+        case .applied, .catalogFailed where owned:
+            error = result.outcome == .applied ? nil : "Model selected, but the catalog did not refresh."
+        case .rejected where owned:
+            error = "Could not confirm the selected model: " + (lastError?.localizedDescription ?? "request failed")
+        default: break
         }
         return result
+    }
+
+    /// PocketStore.select's identity step: a real session switch rotates the
+    /// epoch and drops the in-flight selection's seat and busy state at once.
+    func switchSession(_ id: String?) {
+        if session != id {
+            epoch = UUID()
+            gate.invalidateCurrent()
+            activeSelection = nil
+        }
+        session = id
+    }
+
+    /// PocketStore.disconnect's identity step: the generation rotates and the
+    /// in-flight selection is dropped at once, before the old response can land.
+    func disconnect() {
+        generation = UUID()
+        epoch = UUID()
+        gate.invalidateCurrent()
+        activeSelection = nil
     }
 }
 
@@ -216,6 +252,11 @@ final class SelectionHarness {
             try await aToBToADoesNotRevive()
             try await disconnectGenerationStalesInFlight()
             try await carrierAttemptStalesInFlight()
+            try await prodSwitchSessionReleasesSeatImmediately()
+            try await prodDisconnectReleasesSeatAndReconnectAdmits()
+            try await prodSameSessionSupersedeKeepsNewerState()
+            try await prodLateRefreshSuccessNeverOverwrites()
+            try await prodLateRefreshFailureNeverOverwrites()
             print("PASS: model selection keeps effort semantics, response authority and operation identity")
             exit(0)
         } catch {
@@ -494,7 +535,8 @@ final class SelectionHarness {
         harness.session = "sA"
         let op = Task { @MainActor in await harness.select("provA", "m-defaulted", effort: "xhigh", sessionID: "sA") }
         await spin { harness.transport.parked.count == 1 }
-        harness.session = "sB"; harness.epoch = UUID()
+        harness.switchSession("sB")
+        assert(!harness.busy, "the switch releases the busy state before the old response lands")
         harness.transport.parked[0].respond(selected("provA", "m-defaulted", effort: "xhigh"))
         let result = await op.value
         assert(result.outcome == .stale, "a session switch stales the in-flight selection")
@@ -513,8 +555,9 @@ final class SelectionHarness {
         let originalEpoch = harness.epoch
         let op = Task { @MainActor in await harness.select("provA", "m-defaulted", effort: "xhigh", sessionID: "sA") }
         await spin { harness.transport.parked.count == 1 }
-        harness.session = "sB"; harness.epoch = UUID()
-        harness.session = "sA"; harness.epoch = UUID()
+        harness.switchSession("sB")
+        harness.switchSession("sA")
+        assert(!harness.busy, "both switches released the busy state before any response")
         assert(harness.session == "sA" && harness.epoch != originalEpoch,
                "the session id matches again, the epoch does not")
         harness.transport.parked[0].respond(selected("provA", "m-defaulted", effort: "xhigh"))
@@ -534,7 +577,8 @@ final class SelectionHarness {
         harness.session = "s1"
         let op = Task { @MainActor in await harness.select("provA", "m-defaulted", effort: "xhigh", sessionID: "s1") }
         await spin { harness.transport.parked.count == 1 }
-        harness.generation = UUID()
+        harness.disconnect()
+        assert(!harness.busy, "the disconnect releases the busy state before the old response lands")
         harness.transport.parked[0].respond(selected("provA", "m-defaulted", effort: "xhigh"))
         let result = await op.value
         assert(result.outcome == .stale, "a disconnect stales the in-flight selection")
@@ -591,5 +635,200 @@ final class SelectionHarness {
         let unboundResult = await unbound.value
         assert(unboundResult.outcome == .applied, "a nil-token selection is admitted by its own caller's identity")
         print("PASS: the carrier attempt identity stales old selections and admits new ones")
+    }
+
+    // MARK: - The production store, on a parked transport
+    //
+    // The same liveness checks through the real PocketStore: the store's own
+    // selectModel, refresh, select and disconnect code run unchanged, with
+    // only the wire faked. FakeAPI subclasses the production HarnessAPI on
+    // the parked transport, so request and response travel the production
+    // rpc path.
+
+    /// HarnessAPI on the parked transport: production rpc, held wire.
+    @MainActor
+    final class FakeAPI: HarnessAPI {
+        let transport = DeferredTransport()
+        init() { super.init(base: URL(string: "https://dsn.example")!) }
+        override func rpc(_ method: String, args: [String: JSON]) async throws -> JSON {
+            try await transport.rpc(method, args: args)
+        }
+    }
+
+    /// Wire one production store to a parked transport, already connected.
+    @MainActor
+    static func wire(_ store: PocketStore, _ api: FakeAPI, sessions: [String]) {
+        store.endpoint = "https://dsn.example"
+        store.api = api
+        store.connected = true
+        store.sessions = sessions.map { HarnessSession(raw: .object(["sessionId": .string($0), "cwd": .string("/w"), "updatedAt": .number(1), "running": .bool(false)])) }
+    }
+
+    /// A session/list response with exactly these ids.
+    @MainActor
+    static func list(_ ids: [String]) -> JSON {
+        .object(["items": .array(ids.map { .object(["sessionId": .string($0), "cwd": .string("/w"), "updatedAt": .number(1), "running": .bool(false)]) })])
+    }
+
+    // (15) Production: a session switch drops the in-flight selection's seat
+    // and busy state immediately - the controls are unblocked before the old
+    // response can land - and the old response settles stale and writes
+    // nothing. A -> B -> A included.
+    @MainActor
+    static func prodSwitchSessionReleasesSeatImmediately() async throws {
+        let api = FakeAPI()
+        let store = PocketStore()
+        wire(store, api, sessions: ["sA", "sB"])
+        await store.select("sA")
+        let first = Task { @MainActor in await store.selectModel(provider: "provA", model: "m-defaulted", effort: "xhigh") }
+        await spin { api.transport.calls("session/selectModel").count == 1 }
+        assert(store.selectingModel, "the in-flight selection holds the busy state")
+        // The switch: seat and busy state die at once, before the response.
+        await store.select("sB")
+        assert(!store.selectingModel, "the switch releases the busy state before the old response lands")
+        assert(store.activeSelection == nil && store.selection.active == nil, "the in-flight selection loses its seat")
+        api.transport.calls("session/selectModel")[0].respond(selected("provA", "m-defaulted", effort: "xhigh"))
+        await first.value
+        assert(store.model == .null, "the stale response writes no model")
+        assert(store.error == nil, "the stale response writes no error")
+        assert(api.transport.calls("session/modelCatalog").count == 0, "the stale response refreshes no catalog")
+        assert(api.transport.calls("session/list").count == 0, "the stale selection refreshes no list")
+        // A -> B -> A: back on the original session, a new selection applies.
+        await store.select("sA")
+        assert(!store.selectingModel, "back on A the controls stay unblocked")
+        let back = Task { @MainActor in await store.selectModel(provider: "provA", model: "m-defaulted", effort: "low") }
+        await spin { api.transport.calls("session/selectModel").count == 2 }
+        api.transport.calls("session/selectModel")[1].respond(selected("provA", "m-defaulted", effort: "low"))
+        await spin { api.transport.calls("session/modelCatalog").count == 1 }
+        api.transport.calls("session/modelCatalog")[0].respond(catalog("fresh"))
+        await spin { api.transport.calls("session/list").count == 1 }
+        api.transport.calls("session/list")[0].respond(list(["sA", "sB"]))
+        await back.value
+        assert(store.model["reasoningEffort"].string == "low", "the back-on-A selection applies")
+        assert(store.sessions.count == 2, "its refresh applied the list")
+        assert(!store.selectingModel, "the busy state releases")
+        print("PASS: production - a session switch drops the in-flight selection at once")
+    }
+
+    // (16) Production: a disconnect drops the seat and busy state at once;
+    // the dead connection's response settles stale and writes nothing; the
+    // reconnected store admits new selections again.
+    @MainActor
+    static func prodDisconnectReleasesSeatAndReconnectAdmits() async throws {
+        let api = FakeAPI()
+        let store = PocketStore()
+        wire(store, api, sessions: ["sA"])
+        await store.select("sA")
+        let first = Task { @MainActor in await store.selectModel(provider: "provA", model: "m-defaulted", effort: "xhigh") }
+        await spin { api.transport.calls("session/selectModel").count == 1 }
+        assert(store.selectingModel, "the in-flight selection holds the busy state")
+        store.disconnect()
+        assert(!store.selectingModel, "the disconnect releases the busy state before the old response lands")
+        assert(store.activeSelection == nil && store.selection.active == nil, "the in-flight selection loses its seat")
+        assert(store.api == nil && !store.connected, "the dead connection is gone")
+        api.transport.calls("session/selectModel")[0].respond(selected("provA", "m-defaulted", effort: "xhigh"))
+        await first.value
+        assert(store.model == .null, "the dead connection's response writes no model")
+        assert(store.error == nil, "the dead connection's response writes no error")
+        assert(api.transport.calls("session/list").count == 0, "the dead selection refreshes no list")
+        // Reconnect: a fresh api on the rotated generation.
+        let fresh = FakeAPI()
+        wire(store, fresh, sessions: ["sA"])
+        await store.select("sA")
+        let again = Task { @MainActor in await store.selectModel(provider: "provA", model: "m-defaulted", effort: "low") }
+        await spin { fresh.transport.calls("session/selectModel").count == 1 }
+        fresh.transport.calls("session/selectModel")[0].respond(selected("provA", "m-defaulted", effort: "low"))
+        await spin { fresh.transport.calls("session/modelCatalog").count == 1 }
+        fresh.transport.calls("session/modelCatalog")[0].respond(catalog("fresh"))
+        await spin { fresh.transport.calls("session/list").count == 1 }
+        fresh.transport.calls("session/list")[0].respond(list(["sA"]))
+        await again.value
+        assert(store.model["reasoningEffort"].string == "low", "the reconnected session admits new selections")
+        assert(!store.selectingModel, "the busy state releases")
+        print("PASS: production - a disconnect drops the seat at once; the reconnect admits new selections")
+    }
+
+    // (17) Production, same session: a newer selection supersedes the
+    // in-flight one. The newer rejection is the reported error; the older
+    // response lands after, stale, and writes nothing.
+    @MainActor
+    static func prodSameSessionSupersedeKeepsNewerState() async throws {
+        let api = FakeAPI()
+        let store = PocketStore()
+        wire(store, api, sessions: ["sA"])
+        await store.select("sA")
+        let first = Task { @MainActor in await store.selectModel(provider: "provA", model: "m-defaulted", effort: "xhigh") }
+        await spin { api.transport.calls("session/selectModel").count == 1 }
+        let second = Task { @MainActor in await store.selectModel(provider: "provA", model: "m-defaulted", effort: "low") }
+        await spin { api.transport.calls("session/selectModel").count == 2 }
+        api.transport.calls("session/selectModel")[1].fail(HarnessError(message: "the Host rejected the effort"))
+        await second.value
+        assert(store.error == "Could not confirm the selected model: the Host rejected the effort", "the newer rejection is reported")
+        api.transport.calls("session/selectModel")[0].respond(selected("provA", "m-defaulted", effort: "xhigh"))
+        await first.value
+        assert(store.error == "Could not confirm the selected model: the Host rejected the effort", "the stale response keeps the newer error")
+        assert(store.model == .null, "the stale response writes no model")
+        assert(api.transport.calls("session/modelCatalog").count == 0, "the stale response refreshes no catalog")
+        assert(api.transport.calls("session/list").count == 0, "the stale selection refreshes no list")
+        print("PASS: production - a stale same-session response keeps the newer selection's state")
+    }
+
+    // (18) Production: a superseded selection's late list refresh - even a
+    // successful one - never overwrites the sessions the newer selection
+    // published.
+    @MainActor
+    static func prodLateRefreshSuccessNeverOverwrites() async throws {
+        let api = FakeAPI()
+        let store = PocketStore()
+        wire(store, api, sessions: ["sA"])
+        await store.select("sA")
+        let first = Task { @MainActor in await store.selectModel(provider: "provA", model: "m-defaulted", effort: "xhigh") }
+        await spin { api.transport.calls("session/selectModel").count == 1 }
+        api.transport.calls("session/selectModel")[0].respond(selected("provA", "m-defaulted", effort: "xhigh"))
+        await spin { api.transport.calls("session/modelCatalog").count == 1 }
+        api.transport.calls("session/modelCatalog")[0].respond(catalog("stale"))
+        await spin { api.transport.calls("session/list").count == 1 }
+        // The first selection's refresh is in flight; the newer one starts.
+        let second = Task { @MainActor in await store.selectModel(provider: "provA", model: "m-defaulted", effort: "low") }
+        await spin { api.transport.calls("session/selectModel").count == 2 }
+        api.transport.calls("session/selectModel")[1].respond(selected("provA", "m-defaulted", effort: "low"))
+        await spin { api.transport.calls("session/modelCatalog").count == 2 }
+        api.transport.calls("session/modelCatalog")[1].respond(catalog("fresh"))
+        await spin { api.transport.calls("session/list").count == 2 }
+        api.transport.calls("session/list")[1].respond(list(["sA", "sB"]))
+        await second.value
+        assert(store.sessions.count == 2 && store.sessions[1].id == "sB", "the newer selection's refresh applied")
+        api.transport.calls("session/list")[0].respond(list(["sA"]))
+        await first.value
+        assert(store.sessions.count == 2 && store.sessions[1].id == "sB", "the late refresh did not overwrite the newer list")
+        assert(!store.selectingModel, "the busy state releases")
+        print("PASS: production - a superseded selection's late refresh keeps off the sessions")
+    }
+
+    // (19) Production: a superseded selection's late list refresh - a
+    // failure - never overwrites the error the newer rejection reported,
+    // and the first selection's accepted model stands.
+    @MainActor
+    static func prodLateRefreshFailureNeverOverwrites() async throws {
+        let api = FakeAPI()
+        let store = PocketStore()
+        wire(store, api, sessions: ["sA"])
+        await store.select("sA")
+        let first = Task { @MainActor in await store.selectModel(provider: "provA", model: "m-defaulted", effort: "xhigh") }
+        await spin { api.transport.calls("session/selectModel").count == 1 }
+        api.transport.calls("session/selectModel")[0].respond(selected("provA", "m-defaulted", effort: "xhigh"))
+        await spin { api.transport.calls("session/modelCatalog").count == 1 }
+        api.transport.calls("session/modelCatalog")[0].respond(catalog("stale"))
+        await spin { api.transport.calls("session/list").count == 1 }
+        let second = Task { @MainActor in await store.selectModel(provider: "provA", model: "m-defaulted", effort: "low") }
+        await spin { api.transport.calls("session/selectModel").count == 2 }
+        api.transport.calls("session/selectModel")[1].fail(HarnessError(message: "the Host rejected the effort"))
+        await second.value
+        assert(store.error == "Could not confirm the selected model: the Host rejected the effort", "the newer rejection is reported")
+        api.transport.calls("session/list")[0].fail(HarnessError(message: "the list expired"))
+        await first.value
+        assert(store.error == "Could not confirm the selected model: the Host rejected the effort", "the late refresh failure keeps the newer error")
+        assert(store.model["reasoningEffort"].string == "xhigh", "the first selection's accepted model stands")
+        print("PASS: production - a superseded selection's late refresh failure keeps off the error")
     }
 }

@@ -86,7 +86,9 @@ final class PocketStore: ObservableObject {
     @Published var pendingText: String?
     private(set) var transcript = Transcript()
     private var assistantLive = AssistantLiveStream()
-    private var api: HarnessAPI?
+    /// Internal (not private) so the offline checks can drive the production
+    /// selection path through a delayed fake transport.
+    var api: HarnessAPI?
     private var native: NativeChatConnection?
     @Published var nativeShell: NativeClient?
     @Published private var shellContextDrafts: [String: [ShellContextAttachment]] = [:]
@@ -158,19 +160,23 @@ final class PocketStore: ObservableObject {
     var supportsFullAccess: Bool { !usesNativeHarness }
     private var socket: URLSessionWebSocketTask?
     private var connectionTask: Task<Void, Never>?
-    private var generation = UUID()
+    var generation = UUID()
     /// The session-selection epoch: rotates on every session switch and on
     /// disconnect, so a deferred selectModel response cannot revive an old
     /// session's request just because the session id matches again.
-    private var selectionEpoch = UUID()
+    var selectionEpoch = UUID()
+    /// The selection this store last started. The post-response effects -
+    /// error, list refresh, stream follow - belong only to the operation that
+    /// still holds this seat.
+    private(set) var activeSelection: ModelSelectionGate.Operation?
     /// The Remote carrier's stream identity: which socket attempt is live,
     /// which IDs its streams carry, and which ping/refresh work may still
     /// report. The socket and the UI stay here; every "whose frame is this"
     /// decision lives in the coordinator, which the offline gates compile.
-    private let carrier = RemoteStreamConnection()
+    let carrier = RemoteStreamConnection()
     /// The async model-selection path with operation ownership: who owns the
     /// busy flag, and which deferred response may still land.
-    private let selection = ModelSelectionGate()
+    let selection = ModelSelectionGate()
     private var clientID = ""
     /// The composer's draft lines and their versions (`ComposerDrafts`). The
     /// version is what tells a pending send whether the line it carried is
@@ -303,6 +309,10 @@ final class PocketStore: ObservableObject {
     func disconnect() {
         nativeReconnect?.cancel(); nativeReconnect = nil
         generation = UUID(); selectionEpoch = UUID(); connectionTask?.cancel(); connectionTask = nil
+        // The in-flight selection rode the connection that just died: drop
+        // its ownership and busy state immediately, so the UI never waits for
+        // a dead request's response to re-enable the controls.
+        selection.invalidateCurrent(); activeSelection = nil
         // The carrier's streams, its ping and its scheduled refreshes die with
         // the connection: after this no late frame, ping or list may report.
         carrier.stop()
@@ -564,22 +574,33 @@ final class PocketStore: ObservableObject {
     /// Refresh the session list. `token` is the refresh's own identity when the
     /// carrier scheduled it for one socket attempt; a caller that passes none
     /// (the list buttons, a create, a model change) is bound to the attempt
-    /// live at this moment. Either way a result - success or failure - is
-    /// applied only while that identity is still the live one, so a list that
-    /// arrives after a reconnect belongs to the connection that asked for it.
-    func refresh(token: RemoteStreamConnection.RefreshToken? = nil) async {
+    /// live at this moment. `selection`, when given, is the model selection
+    /// that asked for the list: its result - success or failure - then applies
+    /// only while that selection still owns the seat, so a list that lands
+    /// after a newer selection started belongs to no one. Either way a result
+    /// - success or failure - is applied only while the connection identity
+    /// still holds, so a list that arrives after a reconnect belongs to the
+    /// connection that asked for it.
+    func refresh(token: RemoteStreamConnection.RefreshToken? = nil, selection: ModelSelectionGate.Operation? = nil) async {
         if let native { do { try await native.send(NativeCommand(op: "list")) } catch { self.error = error.localizedDescription }; return }
         guard let api else { return }
         let connection = generation
         let refresh = token ?? carrier.currentRefreshToken()
         do {
             let result = try await api.rpc("session/list", args: ["_request": .object([:])])
-            guard generation == connection, carrier.accepts(refresh) else { return }
+            guard generation == connection, carrier.accepts(refresh), selectionOwnershipHolds(selection) else { return }
             sessions = result["items"].array.map { HarnessSession(raw: $0) }
         } catch {
-            guard generation == connection, carrier.accepts(refresh) else { return }
+            guard generation == connection, carrier.accepts(refresh), selectionOwnershipHolds(selection) else { return }
             self.error = error.localizedDescription
         }
+    }
+    /// Whether the selection that asked for a refresh still owns the seat: it
+    /// must be the store's latest selection and still live on its session and
+    /// connection. A stale one writes no list and no error.
+    private func selectionOwnershipHolds(_ selection: ModelSelectionGate.Operation?) -> Bool {
+        guard let selection else { return true }
+        return activeSelection === selection && isLiveModelSelection(selection)
     }
     func select(_ id: String?) async {
         #if DEBUG
@@ -590,7 +611,7 @@ final class PocketStore: ObservableObject {
         // current session keeps its in-flight selection live, while A -> B -> A
         // still invalidates the original request - its epoch is gone even
         // though the session id matches again.
-        if selectedID != id { selectionEpoch = UUID() }
+        if selectedID != id { selectionEpoch = UUID(); selection.invalidateCurrent(); activeSelection = nil }
         if let old = selectedID { drafts[old] = draft }
         drafts = UserDefaults.standard.dictionary(forKey: "harness.drafts." + endpoint) as? [String: String] ?? drafts
         if let data = try? Data(contentsOf: imageDraftFile), let saved = try? PropertyListDecoder().decode([String: [OutgoingImage]].self, from: data) { imageDrafts = saved }
@@ -1084,11 +1105,14 @@ final class PocketStore: ObservableObject {
         guard api != nil, connected, let id = selectedID else { return }
         // A selection may supersede the in-flight one: the gate owns the busy
         // flag, and only the still-active operation may release it or land a
-        // response, so a second tap is safe and the first becomes stale.
-        let generation = self.generation
+        // response, so a second tap is safe and the first becomes stale. The
+        // store keeps the same operation instance for its own ownership: the
+        // post-response effects below belong only to the selection that still
+        // holds the seat when the answer comes back.
+        let op = ModelSelectionGate.Operation(sessionID: id, endpoint: endpoint, generation: generation, epoch: selectionEpoch, attempt: carrier.currentRefreshToken())
+        activeSelection = op
         var lastError: Error?
-        let result = await selection.select(provider: provider, model: model, effort: effort,
-                                            sessionID: id, endpoint: endpoint, generation: generation, epoch: selectionEpoch, attempt: carrier.currentRefreshToken(),
+        let result = await selection.select(op, provider: provider, model: model, effort: effort,
                                             onBusy: { [weak self] in self?.selectingModel = $0 },
                                             rpc: { [weak self] method, args in
                                                 guard let api = self?.api else { throw SelectionTransportGone() }
@@ -1103,14 +1127,23 @@ final class PocketStore: ObservableObject {
                                                 guard let self, self.selectedID == id else { return }
                                                 self.catalog = value
                                             })
+        // The post-response effects - error, list refresh, stream follow - are
+        // owned by the operation that still holds the seat: a superseded or
+        // invalidated selection writes no error, refreshes no list and
+        // follows no stream after a newer request has taken over, or after a
+        // session switch or a disconnect dropped it.
+        let owned = activeSelection === result.operation
         switch result.outcome {
-        case .applied, .catalogFailed:
+        case .applied, .catalogFailed where owned:
             error = result.outcome == .applied ? nil : "Model selected, but the catalog did not refresh."
-            await refresh()
-            if isLiveModelSelection(result.operation) { do { try await followSelected() } catch {} }
-        case .rejected:
+            await refresh(selection: result.operation)
+            if owned, isLiveModelSelection(result.operation) { do { try await followSelected() } catch {} }
+        case .rejected where owned:
             error = "Could not confirm the selected model: " + (lastError?.localizedDescription ?? "request failed")
-        case .stale:
+        default:
+            // Stale, or superseded before its response landed: nothing is
+            // written; the newer selection - or the invalidation - owns the
+            // state now.
             break
         }
     }

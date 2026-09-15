@@ -29,7 +29,9 @@ enum SecureConnection {
     }
 }
 @MainActor
-final class HarnessAPI {
+// Not `final` on purpose: the offline checks subclass it with a parked
+// transport to drive the production PocketStore (Tests/ModelSelectionChecks.swift).
+class HarnessAPI {
     let base: URL
     var cookie: String
     private let session: URLSession
