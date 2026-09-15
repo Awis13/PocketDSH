@@ -125,11 +125,12 @@ final class SelectionHarness {
                                            self.catalogCount += 1
                                            self.catalog = value
                                        })
-        let owned = activeSelection === result.operation
         switch result.outcome {
-        case .applied, .catalogFailed where owned:
+        case .applied, .catalogFailed:
+            guard activeSelection === op else { break }
             error = result.outcome == .applied ? nil : "Model selected, but the catalog did not refresh."
-        case .rejected where owned:
+        case .rejected:
+            guard activeSelection === op else { break }
             error = "Could not confirm the selected model: " + (lastError?.localizedDescription ?? "request failed")
         default: break
         }
@@ -257,6 +258,7 @@ final class SelectionHarness {
             try await prodSameSessionSupersedeKeepsNewerState()
             try await prodLateRefreshSuccessNeverOverwrites()
             try await prodLateRefreshFailureNeverOverwrites()
+            try await prodStaleAppliedNeverFollowsLiveConversation()
             print("PASS: model selection keeps effort semantics, response authority and operation identity")
             exit(0)
         } catch {
@@ -830,5 +832,44 @@ final class SelectionHarness {
         assert(store.error == "Could not confirm the selected model: the Host rejected the effort", "the late refresh failure keeps the newer error")
         assert(store.model["reasoningEffort"].string == "xhigh", "the first selection's accepted model stands")
         print("PASS: production - a superseded selection's late refresh failure keeps off the error")
+    }
+
+    // (20) Production: ownership is re-checked after every post-gate await.
+    // A .applied selection whose list refresh parked behind a same-session
+    // supersedure must not follow or reset the live conversation when the
+    // list finally resolves. The supersedure rotated nothing the liveness
+    // check can see - same session, same epoch, same generation, attempt
+    // still accepted - so only the fresh activeSelection re-check catches it.
+    @MainActor
+    static func prodStaleAppliedNeverFollowsLiveConversation() async throws {
+        let api = FakeAPI()
+        let store = PocketStore()
+        var follows: [String?] = []
+        store.conversationFollowObservation = { follows.append($0) }
+        wire(store, api, sessions: ["sA"])
+        await store.select("sA")
+        let baseline = follows.count
+        assert(baseline == 1, "the setup selection pointed the conversation at its session")
+        let first = Task { @MainActor in await store.selectModel(provider: "provA", model: "m-defaulted", effort: "xhigh") }
+        await spin { api.transport.calls("session/selectModel").count == 1 }
+        api.transport.calls("session/selectModel")[0].respond(selected("provA", "m-defaulted", effort: "xhigh"))
+        await spin { api.transport.calls("session/modelCatalog").count == 1 }
+        api.transport.calls("session/modelCatalog")[0].respond(catalog("stale"))
+        await spin { api.transport.calls("session/list").count == 1 }
+        // The first selection's list refresh is parked; the newer one starts
+        // on the same session and takes the seat.
+        let second = Task { @MainActor in await store.selectModel(provider: "provA", model: "m-defaulted", effort: "low") }
+        await spin { api.transport.calls("session/selectModel").count == 2 }
+        api.transport.calls("session/list")[0].respond(list(["sA", "stale"]))
+        await first.value
+        assert(follows.count == baseline, "the stale .applied selection did not follow or reset the live conversation")
+        assert(store.sessions.count == 1, "the stale selection's late list refreshed nothing")
+        assert(store.model["reasoningEffort"].string == "xhigh", "the stale selection's accepted model stands")
+        assert(store.error == nil, "no error before the newer selection answered")
+        api.transport.calls("session/selectModel")[1].fail(HarnessError(message: "the Host rejected the effort"))
+        await second.value
+        assert(store.error == "Could not confirm the selected model: the Host rejected the effort", "the newer rejection is reported")
+        assert(!store.selectingModel, "the busy state releases with the newer selection")
+        print("PASS: production - a stale .applied selection keeps off the live conversation")
     }
 }

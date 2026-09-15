@@ -636,6 +636,11 @@ final class PocketStore: ObservableObject {
         }
         do { try await followSelected() } catch { self.error = error.localizedDescription; loadingHistory = false }
     }
+    /// Observation seam for the conversation follow decision: nil retires the
+    /// stream, an id points it at that session. Production leaves it nil; the
+    /// parked-transport checks count calls to prove which selection's
+    /// continuation actually moved the live conversation.
+    var conversationFollowObservation: (@MainActor (String?) -> Void)?
     /// Point the conversation stream at the selected session. The previous ID
     /// is retired before the first suspension, so frames of the session the
     /// user just left - its snapshot, its events, its errors - are discarded
@@ -645,15 +650,18 @@ final class PocketStore: ObservableObject {
         guard let socket else {
             // No socket to tell: the ID is still retired, so nothing can
             // arrive for it later.
+            conversationFollowObservation?(nil)
             try await carrier.cancel(.conversation, on: nil)
             return
         }
         guard let id = selectedID else {
             loadingHistory = false
+            conversationFollowObservation?(nil)
             try await carrier.cancel(.conversation, on: socket)
             return
         }
         loadingHistory = true
+        conversationFollowObservation?(id)
         try await carrier.subscribe(.conversation, endpoint: "session/follow", args: ["request": .object(["address": .object(["kind": .string("session"), "sessionId": .string(id)]), "maxMessages": .number(50), "assistantStream": .bool(true)])], on: socket)
     }
     func loadOlder() async {
@@ -1131,14 +1139,22 @@ final class PocketStore: ObservableObject {
         // owned by the operation that still holds the seat: a superseded or
         // invalidated selection writes no error, refreshes no list and
         // follows no stream after a newer request has taken over, or after a
-        // session switch or a disconnect dropped it.
-        let owned = activeSelection === result.operation
+        // session switch or a disconnect dropped it. Ownership is re-checked
+        // after every await below: a Boolean captured before the refresh
+        // parks goes stale the moment a newer selection takes the seat, and
+        // isLiveModelSelection cannot see a same-session supersedure - it
+        // rotates no epoch, session, generation or attempt. The gate hands
+        // back the very Operation created above, so "op" is the identity to
+        // test against.
         switch result.outcome {
-        case .applied, .catalogFailed where owned:
+        case .applied, .catalogFailed:
+            guard activeSelection === op else { break }
             error = result.outcome == .applied ? nil : "Model selected, but the catalog did not refresh."
-            await refresh(selection: result.operation)
-            if owned, isLiveModelSelection(result.operation) { do { try await followSelected() } catch {} }
-        case .rejected where owned:
+            await refresh(selection: op)
+            guard activeSelection === op, isLiveModelSelection(op) else { break }
+            do { try await followSelected() } catch {}
+        case .rejected:
+            guard activeSelection === op else { break }
             error = "Could not confirm the selected model: " + (lastError?.localizedDescription ?? "request failed")
         default:
             // Stale, or superseded before its response landed: nothing is

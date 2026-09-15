@@ -47,20 +47,13 @@ case "$MODE" in
 esac
 mkdir -p output/mac
 ditto .build/Build/Products/Debug-maccatalyst/PocketDSH.app output/mac/PocketDSH.app
-codesign --verify --deep --strict output/mac/PocketDSH.app
 # Signature regression check: the bundle must carry the signature its mode
-# promises. "codesign --verify" alone only proves a signature is present.
-ENT=$(codesign -d --entitlements - output/mac/PocketDSH.app 2>/dev/null || true)
+# promises. The validators are shared with the gate (scripts/sign-checks.sh),
+# which proves them headless on controlled fixtures; "codesign --verify" alone
+# only proves a signature is present, not which kind it is.
+. ./scripts/sign-checks.sh
 if [ "$MODE" = "signed" ]; then
-  echo "$ENT" | grep -q "application-identifier" || { echo "FAIL: signed bundle lost its application identifier" >&2; exit 1; }
-  echo "$ENT" | grep -q "keychain-access-groups" || { echo "FAIL: signed bundle lost its keychain access groups" >&2; exit 1; }
-  TID=$(/usr/libexec/PlistBuddy -c "Print :TeamIdentifier" output/mac/PocketDSH.app 2>/dev/null || true)
-  [ -n "$TID" ] || { echo "FAIL: signed bundle has no TeamIdentifier" >&2; exit 1; }
-  echo "OK: signed bundle carries identity, application identifier and keychain groups"
+  validate_signed_bundle output/mac/PocketDSH.app
 else
-  # Capture before grep: with pipefail, grep -q's early exit would SIGPIPE
-  # codesign and fail the pipeline on a match that arrives too early.
-  CSOUT=$(codesign -dvvv output/mac/PocketDSH.app 2>&1 || true)
-  echo "$CSOUT" | grep -q "flags=0x2(adhoc)" || { echo "FAIL: adhoc bundle is not ad-hoc signed" >&2; exit 1; }
-  echo "OK: adhoc bundle is ad-hoc signed"
+  validate_adhoc_bundle output/mac/PocketDSH.app
 fi

@@ -45,3 +45,45 @@ xcrun swiftc -target "${CATALYST_TARGET}" -Fsystem "${IOSUPPORT}/System/Library/
 sed '/^@main$/d' PocketDSH/PocketDSHApp.swift > .build/checks/PocketDSHApp.nomain.swift
 xcrun swiftc -target "${CATALYST_TARGET}" -Fsystem "${IOSUPPORT}/System/Library/Frameworks" -parse-as-library -I .build/checks -L .build/checks -lSwiftTerm -Xlinker -rpath -Xlinker @loader_path $(ls PocketDSH/*.swift | grep -v "PocketDSHApp.swift") .build/checks/PocketDSHApp.nomain.swift Shared/NativeWire.swift Tests/ModelSelectionChecks.swift -o .build/checks/model-selection-checks
 .build/checks/model-selection-checks
+# The build-mac.sh signature validators, tested headless on controlled
+# fixtures: the signed-mode validator must accept a development-signed bundle
+# and reject an ad-hoc one - no Xcode login or provisioning profile needed,
+# only the local development identity the machine already has.
+. ./scripts/sign-checks.sh
+FIXDIR=.build/checks/sign-fixture
+rm -rf "$FIXDIR"
+mkdir -p "$FIXDIR/Fix.app/Contents/MacOS"
+printf 'print("sign fixture")\n' > "$FIXDIR/main.swift"
+xcrun swiftc -O -o "$FIXDIR/Fix.app/Contents/MacOS/Fix" "$FIXDIR/main.swift"
+cat > "$FIXDIR/ent.plist" <<'EOF_ENT'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>application-identifier</key>
+    <string>TESTTEAM.dev.test.Fixture</string>
+    <key>keychain-access-groups</key>
+    <array>
+        <string>TESTTEAM.dev.test</string>
+    </array>
+</dict>
+</plist>
+EOF_ENT
+codesign --force --sign - --entitlements "$FIXDIR/ent.plist" "$FIXDIR/Fix.app"
+validate_adhoc_bundle "$FIXDIR/Fix.app" >/dev/null || { echo "FAIL: adhoc fixture failed the adhoc validator" >&2; exit 1; }
+if validate_signed_bundle "$FIXDIR/Fix.app" >/dev/null 2>&1; then
+    echo "FAIL: adhoc fixture passed the signed validator" >&2
+    exit 1
+fi
+echo "PASS: signature validators - the adhoc fixture is accepted as ad-hoc and rejected as signed"
+# Sign by the identity's SHA-1, not its name: the machine can hold two
+# identical development identities (login and iCloud keychain), and codesign
+# refuses an ambiguous name.
+SIG_ID=$(security find-identity -v -p codesigning 2>/dev/null | awk '/Apple Development/ { print $2; exit }')
+if [ -n "$SIG_ID" ]; then
+    codesign --force --sign "$SIG_ID" --entitlements "$FIXDIR/ent.plist" "$FIXDIR/Fix.app"
+    validate_signed_bundle "$FIXDIR/Fix.app" >/dev/null || { echo "FAIL: development-signed fixture failed the signed validator" >&2; exit 1; }
+    echo "PASS: signature validators - the development-signed fixture is accepted as signed"
+else
+    echo "SKIP: no development identity on this machine; the signed validator's reject path stays covered by the adhoc fixture"
+fi
