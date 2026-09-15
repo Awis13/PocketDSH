@@ -30,3 +30,10 @@ xcrun swiftc -parse-as-library PocketDSH/HarnessProtocol.swift PocketDSH/Command
 rm -f .build/checks/stream-checks
 xcrun swiftc -parse-as-library PocketDSH/HarnessProtocol.swift PocketDSH/HarnessAPI.swift PocketDSH/RemoteStreamConnection.swift Tests/HarnessStreamChecks.swift -o .build/checks/stream-checks
 .build/checks/stream-checks
+# The model-selection check compiles the production gate, request builder and
+# reasoning policy with the real carrier identity: a delayed fake transport
+# holds responses across supersede, session switch and reconnect, so the
+# ownership, liveness and accepted-response rules are exercised on the
+# production objects.
+xcrun swiftc -parse-as-library PocketDSH/HarnessProtocol.swift PocketDSH/HarnessAPI.swift PocketDSH/RemoteStreamConnection.swift PocketDSH/ModelSelection.swift Tests/ModelSelectionChecks.swift -o .build/checks/model-selection-checks
+.build/checks/model-selection-checks

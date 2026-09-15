@@ -345,10 +345,26 @@ struct HarnessView: View {
                     ForEach(store.catalog["groups"].array, id: \.pretty) { group in
                         Section(group["name"].string) {
                             ForEach(group["models"].array, id: \.pretty) { model in
-                                Button { Task { await store.selectModel(provider: group["id"].string, model: model["id"].string) } } label: {
-                                    if store.model["provider"].string == group["id"].string && store.model["model"].string == model["id"].string {
-                                        Label(model["name"].string, systemImage: "checkmark")
-                                    } else { Text(model["name"].string) }
+                                let modelID = model["id"].string
+                                let selectedModel = store.model["provider"].string == group["id"].string && store.model["model"].string == modelID
+                                let currentEffort = effectiveEffortID(selection: store.model, model: model)
+                                if reasoning(for: model) != nil {
+                                    Menu {
+                                        Button { Task { await store.selectModel(provider: group["id"].string, model: modelID, effort: selectedModel ? currentEffort : reasoning(for: model)?.defaultEffort) } } label: {
+                                            if selectedModel { Label(model["name"].string, systemImage: "checkmark") } else { Text(model["name"].string) }
+                                        }
+                                        ForEach(effortChoices(for: model), id: \.id) { choice in
+                                            Button { Task { await store.selectModel(provider: group["id"].string, model: modelID, effort: choice.effortID) } } label: {
+                                                if selectedModel && choice.effortID == currentEffort { Label(choice.label, systemImage: "checkmark") } else { Text(choice.label) }
+                                            }
+                                        }
+                                    } label: {
+                                        if selectedModel { Label(model["name"].string, systemImage: "checkmark") } else { Text(model["name"].string) }
+                                    }
+                                } else {
+                                    Button { Task { await store.selectModel(provider: group["id"].string, model: modelID, effort: nil) } } label: {
+                                        if selectedModel { Label(model["name"].string, systemImage: "checkmark") } else { Text(model["name"].string) }
+                                    }
                                 }
                             }
                         }
@@ -956,8 +972,15 @@ private struct ModelPaletteView: View {
     private func choose(_ option: Option) {
         guard store.connected, !store.selectingModel else { return }
         failure = nil
+        let modelRow = catalogModel(provider: option.provider, model: option.model, catalog: store.catalog)
+        let isSame = store.model["provider"].string == option.provider && store.model["model"].string == option.model
+        // Same model keeps its current effort; switching to a new model uses that
+        // model's advertised default (nil = provider default, the field omitted).
+        let effort: String? = isSame
+            ? modelRow.flatMap { effectiveEffortID(selection: store.model, model: $0) }
+            : modelRow.flatMap { reasoning(for: $0)?.defaultEffort }
         Task {
-            await store.selectModel(provider: option.provider, model: option.model)
+            await store.selectModel(provider: option.provider, model: option.model, effort: effort)
             if store.model["provider"].string == option.provider && store.model["model"].string == option.model && store.error == nil {
                 dismiss()
             } else { failure = store.error ?? "Model selection was not confirmed. Try again." }

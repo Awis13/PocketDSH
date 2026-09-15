@@ -159,11 +159,18 @@ final class PocketStore: ObservableObject {
     private var socket: URLSessionWebSocketTask?
     private var connectionTask: Task<Void, Never>?
     private var generation = UUID()
+    /// The session-selection epoch: rotates on every session switch and on
+    /// disconnect, so a deferred selectModel response cannot revive an old
+    /// session's request just because the session id matches again.
+    private var selectionEpoch = UUID()
     /// The Remote carrier's stream identity: which socket attempt is live,
     /// which IDs its streams carry, and which ping/refresh work may still
     /// report. The socket and the UI stay here; every "whose frame is this"
     /// decision lives in the coordinator, which the offline gates compile.
     private let carrier = RemoteStreamConnection()
+    /// The async model-selection path with operation ownership: who owns the
+    /// busy flag, and which deferred response may still land.
+    private let selection = ModelSelectionGate()
     private var clientID = ""
     /// The composer's draft lines and their versions (`ComposerDrafts`). The
     /// version is what tells a pending send whether the line it carried is
@@ -226,7 +233,11 @@ final class PocketStore: ObservableObject {
     var visibleSessions: [HarnessSession] { sessions.filter { !archived.contains($0.id) && $0.raw["origin"].string != "subagent" }.sorted { $0.date > $1.date } }
     var currentInteractions: [Interaction] { interactions.filter { $0.sessionID == selectedID } }
     var currentQueue: [JSON] { queues[selectedID ?? ""]?.array ?? [] }
-    var modelLabel: String { model["model"].string.isEmpty ? "Host model" : model["model"].string }
+    var modelLabel: String {
+        let base = model["model"].string.isEmpty ? "Host model" : model["model"].string
+        if let effort = effectiveEffortLabel(selection: model, catalog: catalog) { return base + " · " + effort }
+        return base
+    }
 
     init(restoringPrimary: Bool = true) {
         imageCache.totalCostLimit = 24 * 1024 * 1024
@@ -291,7 +302,7 @@ final class PocketStore: ObservableObject {
     }
     func disconnect() {
         nativeReconnect?.cancel(); nativeReconnect = nil
-        generation = UUID(); connectionTask?.cancel(); connectionTask = nil
+        generation = UUID(); selectionEpoch = UUID(); connectionTask?.cancel(); connectionTask = nil
         // The carrier's streams, its ping and its scheduled refreshes die with
         // the connection: after this no late frame, ping or list may report.
         carrier.stop()
@@ -575,6 +586,11 @@ final class PocketStore: ObservableObject {
         if let replay = ProcessInfo.processInfo.environment["DSH_NATIVE_REPLAY"] { loadNativeReplay(replay); return }
         if ProcessInfo.processInfo.environment["DSH_DEMO"] == "1" { loadDemo(); selectedID = id; return }
         #endif
+        // Rotate the epoch only on a real session switch: reselecting the
+        // current session keeps its in-flight selection live, while A -> B -> A
+        // still invalidates the original request - its epoch is gone even
+        // though the session id matches again.
+        if selectedID != id { selectionEpoch = UUID() }
         if let old = selectedID { drafts[old] = draft }
         drafts = UserDefaults.standard.dictionary(forKey: "harness.drafts." + endpoint) as? [String: String] ?? drafts
         if let data = try? Data(contentsOf: imageDraftFile), let saved = try? PropertyListDecoder().decode([String: [OutgoingImage]].self, from: data) { imageDrafts = saved }
@@ -1057,30 +1073,62 @@ final class PocketStore: ObservableObject {
             error = nil
         } catch { self.error = error.localizedDescription }
     }
-    func selectModel(provider: String, model: String) async {
+    /// The transport vanished mid-selection: the request went out on a
+    /// connection that is already gone. The liveness check sees the same
+    /// disconnect, so the operation settles stale instead of surfacing this.
+    private struct SelectionTransportGone: LocalizedError {
+        var errorDescription: String? { "The connection dropped before the model selection was confirmed." }
+    }
+    func selectModel(provider: String, model: String, effort: String? = nil) async {
         if usesNativeHarness { error = "Native Harness currently uses the model configured on its host: " + modelLabel; return }
-        guard let api, connected, let id = selectedID, !selectingModel else { return }
-        let host = endpoint
-        selectingModel = true
-        defer { selectingModel = false }
-        do {
-            let value = try await api.rpc("session/selectModel", args: ["request": .object(["sessionId": .string(id), "provider": .string(provider), "model": .string(model)])])
-            guard host == endpoint else { return }
-            let accepted = value["selected"]
-            if selectedID == id { self.model = accepted }
-            // DSH also persists this selection as the default for unconfigured sessions.
-            // Re-read it rather than continuing to display the catalog loaded at login.
-            let updatedCatalog = try await api.rpc("session/modelCatalog")
-            guard host == endpoint else { return }
-            catalog = updatedCatalog
+        guard api != nil, connected, let id = selectedID else { return }
+        // A selection may supersede the in-flight one: the gate owns the busy
+        // flag, and only the still-active operation may release it or land a
+        // response, so a second tap is safe and the first becomes stale.
+        let generation = self.generation
+        var lastError: Error?
+        let result = await selection.select(provider: provider, model: model, effort: effort,
+                                            sessionID: id, endpoint: endpoint, generation: generation, epoch: selectionEpoch, attempt: carrier.currentRefreshToken(),
+                                            onBusy: { [weak self] in self?.selectingModel = $0 },
+                                            rpc: { [weak self] method, args in
+                                                guard let api = self?.api else { throw SelectionTransportGone() }
+                                                do { return try await api.rpc(method, args: args) } catch { lastError = error; throw error }
+                                            },
+                                            live: { [weak self] op in self?.isLiveModelSelection(op) ?? false },
+                                            onAccepted: { [weak self] value in
+                                                guard let self, self.selectedID == id else { return }
+                                                self.model = value["selected"]
+                                            },
+                                            onCatalog: { [weak self] value in
+                                                guard let self, self.selectedID == id else { return }
+                                                self.catalog = value
+                                            })
+        switch result.outcome {
+        case .applied, .catalogFailed:
+            error = result.outcome == .applied ? nil : "Model selected, but the catalog did not refresh."
             await refresh()
-            if selectedID == id { try await followSelected() }
-            error = nil
-        } catch { if host == endpoint { self.error = "Could not confirm the selected model: " + error.localizedDescription } }
+            if isLiveModelSelection(result.operation) { do { try await followSelected() } catch {} }
+        case .rejected:
+            error = "Could not confirm the selected model: " + (lastError?.localizedDescription ?? "request failed")
+        case .stale:
+            break
+        }
     }
     private func command(_ name: String, request: [String: JSON]) async {
         guard connected, let api else { return }
         do { _ = try await api.rpc(name, args: ["request": .object(request)]) } catch { self.error = error.localizedDescription }
+    }
+    /// Whether a pending model selection is still on the live session and
+    /// connection it was sent on: the session, endpoint, connection
+    /// generation and selection epoch all match, and the carrier still accepts
+    /// the attempt the request rode on (nil = pre-carrier, always accepted).
+    private func isLiveModelSelection(_ op: ModelSelectionGate.Operation) -> Bool {
+        guard connected, api != nil else { return false }
+        return op.sessionID == selectedID
+            && op.endpoint == endpoint
+            && op.generation == generation
+            && op.epoch == selectionEpoch
+            && carrier.accepts(op.attempt)
     }
     /// The store's live session and connection as one value: what a pending
     /// action is checked against when its question is answered.
