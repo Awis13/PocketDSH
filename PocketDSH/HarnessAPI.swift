@@ -1,8 +1,20 @@
 import Foundation
 import Security
 
+// One LocalizedError for the whole app. RPC failures additionally carry the
+// server's stable `code` and the raw JSON `details` from
+// server-response.result.error (ConnectionRpcFailure). The display stays the
+// plain message, so a missing message still renders the previous empty text
+// and every existing HarnessError(message:) call site keeps compiling.
 struct HarnessError: LocalizedError {
     let message: String
+    let code: String?
+    let details: JSON
+    init(message: String, code: String? = nil, details: JSON = .null) {
+        self.message = message
+        self.code = code
+        self.details = details
+    }
     var errorDescription: String? { message }
 }
 final class NoRedirect: NSObject, URLSessionTaskDelegate {
@@ -84,7 +96,14 @@ class HarnessAPI {
             throw HarnessError(message: "Invalid DSH response for \(method): \(kind), \(data.count) bytes (HTTP \(response.statusCode)).")
         }
         let result = envelope["result"]
-        guard result["ok"].bool else { throw HarnessError(message: result["error"]["message"].string) }
+        guard result["ok"].bool else {
+            // ConnectionRpcFailure: preserve the stable code, the message and
+            // the raw JSON details on the thrown error; the display stays the
+            // plain message (an empty string when the server sends none).
+            let failure = result["error"]
+            let code = failure["code"].string
+            throw HarnessError(message: failure["message"].string, code: code.isEmpty ? nil : code, details: failure["details"])
+        }
         return result["value"]
     }
     func transcribeVoice(_ audio: Data) async throws -> String {
