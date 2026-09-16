@@ -194,3 +194,117 @@ final class CreateSheetOwnership {
     /// A session switch or a disconnect: the in-flight create loses its seat.
     func invalidate() { active = nil }
 }
+
+// MARK: - B3: the blank-session preset switch
+
+/// The display name for an accepted preset id: the loaded roster's published
+/// name when it lists the id, the id itself otherwise. An accepted id the
+/// roster no longer advertises is shown verbatim, never hidden - the
+/// projection is the server's fact about what the session runs on.
+func presetDisplayName(_ id: String, roster: AgentPresetRosterState) -> String {
+    if case .loaded(let rows, _) = roster {
+        for row in rows where row.id == id { return row.title }
+    }
+    return id
+}
+
+/// The production async preset-switch path with operation ownership, the same
+/// seam ModelSelectionGate is for model selection: PocketStore keeps one
+/// instance and drives it from `selectPreset`; the offline checks drive the
+/// same object with a delayed fake transport, so the request, the ownership
+/// and the response logic are the production code, not a mirror.
+///
+/// A switch is only issued for a blank session - `sessionListMetadata.blank`
+/// is the Host's own fact about the blank window, never `!running`, never
+/// transcript emptiness. The request is `agentPresets/select` with the
+/// session and the chosen preset id; the Host's strict result is the accepted
+/// preset id. The accepted state itself is server-owned: it arrives as the
+/// `agentPreset` projection on the session list, and the client never writes
+/// it. The command catalog is invalidated by the Host's own
+/// `agent-preset/selected` event (the existing `CommandCatalog` path) - the
+/// switch itself issues no catalog pull, so nothing refreshes twice.
+@MainActor
+final class PresetSwitchGate {
+    /// The identity one switch request was sent on: the session, endpoint,
+    /// connection generation, the session-selection epoch and the carrier
+    /// attempt. The request is admitted only while all of these still hold.
+    final class Operation: Equatable {
+        let sessionID: String
+        let endpoint: String
+        let generation: UUID
+        let epoch: UUID
+        let attempt: RemoteStreamConnection.RefreshToken?
+        init(sessionID: String, endpoint: String, generation: UUID, epoch: UUID, attempt: RemoteStreamConnection.RefreshToken?) {
+            self.sessionID = sessionID; self.endpoint = endpoint; self.generation = generation; self.epoch = epoch; self.attempt = attempt
+        }
+        static func == (a: Operation, b: Operation) -> Bool { a === b }
+    }
+
+    /// What one switch finished as.
+    enum Outcome: Equatable {
+        /// agentPresets/select returned the accepted preset id.
+        case accepted
+        /// The Host refused the switch; the store published the error.
+        case rejected
+        /// The operation is no longer current; its answer was discarded
+        /// without touching the shared state.
+        case stale
+    }
+
+    /// The operation that now owns the busy state, or nil when idle.
+    private(set) var active: Operation?
+    /// The busy closure of the active operation, retained so invalidateCurrent
+    /// can release the busy state of an operation it drops.
+    private var busy: (@MainActor (Bool) -> Void)?
+
+    /// Run one switch. "op" is the operation the caller created - and thereby
+    /// owns - and keeps for its own ownership checks after the response;
+    /// "live" reports whether "op" is still current on a live session and
+    /// connection at each response boundary; "onAccepted" receives the
+    /// accepted preset id the Host returned and runs the post-accept effects -
+    /// list refresh, model/effort catalog, re-follow - re-checking ownership
+    /// across its own awaits; "onRejected" receives the rejection. A response
+    /// is applied only while "live" holds at that boundary, so a deferred
+    /// answer cannot land after a session switch, a supersede or a reconnect.
+    /// "onBusy(true)" marks the operation active, "onBusy(false)" releases the
+    /// busy state - only the operation that was still active does.
+    func select(_ op: Operation, presetID: String,
+                onBusy: @escaping @MainActor (Bool) -> Void,
+                rpc: @MainActor (String) async throws -> JSON,
+                live: @MainActor (Operation) -> Bool,
+                onAccepted: @escaping @MainActor (String) async -> Void,
+                onRejected: @MainActor (Error) -> Void) async -> (outcome: Outcome, operation: Operation) {
+        active = op
+        busy = onBusy
+        onBusy(true)
+        do {
+            let value = try await rpc(presetID)
+            guard live(op), active === op else { return settle(op, .stale) }
+            await onAccepted(value.string)
+            guard live(op), active === op else { return settle(op, .stale) }
+            return settle(op, .accepted)
+        } catch {
+            guard live(op), active === op else { return settle(op, .stale) }
+            onRejected(error)
+            return settle(op, .rejected)
+        }
+    }
+
+    /// Release the busy flag only for the operation that still owns it. A
+    /// superseded operation leaves the newer one's busy state untouched.
+    private func settle(_ op: Operation, _ outcome: Outcome) -> (outcome: Outcome, operation: Operation) {
+        if active === op { active = nil; busy?(false) }
+        return (outcome, op)
+    }
+
+    /// The session or the connection itself has moved on: the in-flight
+    /// switch can no longer land, so its ownership - and the busy state it
+    /// owns - are dropped immediately. A late response of the dropped
+    /// operation settles stale and touches nothing, because the seat no
+    /// longer holds it.
+    func invalidateCurrent() {
+        guard active != nil else { return }
+        active = nil
+        busy?(false)
+    }
+}

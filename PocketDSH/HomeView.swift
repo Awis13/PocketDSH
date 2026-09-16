@@ -114,6 +114,12 @@ struct HomeView: View {
                 HStack(spacing: 6) {
                     Text(waiting ? "Needs your input" : session.running ? "Running" : URL(fileURLWithPath: session.cwd).lastPathComponent)
                         .foregroundStyle(waiting || session.running ? theme.accent : .secondary)
+                    // B3: the accepted preset the Host recorded for this
+                    // session, verbatim when the roster no longer offers it.
+                    if let preset = store.acceptedPresetName(for: session) {
+                        Text("·").foregroundStyle(.tertiary)
+                        Text(preset).foregroundStyle(.secondary)
+                    }
                     Text("·").foregroundStyle(.tertiary)
                     Text(sessionAge(session.date)).foregroundStyle(.tertiary)
                 }.font(.caption).lineLimit(1)
@@ -299,6 +305,10 @@ struct DesktopPaneView: View {
                                     let waiting = store.interactions.contains { $0.sessionID == session.id }
                                     Circle().fill(waiting ? Color.orange : session.running ? theme.accent : Color.secondary.opacity(0.4)).frame(width: 5, height: 5)
                                     Text(waiting ? "Needs input" : session.running ? "Running" : URL(fileURLWithPath: session.cwd).lastPathComponent).lineLimit(1)
+                                    if let preset = store.acceptedPresetName(for: session) {
+                                        Text("·")
+                                        Text(preset).lineLimit(1)
+                                    }
                                     Spacer(minLength: 0)
                                     Text(sessionAge(session.date)).lineLimit(1)
                                 }.font(.caption2).foregroundStyle(.secondary)

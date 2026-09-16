@@ -73,6 +73,11 @@ final class PocketStore: ObservableObject {
     @Published var loadingHistory = false
     @Published var submitting = false
     @Published var selectingModel = false
+    /// B3: a blank-session preset switch is in flight: the composer's send,
+    /// the command dispatch and the model selection are all blocked until the
+    /// Host has answered the switch - the blank window closes the moment the
+    /// accepted projection lands.
+    @Published private(set) var switchingPreset = false
     @Published var draft = "" {
         didSet {
             if let id = selectedID { draftTable.write(draft, for: id); persistDrafts() }
@@ -234,6 +239,15 @@ final class PocketStore: ObservableObject {
     /// A session switch or a disconnect drops the seat, so a late answer can
     /// apply nothing.
     let createSeat = CreateSheetOwnership()
+    /// B3: the async preset-switch path with operation ownership: who owns
+    /// the busy flag, and which deferred response may still land. The
+    /// accepted preset itself is never stored here - it is the server-owned
+    /// `agentPreset` projection on the session list (see acceptedAgentPreset).
+    let presetSwitch = PresetSwitchGate()
+    /// The switch this store last started. The post-response effects - error,
+    /// list refresh, catalog and re-follow - belong only to the operation
+    /// that still holds this seat.
+    private(set) var activePresetSwitch: PresetSwitchGate.Operation?
     /// The newest agentPresets/list pull this store has issued. A pull that
     /// answers after a newer pull on the same connection belongs to no one:
     /// the picker keeps the roster the latest request fetched.
@@ -259,7 +273,7 @@ final class PocketStore: ObservableObject {
     /// ported CommandDirectory. Created on first use and never replaced, so a
     /// pull always has somewhere to publish and a strong-wait can never be
     /// stranded on a missing directory.
-    private lazy var commandDirectory = CommandDirectory(startPull: { [weak self] token in
+    lazy var commandDirectory = CommandDirectory(startPull: { [weak self] token in
         self?.startCommandPull(token)
     })
     /// The selected session's catalog snapshot as the composer palette renders
@@ -307,6 +321,49 @@ final class PocketStore: ObservableObject {
         let base = model["model"].string.isEmpty ? "Host model" : model["model"].string
         if let effort = effectiveEffortLabel(selection: model, catalog: catalog) { return base + " · " + effort }
         return base
+    }
+    /// B3: the selected session's accepted preset, as the Host owns it: the
+    /// `agentPreset` projection from the session list. nil is "runs on the
+    /// deployment default". The picker's staged choice never appears here -
+    /// only what the Host accepted for this session is shown, and the id is
+    /// displayed verbatim when the roster no longer advertises it.
+    var acceptedAgentPreset: String? {
+        let id = selected?.raw["projections"]["values"]["agentPreset"].string ?? ""
+        return id.isEmpty ? nil : id
+    }
+    /// B3: the Host's own fact about the blank window. Only this makes the
+    /// session switchable - never `!running`, never an empty transcript.
+    var selectedIsBlank: Bool {
+        selected?.raw["projections"]["values"]["sessionListMetadata"]["blank"].bool ?? false
+    }
+    /// B3: the switcher's label: the accepted preset's display name, or the
+    /// word itself when the session runs on the deployment default.
+    var presetSwitcherLabel: String {
+        acceptedAgentPreset.map { presetDisplayName($0, roster: presetRoster) } ?? "Preset"
+    }
+    /// B3: where the switcher lives: a connected DSH session in its blank
+    /// window. A non-blank session has left the window - the Host owns that
+    /// fact, and the switcher with it.
+    var presetSwitcherVisible: Bool {
+        connected && !usesNativeHarness && selected != nil && selectedIsBlank
+    }
+    /// B3: the switcher's menu options: the advertised rows in the order the
+    /// Host serves them, with the accepted preset itself first, verbatim, when
+    /// the roster no longer advertises it - the unknown-id fallback. The
+    /// untappable "Server default" row appears only while the session runs on
+    /// the deployment default: the wire carries a non-empty id, and that is
+    /// the default row the roster serves.
+    var presetSwitcherOptions: [PresetPickerOption] {
+        let staged = acceptedAgentPreset
+        let options = PresetSelection.pickerOptions(roster: presetRoster, staged: staged)
+        return staged == nil ? options : options.filter { $0.presetID != nil }
+    }
+    /// B3: one list row's accepted preset name for the home display: nil when
+    /// the row runs on the deployment default; the id verbatim when the
+    /// roster no longer advertises it.
+    func acceptedPresetName(for session: HarnessSession) -> String? {
+        let id = session.raw["projections"]["values"]["agentPreset"].string
+        return id.isEmpty ? nil : presetDisplayName(id, roster: presetRoster)
     }
 
     init(restoringPrimary: Bool = true) {
@@ -380,6 +437,7 @@ final class PocketStore: ObservableObject {
         // its ownership and busy state immediately, so the UI never waits for
         // a dead request's response to re-enable the controls.
         selection.invalidateCurrent(); activeSelection = nil
+        presetSwitch.invalidateCurrent(); activePresetSwitch = nil
         // The in-flight create rode this connection too: drop its seat so a
         // late answer applies nothing, and retire the roster it was served on.
         createSeat.invalidate()
@@ -738,6 +796,9 @@ final class PocketStore: ObservableObject {
         // retire it, and the settled outcome is judged against that seat.
         if selectedID != id {
             selectionEpoch = UUID(); selection.invalidateCurrent(); activeSelection = nil
+            // The in-flight switch rode the session the user just left: drop
+            // its seat so its answer applies nothing, the way the selection's.
+            presetSwitch.invalidateCurrent(); activePresetSwitch = nil
             if createSelfSelect == nil || createSeat.active?.id != createSelfSelect?.id {
                 createSeat.invalidate()
                 // The create's answer must not wait on a seat it no longer holds.
@@ -1062,7 +1123,7 @@ final class PocketStore: ObservableObject {
     /// leaves the draft and the attachments in place for correction, like the
     /// reference client.
     func executeCommand(_ snapshot: ComposerSubmission) async {
-        guard !usesNativeHarness, connected, let api, !submitting else { return }
+        guard !usesNativeHarness, connected, let api, !submitting, !switchingPreset else { return }
         let text = snapshot.text
         guard parseCommand(text) != nil,
               snapshot.stillApplies(sessionID: selectedID, endpoint: endpoint, catalogGeneration: commandDirectory.catalogGeneration) else { return }
@@ -1372,7 +1433,7 @@ final class PocketStore: ObservableObject {
             await submitNative(mode: mode); return
         }
         guard !usesNativeHarness, let api, connected, let id = selectedID, !submitting else { return }
-        guard !preparingImages, !selectingModel else { return }
+        guard !preparingImages, !selectingModel, !switchingPreset else { return }
         let frozen = snapshot ?? ComposerSubmission(draft: draft, images: images, sessionID: id, endpoint: endpoint, catalogGeneration: commandDirectory.catalogGeneration, draftVersion: draftTable.version(of: id))
         // A snapshot of another session - or of a connection that has since been
         // torn down - is never sent here: the user moved on and this action is
@@ -1541,6 +1602,9 @@ final class PocketStore: ObservableObject {
     }
     func selectModel(provider: String, model: String, effort: String? = nil) async {
         if usesNativeHarness { error = "Native Harness currently uses the model configured on its host: " + modelLabel; return }
+        // A pending preset switch owns the blank window: a model change must
+        // not land on a composition the Host is about to replace.
+        guard !switchingPreset else { return }
         guard api != nil, connected, let id = selectedID else { return }
         // A selection may supersede the in-flight one: the gate owns the busy
         // flag, and only the still-active operation may release it or land a
@@ -1594,6 +1658,109 @@ final class PocketStore: ObservableObject {
             break
         }
     }
+    /// B3: the pending-switch ownership of the composer's command window.
+    /// The view's command boundary (HarnessView.runCommand) fails closed on
+    /// this, so while a preset switch is pending no command action leaves -
+    /// a local /new, a /view or /model action, a bare server dispatch - and
+    /// it clears the moment the switch settles, so the same commands work
+    /// again. The typed server line refuses one hop deeper, on the store's
+    /// own executeCommand guard, which reads the same flag.
+    var canDispatchCommands: Bool { !switchingPreset }
+    /// B3: switch the selected session's accepted preset, the Host's
+    /// `agentPresets/select`. The switch is issued only in the blank window -
+    /// `selectedIsBlank` is the Host's own fact, never `!running`, never an
+    /// empty transcript - and the staged picker choice is sent exactly as the
+    /// user chose it. The Host's strict result is the accepted preset id; the
+    /// accepted state the UI shows is the `agentPreset` projection the list
+    /// refresh below publishes, never the staged value. While the switch is
+    /// pending the composer's send, the command dispatch and the model
+    /// selection are blocked (the guards above), and a model selection in
+    /// flight blocks the switch the same way, as does a composer dispatch
+    /// already in flight - the two never interleave on the wire.
+    func selectPreset(_ presetID: String) async {
+        if usesNativeHarness { return }
+        guard api != nil, connected, let id = selectedID else { return }
+        // A composer dispatch already in flight owns the blank window the
+        // same way the switch does: a send or a command that left before the
+        // switch may not interleave with it, so the switch waits for it.
+        guard !selectingModel, !submitting else { return }
+        // One switch at a time: a second tap before the first answered is a
+        // no-op, not a supersede - the menu is disabled while pending anyway,
+        // and the blank window ends the moment the accepted projection lands.
+        guard activePresetSwitch == nil else { return }
+        guard selectedIsBlank else { return }
+        let op = PresetSwitchGate.Operation(sessionID: id, endpoint: endpoint, generation: generation, epoch: selectionEpoch, attempt: carrier.currentRefreshToken())
+        activePresetSwitch = op
+        let result = await presetSwitch.select(op, presetID: presetID,
+            onBusy: { [weak self] in self?.switchingPreset = $0 },
+            rpc: { [weak self] preset in
+                guard let api = self?.api else { throw HarnessError(message: "The connection dropped before the preset switch was confirmed.") }
+                return try await api.rpc("agentPresets/select", args: ["agentId": .string(op.sessionID), "agentPreset": .string(preset)])
+            },
+            live: { [weak self] op in self?.isLivePresetSwitch(op) ?? false },
+            onAccepted: { [weak self] accepted in
+                guard let self, self.activePresetSwitch === op else { return }
+                // The accepted id is the Host's answer; the projection it
+                // names arrives with the list refresh below. One refresh: the
+                // accepted preset, the blank fact and the model selection all
+                // ride the same session/list - no second, duplicate pull.
+                await self.refresh()
+                guard self.activePresetSwitch === op, self.isLivePresetSwitch(op) else { return }
+                // The composition can change the model groups: refresh the
+                // model/effort catalog the picker renders from.
+                if let api = self.api {
+                    do {
+                        let updated = try await api.rpc("session/modelCatalog", args: [:])
+                        guard self.activePresetSwitch === op, self.isLivePresetSwitch(op) else { return }
+                        self.catalog = updated
+                    } catch {
+                        // The switch itself landed: a catalog that cannot be
+                        // refreshed keeps the old one rather than unwinding.
+                        guard self.activePresetSwitch === op else { return }
+                    }
+                }
+                guard self.activePresetSwitch === op, self.isLivePresetSwitch(op) else { return }
+                // Point the conversation stream at the new composition. The
+                // command catalog needs no pull of its own: the Host's own
+                // agent-preset/selected event invalidates it (the existing
+                // CommandCatalog path), so nothing refreshes twice.
+                do { try await self.followSelected() } catch {}
+            },
+            onRejected: { [weak self] error in
+                guard let self, self.activePresetSwitch === op else { return }
+                // The rejection is this switch's only visible effect: the
+                // accepted projection is server-owned and is never written
+                // from the client side, so it keeps the last accepted preset.
+                self.error = error.localizedDescription
+            })
+        // The post-response effects are owned by the operation that still
+        // holds the seat. The gate already re-checked liveness at the
+        // response boundary; this is the store's own seat check for the
+        // effects that run here, after the gate returned.
+        guard activePresetSwitch === op else { return }
+        switch result.outcome {
+        case .accepted:
+            // The refresh, the catalog and the follow already ran inside
+            // onAccepted - each under its own ownership re-check.
+            break
+        case .rejected:
+            // The error is already published by onRejected.
+            break
+        case .stale:
+            // The seat moved on: nothing is written; the newer switch - or
+            // the invalidation - owns the state now.
+            break
+        }
+        // Release the store-owned seat exactly once, only if this operation
+        // still holds it: the invalidation paths (a newer selection, a
+        // disconnect) already cleared it, and a switch that settled without
+        // the seat releases nothing - never a seat that is not its own. The
+        // blank window must outlive a settled switch: the host keeps
+        // sessionListMetadata.blank true while the turn has not started, so
+        // the same session can switch again - accepted or after a refusal -
+        // before its first prompt.
+        if activePresetSwitch === op { activePresetSwitch = nil }
+    }
     private func command(_ name: String, request: [String: JSON]) async {
         guard connected, let api else { return }
         do { _ = try await api.rpc(name, args: ["request": .object(request)]) } catch { self.error = error.localizedDescription }
@@ -1603,6 +1770,17 @@ final class PocketStore: ObservableObject {
     /// generation and selection epoch all match, and the carrier still accepts
     /// the attempt the request rode on (nil = pre-carrier, always accepted).
     private func isLiveModelSelection(_ op: ModelSelectionGate.Operation) -> Bool {
+        guard connected, api != nil else { return false }
+        return op.sessionID == selectedID
+            && op.endpoint == endpoint
+            && op.generation == generation
+            && op.epoch == selectionEpoch
+            && carrier.accepts(op.attempt)
+    }
+    /// B3: whether a pending preset switch can still land: the session,
+    /// endpoint, connection generation and selection epoch it was sent on all
+    /// still hold, and the carrier still accepts the attempt it rode on.
+    private func isLivePresetSwitch(_ op: PresetSwitchGate.Operation) -> Bool {
         guard connected, api != nil else { return false }
         return op.sessionID == selectedID
             && op.endpoint == endpoint

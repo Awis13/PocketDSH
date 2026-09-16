@@ -42,6 +42,14 @@ struct HarnessView: View {
     }
     private func runCommand(_ suggestion: ComposerPaletteRow) {
         guard !creatingTask else { return }
+        // B3: the pending preset switch owns the composer's command window.
+        // While it is in flight every command action fails closed here -
+        // the local /new, /view and /model and the bare server dispatch
+        // alike, from the palette and the typed line - and the boundary
+        // opens again the moment the switch settles. The typed server line
+        // refuses one hop deeper, on the store's own executeCommand guard,
+        // which reads the same flag.
+        guard store.canDispatchCommands else { return }
         // One route per line, from the same table the palette was built from:
         // a local name runs the editor action, and everything else on the DSH
         // backend is the host's own command path. /compact is local on the
@@ -136,7 +144,7 @@ struct HarnessView: View {
         #endif
     }
     private var canSend: Bool {
-        (!store.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !store.images.isEmpty) && !store.submitting && !store.preparingImages && !store.selectingModel && store.connected && store.selectedID != nil
+        (!store.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !store.images.isEmpty) && !store.submitting && !store.preparingImages && !store.selectingModel && !store.switchingPreset && store.connected && store.selectedID != nil
     }
     private func sendPrompt() {
         if !commandMatches.isEmpty {
@@ -373,6 +381,32 @@ struct HarnessView: View {
                     HStack(spacing: 5) { Image(systemName: "cpu"); Text(store.modelLabel).lineLimit(1); Image(systemName: "chevron.down").font(.system(size: 8, weight: .bold)) }.font(.caption).foregroundStyle(.secondary)
                 }.disabled(!store.connected || store.selectingModel || store.usesNativeHarness)
                 if store.selectingModel { ProgressView().controlSize(.small) }
+                // B3: the blank-session preset switch. It is visible only
+                // while the Host says the selected session is still blank -
+                // sessionListMetadata.blank, never !running, never an empty
+                // transcript - and its label is the preset the Host accepted,
+                // not the picker's staged choice: a tap is a request, the
+                // projection is the fact.
+                if store.presetSwitcherVisible {
+                    Menu {
+                        ForEach(store.presetSwitcherOptions) { option in
+                            if let presetID = option.presetID {
+                                Button { Task { await store.selectPreset(presetID) } } label: {
+                                    if presetID == store.acceptedAgentPreset { Label(option.title, systemImage: "checkmark") } else { Text(option.title) }
+                                }.disabled(!option.selectable || store.switchingPreset || store.selectingModel)
+                            } else {
+                                Label(option.title, systemImage: "checkmark")
+                            }
+                        }
+                    } label: {
+                        HStack(spacing: 5) {
+                            if store.switchingPreset { ProgressView().controlSize(.small) } else { Image(systemName: "square.stack.3d.up") }
+                            Text(store.presetSwitcherLabel).lineLimit(1)
+                            Image(systemName: "chevron.down").font(.system(size: 8, weight: .bold))
+                        }.font(.caption).foregroundStyle(.secondary)
+                    }.disabled(!store.connected || store.switchingPreset || store.selectingModel)
+                    .accessibilityLabel(Text("Preset: " + store.presetSwitcherLabel))
+                }
                 Spacer(minLength: 0)
                 Button {
                     terminalInput.toggle()

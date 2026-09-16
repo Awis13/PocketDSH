@@ -134,6 +134,37 @@ final class ParkedTransport: RemoteStreamTransport {
         .object(["items": .array(ids.map { .object(["sessionId": .string($0), "cwd": .string("/w"), "updatedAt": .number(1), "running": .bool(false)]) })])
     }
 
+    /// One seeded session carrying the Host's own projections: the accepted
+    /// preset ("" = the deployment default, exactly as the Host omits it) and
+    /// the blank fact the Host reports for this session.
+    @MainActor
+    static func projected(_ id: String, preset: String = "", blank: Bool = true, running: Bool = false) -> HarnessSession {
+        var values: [String: JSON] = ["sessionListMetadata": .object(["blank": .bool(blank)])]
+        if !preset.isEmpty { values["agentPreset"] = .string(preset) }
+        return HarnessSession(raw: .object([
+            "sessionId": .string(id), "cwd": .string("/w"), "updatedAt": .number(1),
+            "running": .bool(running),
+            "projections": .object(["values": .object(values)])
+        ]))
+    }
+
+    /// A session/list response carrying each row's accepted preset ("" = the
+    /// deployment default) and blank fact, exactly as the projection section
+    /// of the list serves them.
+    @MainActor
+    static func projectedList(_ items: [(id: String, preset: String, blank: Bool)]) -> JSON {
+        let rows: [JSON] = items.map { spec in
+            var values: [String: JSON] = ["sessionListMetadata": .object(["blank": .bool(spec.blank)])]
+            if !spec.preset.isEmpty { values["agentPreset"] = .string(spec.preset) }
+            return .object([
+                "sessionId": .string(spec.id), "cwd": .string("/w"), "updatedAt": .number(1),
+                "running": .bool(false),
+                "projections": .object(["values": .object(values)])
+            ])
+        }
+        return .object(["items": .array(rows)])
+    }
+
     /// Poll a condition until it holds, so the parked transport and the store
     /// interleave deterministically instead of racing on a fixed delay.
     @MainActor
@@ -255,6 +286,19 @@ final class ParkedTransport: RemoteStreamTransport {
             try await prodNativeCreateStaleCloseDuringAck()
             try await prodNativeCreateParkedAckThenSheetClose()
             try await prodNativeCreateConnectionLossDuringAck()
+        try await prodPresetSwitchWireAndAuthority()
+        try await prodPresetStagedVsAccepted()
+        try await prodPresetOneAtATime()
+        try await prodPresetLockedAndNonBlank()
+        try await prodPresetStaleSuccessReconnect()
+        try await prodPresetStaleErrorAndDefer()
+        try await prodPresetAToBToA()
+        try await prodPresetCatalogInvalidation()
+        try await prodPresetBusyOwnership()
+        try await prodPresetUnknownIdVerbatim()
+            try await prodPresetSeatReleasedAfterAccept()
+            try await prodPresetSeatReleasedAfterReject()
+            try await prodPresetPendingSwitchOwnsCommandBoundary()
             try newTaskSheetRetirement()
             print("PASS: the preset roster loads, the create request omits the default, and each create owns its outcome")
             exit(0)
@@ -1484,6 +1528,660 @@ final class ParkedTransport: RemoteStreamTransport {
         assert(secondResult.outcome == .created(sessionID: secondID, agentPreset: nil),
                "a fresh create over the recovered connection still succeeds")
         print("PASS: a connection loss after the open write stales the create without a reconnect, without hanging, and adopts nothing")
+    }
+
+
+    // (27) B3: the blank-session preset switch on the wire. The request is
+    // agentPresets/select with the session and the staged id; the Host's
+    // strict answer is the accepted preset id; the accepted state the UI
+    // shows is the agentPreset projection the list refresh below carries -
+    // the client never writes it. One list refresh, one model-catalog
+    // refresh, one stream follow: nothing is pulled twice.
+    @MainActor
+    static func prodPresetSwitchWireAndAuthority() async throws {
+        let api = FakeAPI()
+        let store = PocketStore(restoringPrimary: false)
+        wire(store, api, sessions: ["sA"])
+        store.sessions = [projected("sA", blank: true)]
+        await fetchRoster(store, api) { $0.respond(.object(["presets": .array([presetRow(id: "p1", name: "Preset One", isDefault: true), presetRow(id: "p2", name: "Preset Two")]), "authorable": .bool(true)])) }
+        await store.select("sA")
+        assert(store.acceptedAgentPreset == nil && store.presetSwitcherLabel == "Preset" && store.presetSwitcherVisible,
+               "an unconfigured blank session shows the default label and an open switcher")
+        let task = Task { @MainActor in await store.selectPreset("p2") }
+        await spin { api.transport.calls("agentPresets/select").count == 1 }
+        let sent = api.transport.calls("agentPresets/select")[0].args
+        assert(sent["agentId"]?.string == "sA" && sent["agentPreset"]?.string == "p2" && sent.count == 2,
+               "the request carries exactly the session and the staged preset id")
+        assert(store.switchingPreset && store.acceptedAgentPreset == nil && store.presetSwitcherLabel == "Preset" && store.error == nil,
+               "a pending switch is busy, and the staged id is not shown as the accepted one")
+        api.transport.calls("agentPresets/select")[0].respond(.string("p2"))
+        await spin { api.transport.calls("session/list").count == 1 }
+        api.transport.calls("session/list")[0].respond(projectedList([("sA", "p2", false)]))
+        await spin { api.transport.calls("session/modelCatalog").count == 1 }
+        api.transport.calls("session/modelCatalog")[0].respond(.object(["groups": .array([])]))
+        await task.value
+        await spin { !store.switchingPreset }
+        assert(store.acceptedAgentPreset == "p2", "the projection the list carries is the accepted preset")
+        assert(store.presetSwitcherLabel == "Preset Two", "the switcher shows the roster name of the accepted id")
+        assert(!store.selectedIsBlank && !store.presetSwitcherVisible,
+               "the host's blank fact closed the window and hides the switcher")
+        assert(store.sessions[0].raw["projections"]["values"]["agentPreset"].string == "p2"
+               && store.sessions[0].raw["projections"]["values"]["sessionListMetadata"]["blank"].bool == false,
+               "the session list now carries the accepted preset and the closed blank window")
+        assert(store.presetSwitcherOptions.map { $0.presetID } == ["p1", "p2"],
+               "with a preset accepted, the default row leaves the menu and the roster rows remain")
+        assert(api.transport.calls("agentPresets/select").count == 1
+               && api.transport.calls("session/list").count == 1
+               && api.transport.calls("session/modelCatalog").count == 1,
+               "one switch, one list refresh, one catalog refresh - nothing twice")
+        assert(store.error == nil, "the switch left no error")
+        print("PASS: the preset switch sends agentPresets/select, accepts the host's id, and shows the list projection")
+    }
+
+    // (28) B3: while a switch is pending the picker has staged a choice -
+    // the accepted state it shows is still the projection the list last
+    // carried, never the staged id. The answer of the switch itself does
+    // not move it either: only the list refresh of the accepted switch
+    // carries the new projection.
+    @MainActor
+    static func prodPresetStagedVsAccepted() async throws {
+        let api = FakeAPI()
+        let store = PocketStore(restoringPrimary: false)
+        wire(store, api, sessions: ["sA"])
+        store.sessions = [projected("sA", preset: "p1", blank: true)]
+        await fetchRoster(store, api) { $0.respond(.object(["presets": .array([presetRow(id: "p1", name: "Preset One", isDefault: true), presetRow(id: "p2", name: "Preset Two")]), "authorable": .bool(true)])) }
+        await store.select("sA")
+        assert(store.acceptedAgentPreset == "p1" && store.presetSwitcherLabel == "Preset One",
+               "the accepted preset the host last reported is what the switcher shows")
+        let task = Task { @MainActor in await store.selectPreset("p2") }
+        await spin { api.transport.calls("agentPresets/select").count == 1 }
+        assert(store.switchingPreset && store.acceptedAgentPreset == "p1" && store.presetSwitcherLabel == "Preset One" && store.error == nil,
+               "while pending the staged choice is not shown as the accepted one")
+        api.transport.calls("agentPresets/select")[0].respond(.string("p2"))
+        await spin { api.transport.calls("session/list").count == 1 }
+        // The switch's own answer arrived, but the list carrying the new
+        // projection has not: the accepted state is still the old one.
+        assert(store.acceptedAgentPreset == "p1" && store.presetSwitcherLabel == "Preset One",
+               "the switch's own answer does not move the accepted state")
+        api.transport.calls("session/list")[0].respond(projectedList([("sA", "p2", false)]))
+        await spin { api.transport.calls("session/modelCatalog").count == 1 }
+        api.transport.calls("session/modelCatalog")[0].respond(.object(["groups": .array([])]))
+        await task.value
+        await spin { !store.switchingPreset }
+        assert(store.acceptedAgentPreset == "p2" && store.presetSwitcherLabel == "Preset Two",
+               "the accepted state moves only with the list projection")
+        print("PASS: the staged choice is never shown as accepted - the list projection is")
+    }
+
+    // (29) B3: one switch at a time, in both response orders. A tap while
+    // the first switch is pending is a no-op - no second request goes on
+    // the wire. After the first answered, the next switch is a fresh
+    // operation on its own session, with its own list refresh.
+    @MainActor
+    static func prodPresetOneAtATime() async throws {
+        let api = FakeAPI()
+        let store = PocketStore(restoringPrimary: false)
+        wire(store, api, sessions: ["sA", "sB"])
+        store.sessions = [projected("sA", blank: true), projected("sB", blank: true)]
+        await fetchRoster(store, api) { $0.respond(.object(["presets": .array([presetRow(id: "p1", name: "Preset One", isDefault: true), presetRow(id: "p2", name: "Preset Two"), presetRow(id: "p3", name: "Preset Three")]), "authorable": .bool(true)])) }
+        await store.select("sA")
+        let first = Task { @MainActor in await store.selectPreset("p1") }
+        await spin { api.transport.calls("agentPresets/select").count == 1 }
+        // The second order of the race: a tap before the first answered.
+        await store.selectPreset("p2")
+        assert(api.transport.calls("agentPresets/select").count == 1 && store.switchingPreset,
+               "a tap while a switch is pending sends nothing and keeps the busy state")
+        api.transport.calls("agentPresets/select")[0].respond(.string("p1"))
+        await spin { api.transport.calls("session/list").count == 1 }
+        api.transport.calls("session/list")[0].respond(projectedList([("sA", "p1", false), ("sB", "", true)]))
+        await spin { api.transport.calls("session/modelCatalog").count == 1 }
+        api.transport.calls("session/modelCatalog")[0].respond(.object(["groups": .array([])]))
+        await first.value
+        await spin { !store.switchingPreset }
+        assert(store.acceptedAgentPreset == "p1", "the first switch applied on its session")
+        // The first order of the race: the next switch after the prior one
+        // settled - on the other blank session, a fresh operation.
+        await store.select("sB")
+        let second = Task { @MainActor in await store.selectPreset("p3") }
+        await spin { api.transport.calls("agentPresets/select").count == 2 }
+        assert(api.transport.calls("agentPresets/select")[1].args["agentId"]?.string == "sB"
+               && api.transport.calls("agentPresets/select")[1].args["agentPreset"]?.string == "p3",
+               "the second switch carries the second session and choice")
+        api.transport.calls("agentPresets/select")[1].respond(.string("p3"))
+        await spin { api.transport.calls("session/list").count == 2 }
+        api.transport.calls("session/list")[1].respond(projectedList([("sA", "p1", false), ("sB", "p3", false)]))
+        await spin { api.transport.calls("session/modelCatalog").count == 2 }
+        api.transport.calls("session/modelCatalog")[1].respond(.object(["groups": .array([])]))
+        await second.value
+        await spin { !store.switchingPreset }
+        assert(store.selectedID == "sB" && store.acceptedAgentPreset == "p3" && store.error == nil,
+               "the second switch settled its own answer on its own session")
+        print("PASS: a pending switch blocks the next tap, and the next switch settles on its own answer")
+    }
+
+    // (30) B3: a Host that refuses the switch - the turn started first -
+    // publishes its own error and leaves the accepted projection and the
+    // refresh untouched. A session outside the blank window is not even
+    // asked: blankness is the host's sessionListMetadata.blank, never
+    // !running - the row below is running, so !running says nothing, and
+    // the projection alone decides.
+    @MainActor
+    static func prodPresetLockedAndNonBlank() async throws {
+        let api = FakeAPI()
+        let store = PocketStore(restoringPrimary: false)
+        wire(store, api, sessions: ["sA", "sB"])
+        store.sessions = [projected("sA", preset: "p1", blank: true), projected("sB", preset: "p1", blank: false, running: true)]
+        await fetchRoster(store, api) { $0.respond(.object(["presets": .array([presetRow(id: "p1", name: "Preset One", isDefault: true), presetRow(id: "p2", name: "Preset Two")]), "authorable": .bool(true)])) }
+        await store.select("sA")
+        let listBefore = api.transport.calls("session/list").count
+        let task = Task { @MainActor in await store.selectPreset("p2") }
+        await spin { api.transport.calls("agentPresets/select").count == 1 }
+        api.transport.calls("agentPresets/select")[0].fail(HarnessError(
+            message: "Session sA has already started; its agent preset is fixed",
+            code: "agent-preset/locked",
+            details: .object(["sessionId": .string("sA")])))
+        await task.value
+        assert(store.error == "Session sA has already started; its agent preset is fixed",
+               "the host's rejection is published verbatim")
+        assert(store.acceptedAgentPreset == "p1", "the accepted preset survives the rejection")
+        assert(api.transport.calls("session/list").count == listBefore,
+               "a rejected switch refreshes nothing")
+        assert(!store.switchingPreset, "the rejected switch released its busy state")
+        // Outside the blank window the switch is refused before any request.
+        await store.select("sB")
+        assert(!store.selectedIsBlank && !store.presetSwitcherVisible,
+               "the running row is not blank by its projection, and the switcher is gone")
+        await store.selectPreset("p2")
+        assert(api.transport.calls("agentPresets/select").count == 1 && !store.switchingPreset
+               && store.error == "Session sA has already started; its agent preset is fixed",
+               "a non-blank session is refused before the wire, without a new error")
+        print("PASS: a locked switch publishes the host's error and keeps its preset; a non-blank window is never asked")
+    }
+
+    // (31) B3: the carrier's connection dies while the switch is pending,
+    // in three shapes. The death before the answer: the disconnect
+    // invalidates the switch immediately - the busy state goes with the
+    // seat - and the dead connection's answer settles stale, applying
+    // nothing. The death mid-post-accept: the answer landed while the seat
+    // was held, but the seat dies before the list refresh comes back - the
+    // post-accept effects stop at the ownership re-check, no catalog
+    // refresh, no projection, no error. The reconnected store switches on
+    // the new connection as if the old request had never left.
+    @MainActor
+    static func prodPresetStaleSuccessReconnect() async throws {
+        let api = FakeAPI()
+        let store = PocketStore(restoringPrimary: false)
+        wire(store, api, sessions: ["sA"])
+        store.sessions = [projected("sA", blank: true)]
+        await fetchRoster(store, api) { $0.respond(.object(["presets": .array([presetRow(id: "p1", name: "Preset One", isDefault: true)]), "authorable": .bool(true)])) }
+        await store.select("sA")
+        let task = Task { @MainActor in await store.selectPreset("p1") }
+        await spin { api.transport.calls("agentPresets/select").count == 1 }
+        store.disconnect()
+        assert(store.api == nil && !store.connected && !store.switchingPreset,
+               "the disconnect dropped the api and the switch's busy state")
+        api.transport.calls("agentPresets/select")[0].respond(.string("p1"))
+        await task.value
+        assert(store.error == nil && store.acceptedAgentPreset == nil,
+               "the dead connection's answer applies nothing and writes no error")
+        assert(api.transport.calls("session/list").count == 0,
+               "a stale switch refreshes no list")
+        // The death mid-post-accept: the answer landed while the seat was
+        // held, but the seat dies before the list refresh comes back.
+        let apiM = FakeAPI()
+        wire(store, apiM, sessions: ["sA"])
+        store.sessions = [projected("sA", blank: true)]
+        await store.select("sA")
+        let mid = Task { @MainActor in await store.selectPreset("p1") }
+        await spin { apiM.transport.calls("agentPresets/select").count == 1 }
+        apiM.transport.calls("agentPresets/select")[0].respond(.string("p1"))
+        await spin { apiM.transport.calls("session/list").count == 1 }
+        store.disconnect()
+        apiM.transport.calls("session/list")[0].respond(projectedList([("sA", "p1", false)]))
+        await mid.value
+        assert(!store.switchingPreset && store.error == nil,
+               "the seat lost mid-refresh drops the switch without an error")
+        assert(apiM.transport.calls("session/modelCatalog").count == 0,
+               "the post-accept stopped at the ownership re-check - no catalog refresh")
+        assert(store.sessions[0].raw["projections"]["values"]["agentPreset"].string.isEmpty,
+               "the list that lost the race wrote no accepted state")
+        // The death by supersede, still connected: the seat is taken while
+        // the list is parked - the ownership re-check after the refresh is
+        // what stops the post-accept effects on the live connection.
+        let apiS = FakeAPI()
+        let storeS = PocketStore(restoringPrimary: false)
+        wire(storeS, apiS, sessions: ["sA", "sB"])
+        storeS.sessions = [projected("sA", blank: true), projected("sB", blank: true)]
+        await storeS.select("sA")
+        var settled = false
+        let stale = Task { @MainActor in await storeS.selectPreset("p1"); settled = true }
+        await spin { apiS.transport.calls("agentPresets/select").count == 1 }
+        apiS.transport.calls("agentPresets/select")[0].respond(.string("p1"))
+        await spin { apiS.transport.calls("session/list").count == 1 }
+        await storeS.select("sB")
+        apiS.transport.calls("session/list")[0].respond(projectedList([("sA", "p1", false), ("sB", "", true)]))
+        // The dead switch either settles stale (no catalog pull) or, with the
+        // post-refresh ownership re-check missing, pulls the catalog a second
+        // time - either way it must not show as a live switch.
+        await spin { settled || apiS.transport.calls("session/modelCatalog").count > 0 }
+        assert(!settled || apiS.transport.calls("session/modelCatalog").count == 0,
+               "a switch that lost its seat after the refresh pulled no catalog")
+        assert(settled && storeS.acceptedAgentPreset == nil && storeS.error == nil,
+               "the superseded switch settled stale, writing no projection and no error")
+        _ = stale
+        // The carrier reconnected: the new connection's switch is fresh.
+        let api2 = FakeAPI()
+        wire(store, api2, sessions: ["sA"])
+        store.sessions = [projected("sA", blank: true)]
+        await store.select("sA")
+        let again = Task { @MainActor in await store.selectPreset("p1") }
+        await spin { api2.transport.calls("agentPresets/select").count == 1 }
+        api2.transport.calls("agentPresets/select")[0].respond(.string("p1"))
+        await spin { api2.transport.calls("session/list").count == 1 }
+        api2.transport.calls("session/list")[0].respond(projectedList([("sA", "p1", false)]))
+        await spin { api2.transport.calls("session/modelCatalog").count == 1 }
+        api2.transport.calls("session/modelCatalog")[0].respond(.object(["groups": .array([])]))
+        await again.value
+        await spin { !store.switchingPreset }
+        assert(store.acceptedAgentPreset == "p1" && store.error == nil,
+               "the reconnected store settles the new switch")
+        print("PASS: a disconnect stales the pending switch, and the reconnected store switches fresh")
+    }
+
+    // (32) B3: two more dead-connection shapes. An error of the dead
+    // connection publishes nothing - the rejection belonged to a seat that
+    // no longer exists. And the deferred answer: the first switch's
+    // response arrives only after the reconnected store started its own
+    // switch - it must settle stale under the newer operation, releasing no
+    // busy state it does not own and moving no projection.
+    @MainActor
+    static func prodPresetStaleErrorAndDefer() async throws {
+        // (a) a dead connection's error publishes nothing.
+        let api = FakeAPI()
+        let store = PocketStore(restoringPrimary: false)
+        wire(store, api, sessions: ["sA"])
+        store.sessions = [projected("sA", blank: true)]
+        await store.select("sA")
+        let task = Task { @MainActor in await store.selectPreset("p1") }
+        await spin { api.transport.calls("agentPresets/select").count == 1 }
+        store.disconnect()
+        api.transport.calls("agentPresets/select")[0].fail(HarnessError(message: "socket closed", code: "gateway/socket-closed"))
+        await task.value
+        assert(store.error == nil, "a dead connection's error publishes nothing")
+        assert(store.acceptedAgentPreset == nil && !store.switchingPreset && api.transport.calls("session/list").count == 0,
+               "the stale rejection moved no projection, owns no busy state, refreshes nothing")
+        // (b) the defer: the reconnected store's own switch is pending when
+        // the dead connection's success lands - it settles stale under the
+        // newer operation.
+        let api2 = FakeAPI()
+        let store2 = PocketStore(restoringPrimary: false)
+        wire(store2, api2, sessions: ["sA"])
+        store2.sessions = [projected("sA", blank: true)]
+        await store2.select("sA")
+        let first = Task { @MainActor in await store2.selectPreset("p1") }
+        await spin { api2.transport.calls("agentPresets/select").count == 1 }
+        store2.disconnect()
+        let api3 = FakeAPI()
+        wire(store2, api3, sessions: ["sA"])
+        store2.sessions = [projected("sA", blank: true)]
+        await store2.select("sA")
+        let second = Task { @MainActor in await store2.selectPreset("p2") }
+        await spin { api3.transport.calls("agentPresets/select").count == 1 }
+        assert(store2.switchingPreset, "the newer switch owns the busy state")
+        // Now the dead connection's answer lands - under the newer
+        // operation's seat.
+        api2.transport.calls("agentPresets/select")[0].respond(.string("p1"))
+        await first.value
+        assert(store2.acceptedAgentPreset == nil, "the deferred success wrote no projection")
+        assert(store2.switchingPreset, "the deferred success released no busy state it did not own")
+        assert(store2.error == nil, "the deferred success wrote no error")
+        assert(api3.transport.calls("session/list").count == 0,
+               "the deferred success refreshed no list")
+        // The newer switch settles its own answer.
+        api3.transport.calls("agentPresets/select")[0].respond(.string("p2"))
+        await spin { api3.transport.calls("session/list").count == 1 }
+        api3.transport.calls("session/list")[0].respond(projectedList([("sA", "p2", false)]))
+        await spin { api3.transport.calls("session/modelCatalog").count == 1 }
+        api3.transport.calls("session/modelCatalog")[0].respond(.object(["groups": .array([])]))
+        await second.value
+        await spin { !store2.switchingPreset }
+        assert(store2.acceptedAgentPreset == "p2" && store2.error == nil,
+               "the newer switch settles its own answer")
+        print("PASS: a dead connection's error publishes nothing, and a deferred success stales under the newer switch")
+    }
+
+    // (33) B3: A -> B -> A. Each session switch rotates the selection
+    // epoch, so the original switch's answer arrives with a dead epoch and
+    // settles stale - it writes no projection, no error, no refresh. The
+    // returned session switches fresh.
+    @MainActor
+    static func prodPresetAToBToA() async throws {
+        let api = FakeAPI()
+        let store = PocketStore(restoringPrimary: false)
+        wire(store, api, sessions: ["sA", "sB"])
+        store.sessions = [projected("sA", blank: true), projected("sB", blank: true)]
+        await fetchRoster(store, api) { $0.respond(.object(["presets": .array([presetRow(id: "p1", name: "Preset One", isDefault: true), presetRow(id: "p2", name: "Preset Two")]), "authorable": .bool(true)])) }
+        await store.select("sA")
+        let task = Task { @MainActor in await store.selectPreset("p1") }
+        await spin { api.transport.calls("agentPresets/select").count == 1 }
+        await store.select("sB")
+        assert(!store.switchingPreset, "leaving the session dropped the switch's busy state")
+        await store.select("sA")
+        api.transport.calls("agentPresets/select")[0].respond(.string("p1"))
+        await task.value
+        assert(store.error == nil && store.acceptedAgentPreset == nil,
+               "the answer of the abandoned switch settles stale and writes nothing")
+        assert(store.sessions[0].raw["projections"]["values"]["agentPreset"].string.isEmpty,
+               "the returned session's projection is untouched")
+        assert(api.transport.calls("session/list").count == 0,
+               "the abandoned switch refreshed no list")
+        // The returned session switches fresh.
+        let again = Task { @MainActor in await store.selectPreset("p2") }
+        await spin { api.transport.calls("agentPresets/select").count == 2 }
+        api.transport.calls("agentPresets/select")[1].respond(.string("p2"))
+        await spin { api.transport.calls("session/list").count == 1 }
+        api.transport.calls("session/list")[0].respond(projectedList([("sA", "p2", false), ("sB", "", true)]))
+        await spin { api.transport.calls("session/modelCatalog").count == 1 }
+        api.transport.calls("session/modelCatalog")[0].respond(.object(["groups": .array([])]))
+        await again.value
+        await spin { !store.switchingPreset }
+        assert(store.acceptedAgentPreset == "p2" && store.error == nil,
+               "the fresh switch on the returned session settles")
+        print("PASS: A -> B -> A stales the abandoned switch, and the returned session switches fresh")
+    }
+
+    // (34) B3: the command catalog after an accepted switch. The switch
+    // itself issues no catalog pull - the host's own agent-preset/selected
+    // event is what invalidates the snapshot - so nothing refreshes twice.
+    // Driving that event through the store's directory schedules exactly
+    // one pull, for the switched session.
+    @MainActor
+    static func prodPresetCatalogInvalidation() async throws {
+        let api = FakeAPI()
+        let store = PocketStore(restoringPrimary: false)
+        wire(store, api, sessions: ["sA"])
+        store.sessions = [projected("sA", blank: true)]
+        await fetchRoster(store, api) { $0.respond(.object(["presets": .array([presetRow(id: "p1", name: "Preset One", isDefault: true), presetRow(id: "p2", name: "Preset Two")]), "authorable": .bool(true)])) }
+        await store.select("sA")
+        await spin { api.transport.calls("commands/list").count == 1 }
+        let listBefore = api.transport.calls("commands/list").count
+        let task = Task { @MainActor in await store.selectPreset("p2") }
+        await spin { api.transport.calls("agentPresets/select").count == 1 }
+        api.transport.calls("agentPresets/select")[0].respond(.string("p2"))
+        await spin { api.transport.calls("session/list").count == 1 }
+        api.transport.calls("session/list")[0].respond(projectedList([("sA", "p2", false)]))
+        await spin { api.transport.calls("session/modelCatalog").count == 1 }
+        api.transport.calls("session/modelCatalog")[0].respond(.object(["groups": .array([])]))
+        await task.value
+        await spin { !store.switchingPreset }
+        assert(api.transport.calls("commands/list").count == listBefore,
+               "the accepted switch issued no catalog pull of its own")
+        // The host's own event for the accepted switch: one invalidation,
+        // one prewarm, for the switched session.
+        let event = commandCatalogEvent(name: "agent-preset/selected", args: [.string("sA"), .string("p2")])
+        assert(event == .agentPresetSelected(sessionId: "sA"),
+               "the wired frame parses to the one-session reset")
+        store.commandDirectory.apply(event!)
+        await spin { api.transport.calls("commands/list").count == listBefore + 1 }
+        assert(api.transport.calls("commands/list").count == listBefore + 1,
+               "the event schedules exactly one pull")
+        assert(api.transport.calls("commands/list")[listBefore].args["agentId"]?.string == "sA",
+               "the pull is for the switched session")
+        api.transport.calls("commands/list")[listBefore].respond(.array([.object(["name": .string("status"), "description": .string("d")])]))
+        await spin { store.commandCatalogState == .ready }
+        assert(store.commandCatalog.count == 1 && store.commandCatalog.first?.name == "status",
+               "the snapshot republished from the pull")
+        print("PASS: the accepted switch pulls the catalog no second time; the host event schedules exactly one pull")
+    }
+
+    // (35) B3: the pending switch owns the composer. While it is in flight
+    // the send, the command dispatch and the model selection are refused
+    // before any request leaves - and a model selection in flight refuses
+    // the switch the same way, so the two never interleave on the wire.
+    @MainActor
+    static func prodPresetBusyOwnership() async throws {
+        let api = FakeAPI()
+        let store = PocketStore(restoringPrimary: false)
+        wire(store, api, sessions: ["sA"])
+        store.sessions = [projected("sA", blank: true)]
+        await fetchRoster(store, api) { $0.respond(.object(["presets": .array([presetRow(id: "p1", name: "Preset One", isDefault: true), presetRow(id: "p2", name: "Preset Two")]), "authorable": .bool(true)])) }
+        await store.select("sA")
+        let task = Task { @MainActor in await store.selectPreset("p1") }
+        await spin { api.transport.calls("agentPresets/select").count == 1 && store.switchingPreset }
+        store.draft = "hello"
+        await store.submit()
+        assert(api.transport.calls("session/prompt").count == 0 && !store.submitting,
+               "a pending switch blocks the send before the wire")
+        await store.executeCommand(ComposerSubmission(draft: "/status", images: [], sessionID: "sA",
+                                                     endpoint: store.endpoint,
+                                                     catalogGeneration: 0, draftVersion: 0))
+        assert(api.transport.calls("session/prompt").count == 0 && !store.submitting,
+               "a pending switch blocks the command dispatch before the wire")
+        await store.selectModel(provider: "prov", model: "m1")
+        assert(api.transport.calls("session/selectModel").count == 0 && !store.selectingModel,
+               "a pending switch blocks the model selection before the wire")
+        assert(store.error == nil, "the refusals are silent")
+        // The switch settles...
+        api.transport.calls("agentPresets/select")[0].respond(.string("p1"))
+        await spin { api.transport.calls("session/list").count == 1 }
+        api.transport.calls("session/list")[0].respond(projectedList([("sA", "p1", false)]))
+        await spin { api.transport.calls("session/modelCatalog").count == 1 }
+        api.transport.calls("session/modelCatalog")[0].respond(.object(["groups": .array([])]))
+        await task.value
+        await spin { !store.switchingPreset }
+        // ...and the reverse: a model selection in flight blocks the switch.
+        let modelTask = Task { @MainActor in await store.selectModel(provider: "prov", model: "m2") }
+        await spin { api.transport.calls("session/selectModel").count == 1 && store.selectingModel }
+        await store.selectPreset("p2")
+        assert(api.transport.calls("agentPresets/select").count == 1 && !store.switchingPreset,
+               "a pending model selection blocks the switch before the wire")
+        api.transport.calls("session/selectModel")[0].respond(.object(["selected": .object(["provider": .string("prov"), "model": .string("m2")])]))
+        await spin { api.transport.calls("session/modelCatalog").count == 2 }
+        api.transport.calls("session/modelCatalog")[1].respond(.object(["groups": .array([])]))
+        await spin { api.transport.calls("session/list").count == 2 }
+        api.transport.calls("session/list")[1].respond(projectedList([("sA", "p1", false)]))
+        await modelTask.value
+        await spin { !store.selectingModel }
+        assert(store.model["model"].string == "m2",
+               "the model selection applied on its own answer")
+        print("PASS: a pending switch blocks the send, the dispatch and the model change, and the model change blocks the switch")
+    }
+
+    // (36) B3: the accepted id the roster no longer advertises is shown
+    // verbatim, never hidden - the projection is the host's fact about what
+    // the session runs on. The picker still offers the roster's rows around
+    // it, with the removed row unselectable and its reason; the
+    // deployment-default session keeps the untappable default row.
+    @MainActor
+    static func prodPresetUnknownIdVerbatim() async throws {
+        let api = FakeAPI()
+        let store = PocketStore(restoringPrimary: false)
+        wire(store, api, sessions: ["sA", "sB"])
+        store.sessions = [projected("sA", preset: "ghost", blank: true), projected("sB", blank: true)]
+        await fetchRoster(store, api) { $0.respond(.object(["presets": .array([presetRow(id: "p1", name: "Preset One", isDefault: true), presetRow(id: "p2", name: "Preset Two")]), "authorable": .bool(true)])) }
+        await store.select("sA")
+        assert(store.acceptedAgentPreset == "ghost",
+               "the projection's id stands even when the roster does not list it")
+        assert(store.acceptedPresetName(for: store.sessions[0]) == "ghost",
+               "the row caption shows the unknown id verbatim")
+        assert(store.presetSwitcherLabel == "ghost",
+               "the switcher label shows the unknown id verbatim")
+        assert(presetDisplayName("ghost", roster: store.presetRoster) == "ghost"
+               && presetDisplayName("p2", roster: store.presetRoster) == "Preset Two",
+               "the display helper falls back to the id itself")
+        let options = store.presetSwitcherOptions
+        assert(options.map { $0.presetID } == ["p1", "p2", "ghost"],
+               "the menu offers the roster rows plus the removed one, and no default row")
+        let ghost = options.last!
+        assert(!ghost.selectable && ghost.reason == "No longer offered by the server",
+               "the removed row is shown, unselectable, with its reason")
+        // The deployment-default session keeps the untappable default row.
+        await store.select("sB")
+        assert(store.acceptedAgentPreset == nil && store.acceptedPresetName(for: store.sessions[1]) == nil
+               && store.presetSwitcherLabel == "Preset",
+               "the default session shows the word, and the row shows nothing")
+        let defaults = store.presetSwitcherOptions
+        assert(defaults.first?.presetID == nil && defaults.first?.isDefault == true
+               && defaults.map { $0.presetID } == [nil, "p1", "p2"],
+               "the default row leads the menu while the session runs on the default")
+        print("PASS: an unknown accepted id shows verbatim in the caption, the label and the menu, with its reason")
+    }
+
+// (37) B3 review: the store's seat for one switch must release the
+    // moment that switch settles, or the next same-session switch dies at
+    // the entry guard and the blank session can never switch again. The
+    // host's refreshed projection keeps the session blank after the first
+    // accept - the window is still open - so the second switch is a
+    // legitimate one, not a window artifact.
+    @MainActor
+    static func prodPresetSeatReleasedAfterAccept() async throws {
+        let api = FakeAPI()
+        let store = PocketStore(restoringPrimary: false)
+        wire(store, api, sessions: ["sA"])
+        store.sessions = [projected("sA", blank: true)]
+        await fetchRoster(store, api) { $0.respond(.object(["presets": .array([presetRow(id: "p1", name: "Preset One"), presetRow(id: "p2", name: "Preset Two")]), "authorable": .bool(true)])) }
+        await store.select("sA")
+        let first = Task { @MainActor in await store.selectPreset("p1") }
+        await spin { api.transport.calls("agentPresets/select").count == 1 }
+        api.transport.calls("agentPresets/select")[0].respond(.string("p1"))
+        await spin { api.transport.calls("session/list").count == 1 }
+        // The host keeps the window blank: the turn has not started.
+        api.transport.calls("session/list")[0].respond(projectedList([("sA", "p1", true)]))
+        await spin { api.transport.calls("session/modelCatalog").count == 1 }
+        api.transport.calls("session/modelCatalog")[0].respond(.object(["groups": .array([])]))
+        await first.value
+        await spin { !store.switchingPreset }
+        assert(store.acceptedAgentPreset == "p1" && store.selectedIsBlank,
+               "the accept published its projection and the window stayed blank")
+        // The seat released: the second same-session switch reaches the wire
+        // instead of dying at the entry guard.
+        let second = Task { @MainActor in await store.selectPreset("p2") }
+        await spin { api.transport.calls("agentPresets/select").count == 2 }
+        assert(api.transport.calls("agentPresets/select")[1].args["agentId"]?.string == "sA"
+               && api.transport.calls("agentPresets/select")[1].args["agentPreset"]?.string == "p2",
+               "the second switch carries the same session and the second choice")
+        api.transport.calls("agentPresets/select")[1].respond(.string("p2"))
+        await spin { api.transport.calls("session/list").count == 2 }
+        api.transport.calls("session/list")[1].respond(projectedList([("sA", "p2", false)]))
+        await spin { api.transport.calls("session/modelCatalog").count == 2 }
+        api.transport.calls("session/modelCatalog")[1].respond(.object(["groups": .array([])]))
+        await second.value
+        await spin { !store.switchingPreset }
+        assert(store.acceptedAgentPreset == "p2" && !store.selectedIsBlank && store.error == nil,
+               "the second switch published its own projection")
+        assert(api.transport.calls("agentPresets/select").count == 2
+               && api.transport.calls("session/list").count == 2
+               && api.transport.calls("session/modelCatalog").count == 2,
+               "two switches left exactly two of each request, and nothing more")
+        print("PASS: the seat releases on settle, so the blank session switches again before its first prompt")
+    }
+
+    // (38) B3 review, the refusal shape: a rejected switch must release its
+    // seat too, or a same-session retry dies at the entry guard while the
+    // window is still blank. No session switch or invalidation between the
+    // refusal and the retry: only the store's own release lets it through.
+    @MainActor
+    static func prodPresetSeatReleasedAfterReject() async throws {
+        let api = FakeAPI()
+        let store = PocketStore(restoringPrimary: false)
+        wire(store, api, sessions: ["sA"])
+        store.sessions = [projected("sA", blank: true)]
+        await fetchRoster(store, api) { $0.respond(.object(["presets": .array([presetRow(id: "p1", name: "Preset One"), presetRow(id: "p2", name: "Preset Two")]), "authorable": .bool(true)])) }
+        await store.select("sA")
+        let first = Task { @MainActor in await store.selectPreset("p1") }
+        await spin { api.transport.calls("agentPresets/select").count == 1 }
+        api.transport.calls("agentPresets/select")[0].fail(HarnessError(
+            message: "the preset is no longer offered", code: "agent-preset/not-found"))
+        await first.value
+        assert(store.error == "the preset is no longer offered"
+               && store.acceptedAgentPreset == nil && store.selectedIsBlank
+               && !store.switchingPreset
+               && api.transport.calls("session/list").count == 0,
+               "the refusal published its error, refreshed nothing, and released the busy state")
+        // The retry: a different choice, the same session, no invalidation in
+        // between - the entry guard is the only thing that can still stop it.
+        let second = Task { @MainActor in await store.selectPreset("p2") }
+        await spin { api.transport.calls("agentPresets/select").count == 2 }
+        api.transport.calls("agentPresets/select")[1].respond(.string("p2"))
+        await spin { api.transport.calls("session/list").count == 1 }
+        api.transport.calls("session/list")[0].respond(projectedList([("sA", "p2", false)]))
+        await spin { api.transport.calls("session/modelCatalog").count == 1 }
+        api.transport.calls("session/modelCatalog")[0].respond(.object(["groups": .array([])]))
+        await second.value
+        await spin { !store.switchingPreset }
+        assert(store.acceptedAgentPreset == "p2" && !store.selectedIsBlank && !store.switchingPreset,
+               "the retry settled on its own answer")
+        assert(api.transport.calls("agentPresets/select").count == 2
+               && api.transport.calls("session/list").count == 1
+               && api.transport.calls("session/modelCatalog").count == 1,
+               "the refusal and the retry left exactly their own requests behind")
+        print("PASS: the seat releases on refusal, so the blank session retries with a different choice")
+    }
+
+    // (39) B3 review: the pending switch owns the composer's command window
+    // at the view's action boundary. The production seam is the store's
+    // canDispatchCommands: HarnessView.runCommand fails closed on it for the
+    // palette and the typed local line - /new, /view, /model alike - while
+    // the typed server line fails closed one hop deeper, on the store's own
+    // executeCommand guard. Both read the one flag the switch owns, and the
+    // boundary opens the moment the switch settles.
+    @MainActor
+    static func prodPresetPendingSwitchOwnsCommandBoundary() async throws {
+        let api = FakeAPI()
+        let store = PocketStore(restoringPrimary: false)
+        wire(store, api, sessions: ["sA"])
+        store.sessions = [projected("sA", blank: true)]
+        await fetchRoster(store, api) { $0.respond(.object(["presets": .array([presetRow(id: "p1", name: "Preset One"), presetRow(id: "p2", name: "Preset Two")]), "authorable": .bool(true)])) }
+        await store.select("sA")
+        let task = Task { @MainActor in await store.selectPreset("p1") }
+        await spin { api.transport.calls("agentPresets/select").count == 1 && store.switchingPreset }
+        // The boundary fails closed while the switch is pending: the view's
+        // runCommand guard reads exactly this flag.
+        assert(!store.canDispatchCommands,
+               "the pending switch owns the command boundary")
+        let left = api.transport.parked.count
+        await store.executeCommand(ComposerSubmission(draft: "/status", images: [], sessionID: "sA",
+                                                      endpoint: store.endpoint,
+                                                      catalogGeneration: 0, draftVersion: 0))
+        assert(api.transport.parked.count == left && !store.submitting,
+               "the server command dispatch does not leave while the switch is pending")
+        // The switch settles, and the boundary opens again on the same flag.
+        api.transport.calls("agentPresets/select")[0].respond(.string("p1"))
+        await spin { api.transport.calls("session/list").count == 1 }
+        api.transport.calls("session/list")[0].respond(projectedList([("sA", "p1", false)]))
+        await spin { api.transport.calls("session/modelCatalog").count == 1 }
+        api.transport.calls("session/modelCatalog")[0].respond(.object(["groups": .array([])]))
+        await task.value
+        await spin { !store.switchingPreset }
+        assert(store.canDispatchCommands, "the boundary opens the moment the switch settles")
+        // And it is real: the same dispatch now passes the guard, joins the
+        // warm catalog pull already in flight, and leaves on the message
+        // path - it works again after settle.
+        let warm = api.transport.calls("commands/list").count
+        let dispatch = Task { @MainActor in
+            await store.executeCommand(ComposerSubmission(draft: "/status", images: [], sessionID: "sA",
+                                                          endpoint: store.endpoint,
+                                                          catalogGeneration: 0, draftVersion: 0))
+        }
+        await spin { api.transport.calls("commands/list").count == warm }
+        api.transport.calls("commands/list")[0].respond(.array([]))
+        await spin { api.transport.calls("session/prompt").count == 1 }
+        api.transport.calls("session/prompt")[0].respond(.object(["turnId": .string("t1")]))
+        await dispatch.value
+        await spin { !store.submitting }
+        assert(api.transport.calls("session/prompt").count == 1,
+               "the same dispatch works again after settle")
+        // The seam is the production one: the view's boundary reads it in
+        // runCommand, the line the palette and the typed command both take.
+        if let path = sourceFile("PocketDSH/HarnessView.swift") {
+            let view = try String(contentsOfFile: path, encoding: .utf8)
+            let lines = view.components(separatedBy: "\n")
+            let entry = lines.firstIndex { $0.contains("func runCommand") }
+            let boundary: Int? = entry.flatMap { lines[$0...].firstIndex { $0.contains("store.canDispatchCommands") } }
+            assert(entry != nil && boundary != nil && boundary! < entry! + 15,
+                   "the view's runCommand boundary fails closed on the store's seam")
+        }
+        print("PASS: the pending switch owns the command boundary, and it opens again on settle")
     }
 
     // (20) Composition: every presentation of NewTaskView retires the
