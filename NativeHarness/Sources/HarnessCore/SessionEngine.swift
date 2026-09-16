@@ -59,6 +59,16 @@ public actor SessionEngine {
         return try await store.steerPending(session: id, id: commandID)
     }
 
+    /// One durable, idempotent queue control exposed to the host. The current
+    /// turn availability is sampled here and passed into the single storage
+    /// transaction, so a recorded steer outcome reflects the state the operation
+    /// observed. Callers keep the legacy bool mutators for interactive use.
+    public func queueControl(requestID: String, action: QueueControlAction, itemID: String,
+                             text: String?) async throws -> QueueControlResult {
+        try await store.queueControl(session: id, requestID: requestID, action: action,
+                                     itemID: itemID, text: text, steeringAvailable: running)
+    }
+
     public func run(prompt: String, maxSteps: Int = 12,
                     onUpdate: @escaping @Sendable (LiveUpdate) -> Void = { _ in }) async throws -> String {
         try await start(prompt: prompt, maxSteps: maxSteps, onUpdate: onUpdate)

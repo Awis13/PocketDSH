@@ -178,8 +178,6 @@ private actor NativeHostSession {
     let store: EventStore
     private var peerID: UUID?
     private var admitted = Set<String>()
-    private var queueReceipts: [String: NativeEvent] = [:]
-    private var queueReceiptOrder: [String] = []
     private var maintenance: Task<Void, Never>?
     private var terminalRows = 24
     private var terminalColumns = 80
@@ -294,17 +292,6 @@ private actor NativeHostSession {
 
     private static let queueActions: Set<String> = ["edit", "remove", "steer", "text"]
 
-    /// Queue acknowledgements are ephemeral and bounded, keyed by the client's
-    /// request ID so a retry after a dropped frame returns the same outcome.
-    private func publishQueueReceipt(_ receipt: NativeEvent, requestID: String, to peer: NativePeer) {
-        if queueReceipts[requestID] == nil {
-            queueReceipts[requestID] = receipt
-            queueReceiptOrder.append(requestID)
-            if queueReceiptOrder.count > 256 { queueReceipts.removeValue(forKey: queueReceiptOrder.removeFirst()) }
-        }
-        peer.send(receipt)
-    }
-
     func detach(_ peer: NativePeer) async {
         guard peerID == peer.id else { return }
         let requests = await approvals.pending()
@@ -359,13 +346,13 @@ private actor NativeHostSession {
             try await sendQueueSnapshot(to: peer)
         case "queue":
             guard let requestID = command.id, Self.validIdentifier(requestID) else { throw HarnessError.invalid("Missing or invalid queue request ID") }
-            if let previous = queueReceipts[requestID] { peer.send(previous); return }
             guard let action = command.action, Self.queueActions.contains(action) else { throw HarnessError.invalid("Unknown queue action") }
             guard let itemID = command.itemID, Self.validIdentifier(itemID) else { throw HarnessError.invalid("Missing or invalid queue item ID") }
             if action == "text" {
                 // Bounded on-demand full text for the single item being edited;
                 // the list preview stays clipped. Fetch and rejection both carry
                 // the item id, which is what the client keys its editor on.
+                // Read-only: it mutates nothing and is never persisted.
                 do {
                     let target = try await engine.pending().first(where: { $0.id == itemID })
                     peer.send(NativeQueueEditing.textResult(session: id, itemID: itemID, prompt: target?.prompt))
@@ -374,32 +361,32 @@ private actor NativeHostSession {
                 }
                 return
             }
-            let rejected: String?
-            switch action {
-            case "edit":
-                guard let text = command.text else { throw HarnessError.invalid("Missing prompt for queue edit") }
-                let previous = try await engine.pending().first(where: { $0.id == itemID })
-                // Only a false RETURN is "not found"; storage/invalid faults
-                // propagate as their own error event instead of hiding as benign.
-                let edited = try await engine.editPending(commandID: itemID, prompt: text)
-                rejected = edited ? nil : "queue-item-not-found"
-                // Re-publish the prompt under the same request identity so the chat
-                // row and replayed transcript show the edited text, not the stale
-                // one. Only do so for a request that was admitted as a user turn.
-                if NativeQueueEditing.reemitsUser(admitted: admitted, itemID: itemID, edited: edited, previousPrompt: previous?.prompt, updatedPrompt: text) {
-                    sink.send(NativeEvent(op: "user", session: id, id: itemID, text: text))
-                }
-            case "remove":
-                rejected = try await engine.removePending(commandID: itemID) ? nil : "queue-item-not-found"
-            case "steer":
-                do { rejected = try await engine.steerPending(commandID: itemID) ? nil : "queue-item-not-found" }
-                catch is QueueControlError { rejected = "steer-unavailable" }
-            default:
-                throw HarnessError.invalid("Unknown queue action")
+            guard let control = QueueControlAction(rawValue: action) else { throw HarnessError.invalid("Unknown queue action") }
+            let text: String?
+            switch control {
+            case .edit:
+                guard let value = command.text else { throw HarnessError.invalid("Missing prompt for queue edit") }
+                text = value
+            case .remove, .steer:
+                text = nil
             }
-            let receipt = rejected.map { NativeEvent(op: "queueRejected", session: id, id: requestID, text: $0) }
-                ?? NativeEvent(op: "queueAccepted", session: id, id: requestID)
-            publishQueueReceipt(receipt, requestID: requestID, to: peer)
+            // The durable atomic operation returns a fresh result the first time
+            // and the stored receipt on every retry. A fresh accepted edit may
+            // reconcile the shown transcript once; a replay must not mutate the
+            // queue or duplicate a user row.
+            let previous = control == .edit ? try await engine.pending().first(where: { $0.id == itemID }) : nil
+            let result = try await engine.queueControl(requestID: requestID, action: control, itemID: itemID, text: text)
+            switch result.receipt.outcome {
+            case .accepted:
+                if control == .edit, !result.replayed,
+                   NativeQueueEditing.reemitsUser(admitted: admitted, itemID: itemID, edited: true,
+                                                   previousPrompt: previous?.prompt, updatedPrompt: text ?? "") {
+                    sink.send(NativeEvent(op: "user", session: id, id: itemID, text: text ?? ""))
+                }
+                peer.send(NativeEvent(op: "queueAccepted", session: id, id: requestID))
+            case .rejected(let reason):
+                peer.send(NativeEvent(op: "queueRejected", session: id, id: requestID, text: reason.rawValue))
+            }
             try await sendQueueSnapshot(to: peer)
         case "watch":
             guard let requestID = command.id else { throw HarnessError.invalid("Missing request ID") }

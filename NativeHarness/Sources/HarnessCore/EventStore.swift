@@ -42,14 +42,17 @@ public actor EventStore {
     /// Version 0 is the original, unversioned journal. Migration never rewrites
     /// source rows, and the schema marker advances only with the committed state.
     private static func migrate(_ db: OpaquePointer) throws {
-        let version = try rows(db, "PRAGMA user_version", []).first?.first
-        guard version == "0" || version == "1" || version == "2" else {
-            throw HarnessError.storage("Unsupported event-store schema version: \(version ?? "unknown")")
+        let raw = try rows(db, "PRAGMA user_version", []).first?.first
+        // Refuse unknown/future versions before any write, then advance through
+        // each schema step in order. Sequential steps are required: a database
+        // already at 3 must not re-run the v2 table creation.
+        guard let starting = Int(raw ?? "0"), (0...3).contains(starting) else {
+            throw HarnessError.storage("Unsupported event-store schema version: \(raw ?? "unknown")")
         }
         guard sqlite3_exec(db, "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;", nil, nil, nil) == SQLITE_OK else {
             throw HarnessError.storage(String(cString: sqlite3_errmsg(db)))
         }
-        if version == "0" {
+        if starting < 1 {
             let schema = """
             BEGIN IMMEDIATE;
             CREATE TABLE IF NOT EXISTS events (
@@ -100,12 +103,27 @@ public actor EventStore {
                 throw error
             }
         }
-        if version != "2" {
+        if starting < 2 {
             guard sqlite3_exec(db, """
                 BEGIN IMMEDIATE;
                 CREATE TABLE context_operations(session TEXT NOT NULL, id TEXT NOT NULL,
                   receipt TEXT NOT NULL, fingerprint TEXT NOT NULL, PRIMARY KEY(session,id));
                 PRAGMA user_version=2;
+                COMMIT;
+                """, nil, nil, nil) == SQLITE_OK else {
+                sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
+                throw HarnessError.storage(String(cString: sqlite3_errmsg(db)))
+            }
+        }
+        if starting < 3 {
+            // Durable queue-control receipts share the lifetime contract of
+            // commands/context_operations. IF NOT EXISTS keeps a re-run of an
+            // already-stamped schema idempotent.
+            guard sqlite3_exec(db, """
+                BEGIN IMMEDIATE;
+                CREATE TABLE IF NOT EXISTS queue_operations(session TEXT NOT NULL, id TEXT NOT NULL,
+                  fingerprint TEXT NOT NULL, receipt TEXT NOT NULL, PRIMARY KEY(session,id));
+                PRAGMA user_version=3;
                 COMMIT;
                 """, nil, nil, nil) == SQLITE_OK else {
                 sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
@@ -221,15 +239,8 @@ public actor EventStore {
 
     public func removePending(session: String, id: String) throws -> Bool {
         try transaction {
-            guard let state = try rows("SELECT state FROM commands WHERE session=? AND id=?", [session,id]).first?.first else { return false }
-            // Already removed is an idempotent success, so a retry after a host
-            // restart does not report a benign "not found".
-            guard state != "cancelled" else { return true }
-            guard state == "pending" else { return false }
-            _ = try rows("UPDATE commands SET state='cancelled' WHERE session=? AND id=?", [session,id])
-            var event = SessionEvent("inbox.cancelled"); event.commandID = id
-            try insertEvents([event], session: session)
-            return true
+            if case .accepted = try removeOutcomeInTransaction(session: session, id: id) { return true }
+            return false
         }
     }
 
@@ -238,36 +249,141 @@ public actor EventStore {
     /// Editing commits a new payload for the ID; retrying the old payload with
     /// the same ID is then a different-payload rejection, exactly like enqueue.
     public func editPending(session: String, id: String, prompt: String) throws -> Bool {
-        guard !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              prompt.utf8.count <= 262144, !prompt.contains("\0") else {
-            throw HarnessError.invalid("Invalid command prompt (limit 256 KiB)")
-        }
+        try validateEditPrompt(prompt)
         return try transaction {
-            let result = try rows("SELECT state,prompt FROM commands WHERE session=? AND id=?", [session,id])
-            guard result.first?.first == "pending" else { return false }
-            guard result.first?.last != prompt else { return true }
-            _ = try rows("UPDATE commands SET prompt=? WHERE session=? AND id=? AND state='pending'", [prompt,session,id])
-            var event = SessionEvent("inbox.edited"); event.commandID = id
-            try insertEvents([event], session: session)
-            return true
+            if case .accepted = try editOutcomeInTransaction(session: session, id: id, prompt: prompt) { return true }
+            return false
         }
     }
 
     /// Convert a still-queued command into steering for the current turn. Only a
-    /// queue → steer transition is meaningful. A command that already steers
+    /// queue to steer transition is meaningful. A command that already steers
     /// (pending or consumed) is an idempotent success, so a retried steer after
     /// a host restart does not report a benign "not found" or re-order claimed
     /// work.
     public func steerPending(session: String, id: String) throws -> Bool {
         try transaction {
-            guard let row = try rows("SELECT mode,state FROM commands WHERE session=? AND id=?", [session,id]).first else { return false }
-            if row[0] == DeliveryMode.steer.rawValue { return true }
-            guard row[0] == DeliveryMode.queue.rawValue, row[1] == "pending" else { return false }
-            _ = try rows("UPDATE commands SET mode='steer' WHERE session=? AND id=? AND state='pending'", [session,id])
-            var event = SessionEvent("inbox.steered"); event.commandID = id
-            try insertEvents([event], session: session)
-            return true
+            if case .accepted = try steerOutcomeInTransaction(session: session, id: id, steeringAvailable: true) { return true }
+            return false
         }
+    }
+
+    /// One durable, idempotent queue control. The receipt lookup and fingerprint
+    /// check happen before any mutation, so an exact retry replays the original
+    /// outcome instead of re-applying it, and a changed action/item/edit-text
+    /// under the same request ID is a deterministic refusal. The row lookup, the
+    /// command mutation, its inbox audit event and the receipt insert all share
+    /// one transaction: a crash cannot leave an action without its receipt.
+    public func queueControl(session: String, requestID: String, action: QueueControlAction,
+                             itemID: String, text: String?, steeringAvailable: Bool) throws -> QueueControlResult {
+        guard !requestID.isEmpty, requestID.utf8.count <= 128, !requestID.contains("\0") else {
+            throw HarnessError.invalid("Invalid queue request ID")
+        }
+        guard !itemID.isEmpty, itemID.utf8.count <= 128, !itemID.contains("\0") else {
+            throw HarnessError.invalid("Invalid queue item ID")
+        }
+        let editText: String?
+        switch action {
+        case .edit:
+            guard let text else { throw HarnessError.invalid("Missing prompt for queue edit") }
+            try validateEditPrompt(text)
+            editText = text
+        case .remove, .steer:
+            editText = nil
+        }
+        let fingerprint = QueueControlFingerprint.digest(action: action, itemID: itemID, text: editText)
+        return try transaction {
+            if let stored = try queueReceiptRecord(session: session, requestID: requestID) {
+                guard stored.fingerprint == fingerprint else {
+                    throw HarnessError.invalid("Queue request ID reused with a different action, item or edit text")
+                }
+                return .replayed(stored.receipt)
+            }
+            let outcome: QueueControlOutcome
+            switch action {
+            case .edit: outcome = try editOutcomeInTransaction(session: session, id: itemID, prompt: editText!)
+            case .remove: outcome = try removeOutcomeInTransaction(session: session, id: itemID)
+            case .steer: outcome = try steerOutcomeInTransaction(session: session, id: itemID, steeringAvailable: steeringAvailable)
+            }
+            let receipt = QueueControlReceipt(requestID: requestID, outcome: outcome)
+            _ = try rows("INSERT INTO queue_operations(session,id,fingerprint,receipt) VALUES (?,?,?,?)",
+                         [session, requestID, fingerprint, receipt.outcome.durableValue])
+            return .fresh(receipt)
+        }
+    }
+
+    /// Reads one durable queue receipt. A corrupt outcome is a storage error and
+    /// never a reason to re-execute the action.
+    private func queueReceiptRecord(session: String, requestID: String) throws -> (fingerprint: String, receipt: QueueControlReceipt)? {
+        guard let row = try rows("SELECT fingerprint,receipt FROM queue_operations WHERE session=? AND id=?", [session,requestID]).first else {
+            return nil
+        }
+        // A malformed persisted fingerprint is corruption, not a client
+        // reuse: validate it before any comparison so it can never be
+        // misreported as HarnessError.invalid or re-execute the action.
+        guard QueueControlFingerprint.isCanonical(row[0]),
+              let outcome = QueueControlOutcome(durableValue: row[1]) else {
+            throw HarnessError.storage("Corrupt queue receipt")
+        }
+        return (row[0], QueueControlReceipt(requestID: requestID, outcome: outcome))
+    }
+
+    /// Durable lookup for a queue control. A missing row is nil; a corrupt row is
+    /// a storage error.
+    public func queueControlReceipt(session: String, requestID: String) throws -> QueueControlReceipt? {
+        try queueReceiptRecord(session: session, requestID: requestID)?.receipt
+    }
+
+    private func validateEditPrompt(_ prompt: String) throws {
+        guard !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              prompt.utf8.count <= 262144, !prompt.contains("\0") else {
+            throw HarnessError.invalid("Invalid command prompt (limit 256 KiB)")
+        }
+    }
+
+    /// Mutation primitives shared by the interactive bool mutators and the
+    /// durable atomic operation. Callers must already be inside a transaction.
+    private func removeOutcomeInTransaction(session: String, id: String) throws -> QueueControlOutcome {
+        guard let state = try rows("SELECT state FROM commands WHERE session=? AND id=?", [session,id]).first?.first else {
+            return .rejected(.itemNotFound)
+        }
+        // Already removed is an idempotent success, so a retry after a host
+        // restart does not report a benign "not found".
+        guard state != "cancelled" else { return .accepted }
+        guard state == "pending" else { return .rejected(.itemNotFound) }
+        _ = try rows("UPDATE commands SET state='cancelled' WHERE session=? AND id=?", [session,id])
+        var event = SessionEvent("inbox.cancelled"); event.commandID = id
+        try insertEvents([event], session: session)
+        return .accepted
+    }
+
+    private func editOutcomeInTransaction(session: String, id: String, prompt: String) throws -> QueueControlOutcome {
+        let result = try rows("SELECT state,prompt FROM commands WHERE session=? AND id=?", [session,id])
+        guard result.first?.first == "pending" else { return .rejected(.itemNotFound) }
+        guard result.first?.last != prompt else { return .accepted }
+        _ = try rows("UPDATE commands SET prompt=? WHERE session=? AND id=? AND state='pending'", [prompt,session,id])
+        var event = SessionEvent("inbox.edited"); event.commandID = id
+        try insertEvents([event], session: session)
+        return .accepted
+    }
+
+    /// A queued item only steers the in-flight turn, so an idle session reports
+    /// steer-unavailable for both a queued and a missing item. An item that
+    /// already steers is an idempotent success even when idle; a consumed or
+    /// cancelled item is a plain not-found.
+    private func steerOutcomeInTransaction(session: String, id: String, steeringAvailable: Bool) throws -> QueueControlOutcome {
+        guard let row = try rows("SELECT mode,state FROM commands WHERE session=? AND id=?", [session,id]).first else {
+            return steeringAvailable ? .rejected(.itemNotFound) : .rejected(.steerUnavailable)
+        }
+        if row[0] == DeliveryMode.steer.rawValue { return .accepted }
+        guard row[0] == DeliveryMode.queue.rawValue, row[1] == "pending" else {
+            return steeringAvailable ? .rejected(.itemNotFound) : .rejected(.steerUnavailable)
+        }
+        guard steeringAvailable else { return .rejected(.steerUnavailable) }
+        _ = try rows("UPDATE commands SET mode='steer' WHERE session=? AND id=? AND state='pending'", [session,id])
+        var event = SessionEvent("inbox.steered"); event.commandID = id
+        try insertEvents([event], session: session)
+        return .accepted
     }
 
     /// Current delivery mode for a command, including consumed and cancelled
