@@ -1,18 +1,29 @@
 #!/usr/bin/env python3
-"""Kill a real CLI process with an edited/steered/removed pending queue, then
-reopen the database and prove pending work is preserved, runs once and only on
-an explicit resume, and that already-consumed IDs are rejected."""
+"""Two queue-control probes.
+
+`interactive_phase` kills a real CLI process with an edited/steered/removed
+pending queue, reopens the database and proves pending work is preserved, runs
+once and only on an explicit resume, and that already-consumed IDs are rejected.
+
+`host_phase` starts the real `harness --host` WebSocket server against an
+isolated temp workspace/store and a local fixture provider, drives edit/remove/
+steer through `Tests/NativeQueueReceiptChecks.swift`, restarts the host on the
+same store, and proves durable queue-control receipts replay without mutation."""
 import argparse
 import http.server
 import json
 import os
 from pathlib import Path
 import queue
+import secrets
+import shutil
+import socket
 import sqlite3
 import subprocess
 import tempfile
 import threading
 import time
+import uuid
 
 
 class Cli:
@@ -79,7 +90,7 @@ def sqlite_messages(db):
     return [json.loads(row[0]) for row in rows]
 
 
-def main(binary):
+def interactive_phase(binary):
     entered = threading.Event()
     release = threading.Event()
     state = {"hold": True}
@@ -204,7 +215,155 @@ def main(binary):
         server.server_close()
 
 
+def verify_queue_db(store, config, phase, previous=None):
+    """Independent storage checks that the wire driver cannot make itself."""
+    canary = config["canary"]
+    with sqlite3.connect(store) as connection:
+        tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        assert "queue_operations" in tables, f"[{phase}] durable queue_operations table is missing"
+        rows = connection.execute("SELECT id, session, fingerprint, receipt FROM queue_operations").fetchall()
+        assert rows, f"[{phase}] no durable queue receipts were written"
+        for request_id, _session, fingerprint, receipt in rows:
+            # The durable row may never carry the plaintext edit prompt.
+            assert len(fingerprint) == 64, (request_id, fingerprint)
+            assert canary not in fingerprint and canary not in receipt, (request_id, fingerprint, receipt)
+            assert receipt == "accepted" or receipt.startswith("rejected:"), receipt
+        s1_receipts = {r[0]: r[1] for r in connection.execute(
+            "SELECT id, fingerprint FROM queue_operations WHERE session=?", (config["s1"],))}
+        s2_receipts = {r[0]: r[1] for r in connection.execute(
+            "SELECT id, fingerprint FROM queue_operations WHERE session=?", (config["s2"],))}
+        assert config["reqEditA"] in s1_receipts and config["reqEditA"] in s2_receipts, (s1_receipts, s2_receipts)
+        assert s1_receipts[config["reqEditA"]] != s2_receipts[config["reqEditA"]], \
+            "the same request ID must have independent receipts per session"
+        prompt = connection.execute("SELECT prompt FROM commands WHERE session=? AND id=?",
+                                    (config["s1"], config["itemEdit"])).fetchone()
+        assert prompt and prompt[0] == config["editB"], (phase, prompt)
+
+        def count(kind):
+            return connection.execute("SELECT COUNT(*) FROM events WHERE session=? AND body LIKE ?",
+                                      (config["s1"], "%" + kind + "%")).fetchone()[0]
+
+        summary = {"receipts": len(rows), "edited": count("inbox.edited"),
+                   "cancelled": count("inbox.cancelled"), "steered": count("inbox.steered")}
+    # Retries must neither re-run the mutation nor duplicate its audit event.
+    assert summary["edited"] == 2, summary
+    assert summary["cancelled"] == 1, summary
+    assert summary["steered"] == 1, summary
+    if previous is not None:
+        assert summary == previous, (previous, summary)
+    return summary
+
+
+def host_phase(binary, client):
+    released = threading.Event()
+    state = {"hold": True}
+
+    class Provider(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *_):
+            pass
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            if state["hold"]:
+                released.wait(120)
+            frame = {"choices": [{"index": 0, "delta": {"content": "fixture complete"}, "finish_reason": "stop"}]}
+            body = ("data: " + json.dumps(frame) + "\n\ndata: [DONE]\n\n").encode()
+            try:
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Provider)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    workdir = tempfile.mkdtemp(prefix="queue-receipt-")
+    root = Path(workdir)
+    host = None
+    try:
+        with socket.socket() as reservation:
+            reservation.bind(("127.0.0.1", 0))
+            port = reservation.getsockname()[1]
+        token = secrets.token_hex(32)
+        canary = "PLAINTEXT_CANARY_" + secrets.token_hex(8)
+        config = {
+            "endpoint": f"ws://127.0.0.1:{port}", "token": token, "canary": canary,
+            "s1": str(uuid.uuid4()), "s2": str(uuid.uuid4()),
+            "editA": canary + "-A", "editB": canary + "-B",
+            "itemEdit": "q-edit", "itemRemove": "q-remove", "itemSteer": "q-steer",
+            "itemMissing": "q-missing", "itemS2": "q-s2",
+            "reqPrompt": "p-hold", "reqEditA": "r-edit-a", "reqEditB": "r-edit-b",
+            "reqRemove": "r-remove", "reqSteer": "r-steer", "reqReject": "r-reject",
+        }
+        connection_file = root / "connection.json"
+        connection_file.write_text(json.dumps(config))
+        connection_file.chmod(0o600)
+        env = dict(os.environ,
+                   HARNESS_BASE_URL=f"http://127.0.0.1:{server.server_port}/v1",
+                   HARNESS_MODEL="fixture", HARNESS_HOST_PORT=str(port), HARNESS_HOST_TOKEN=token)
+        for key in ["HARNESS_API_KEY", "HARNESS_PROVIDER_PROFILE", "HARNESS_CONTEXT_TOKENS",
+                    "HARNESS_INCLUDE_USAGE", "HARNESS_DISABLE_THINKING"]:
+            env.pop(key, None)
+        store = root / "events.sqlite"
+
+        def start():
+            log = (root / "host.log").open("ab")
+            process = subprocess.Popen(
+                [str(binary), "--host", "--workspace", workdir, "--store", str(store)],
+                env=env, stdout=log, stderr=log)
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                if process.poll() is not None:
+                    raise RuntimeError("Isolated host failed to start: " + str(root / "host.log"))
+                try:
+                    with socket.create_connection(("127.0.0.1", port), .1):
+                        return process
+                except OSError:
+                    time.sleep(.05)
+            process.kill()
+            process.wait()
+            raise RuntimeError("Isolated host timed out")
+
+        host = start()
+        subprocess.run([str(client), workdir, "live"], check=True, timeout=60)
+        live = verify_queue_db(store, config, "live")
+        host.terminate()
+        host.wait(timeout=10)
+        host = None
+        state["hold"] = False
+        released.set()
+        host = start()
+        subprocess.run([str(client), workdir, "replay"], check=True, timeout=60)
+        verify_queue_db(store, config, "replay", previous=live)
+        print(json.dumps({
+            "hostRestartReplay": "exact edit/remove/steer receipts replayed, B preserved",
+            "changedFingerprint": "refused with no mutation",
+            "auditEvents": "not duplicated across restart",
+            "sessionIsolation": "independent receipts per session",
+            "persistedFingerprint": "digest only, no plaintext prompt",
+        }))
+    finally:
+        released.set()
+        if host and host.poll() is None:
+            host.terminate()
+            try:
+                host.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                host.kill()
+                host.wait()
+        server.shutdown()
+        server.server_close()
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--binary", type=Path, default=Path("NativeHarness/.build/debug/harness"))
-    main(parser.parse_args().binary.resolve())
+    parser.add_argument("--client", type=Path, default=Path(".build/checks/native-queue-receipt"))
+    parser.add_argument("--skip-interactive", action="store_true")
+    args = parser.parse_args()
+    if not args.skip_interactive:
+        interactive_phase(args.binary.resolve())
+    host_phase(args.binary.resolve(), args.client.resolve())
