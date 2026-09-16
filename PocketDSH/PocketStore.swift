@@ -248,6 +248,25 @@ final class PocketStore: ObservableObject {
     /// list refresh, catalog and re-follow - belong only to the operation
     /// that still holds this seat.
     private(set) var activePresetSwitch: PresetSwitchGate.Operation?
+    /// C1: the async session-control path with operation ownership: the
+    /// seat a control click takes before any suspension, and the frozen
+    /// projection it dispatches from. The state it changes is the
+    /// server-owned permissions/plan projection, never stored from the
+    /// client side.
+    let controls = SessionControlGate()
+    /// The control action this store last started: its post-response
+    /// effects - the published outcome and the visible error - belong only
+    /// to the operation that still holds this seat.
+    private(set) var activeControl: SessionControlOperation?
+    /// C1: the last control action's outcome, for the UI that renders the
+    /// controls and for the checks. The outcome is the dispatch's result,
+    /// never a projection: the server frame moves the state.
+    @Published private(set) var controlOutcome: SessionControlOutcome?
+    /// C1: the last error the control lineage wrote, with the operation that
+    /// wrote it. A settled control clears exactly this message - never an
+    /// error another subsystem published over it - and a session switch or a
+    /// disconnect retires the error with the lineage that owned it.
+    private var controlError: (operation: SessionControlOperation, message: String)?
     /// The newest agentPresets/list pull this store has issued. A pull that
     /// answers after a newer pull on the same connection belongs to no one:
     /// the picker keeps the roster the latest request fetched.
@@ -268,7 +287,7 @@ final class PocketStore: ObservableObject {
         set { draftTable.lines = newValue }
     }
     private var pendingRequest: (id: String, text: String, session: String, imageIDs: [UUID])?
-    private var projectionStores: [String: SessionProjectionStore] = [:]
+    var projectionStores: [String: SessionProjectionStore] = [:]
     /// The per-session command catalog (`commands/list`), epoch-guarded by the
     /// ported CommandDirectory. Created on first use and never replaced, so a
     /// pull always has somewhere to publish and a strong-wait can never be
@@ -438,6 +457,13 @@ final class PocketStore: ObservableObject {
         // a dead request's response to re-enable the controls.
         selection.invalidateCurrent(); activeSelection = nil
         presetSwitch.invalidateCurrent(); activePresetSwitch = nil
+        controls.invalidate(); activeControl = nil
+        // The control's settled state belonged to the connection that just
+        // died: the reconnected store starts it clean, and a control-owned
+        // error goes with the lineage that wrote it.
+        controlOutcome = nil
+        if let owned = controlError, error == owned.message { error = nil }
+        controlError = nil
         // The in-flight create rode this connection too: drop its seat so a
         // late answer applies nothing, and retire the roster it was served on.
         createSeat.invalidate()
@@ -799,6 +825,13 @@ final class PocketStore: ObservableObject {
             // The in-flight switch rode the session the user just left: drop
             // its seat so its answer applies nothing, the way the selection's.
             presetSwitch.invalidateCurrent(); activePresetSwitch = nil
+            // The in-flight control rode this session too: its answer must
+            // not land on the session that replaced it, and neither may a
+            // settled outcome or a control-owned error it left behind.
+            controls.invalidate(); activeControl = nil
+            controlOutcome = nil
+            if let owned = controlError, error == owned.message { error = nil }
+            controlError = nil
             if createSelfSelect == nil || createSeat.active?.id != createSelfSelect?.id {
                 createSeat.invalidate()
                 // The create's answer must not wait on a seat it no longer holds.
@@ -1688,6 +1721,10 @@ final class PocketStore: ObservableObject {
         // no-op, not a supersede - the menu is disabled while pending anyway,
         // and the blank window ends the moment the accepted projection lands.
         guard activePresetSwitch == nil else { return }
+        // C1: the command boundary is one seat. A pending control owns it
+        // the way a pending switch does: the switch is refused, not
+        // superseded, so the two can never interleave on the wire.
+        guard activeControl == nil else { return }
         guard selectedIsBlank else { return }
         let op = PresetSwitchGate.Operation(sessionID: id, endpoint: endpoint, generation: generation, epoch: selectionEpoch, attempt: carrier.currentRefreshToken())
         activePresetSwitch = op
@@ -1787,6 +1824,129 @@ final class PocketStore: ObservableObject {
             && op.generation == generation
             && op.epoch == selectionEpoch
             && carrier.accepts(op.attempt)
+    }
+
+    /// C1: freeze one permission preset selection of the selected session and
+    /// dispatch it through the control pipeline. The click is the only moment
+    /// the live store is read: the projection, the catalog and the connection
+    /// identity are frozen into the operation, and every decision after the
+    /// suspension re-checks the freeze, never the live session list.
+    func selectPermission(_ value: String) async {
+        await dispatchControl(.permission(value: value))
+    }
+
+    /// C1: freeze the plan-mode toggle of the selected session and dispatch
+    /// it. A pending projection is the transition in flight: the click asks
+    /// for nothing, and no RPC leaves while one is outstanding.
+    func togglePlan() async {
+        await dispatchControl(.plan)
+    }
+
+    /// The frozen dispatch of one control click: the store's own seat, the
+    /// frozen context, the commands/execute leg and the ownership re-check
+    /// after the suspension. A second click before the first settled is a
+    /// no-op, like the preset switch - never a supersede.
+    private func dispatchControl(_ intent: SessionControlIntent) async {
+        guard !usesNativeHarness, connected, api != nil, let id = selectedID else { return }
+        // C1: the command boundary is one seat, in both directions. A pending
+        // control owns it, and a pending preset switch owns it the same way:
+        // the second seat is refused, never superseded, so the two can never
+        // interleave on the wire.
+        guard activeControl == nil, !switchingPreset else { return }
+        let context = SessionControlContext(
+            sessionID: id, endpoint: endpoint,
+            generation: generation, epoch: selectionEpoch,
+            attempt: carrier.currentRefreshToken(),
+            catalogGeneration: commandDirectory.catalogGeneration,
+            presetGeneration: presetRosterPull,
+            catalog: commandDirectory.snapshot(id),
+            permissions: projectionStores[id]?.permissions,
+            plan: projectionStores[id]?.plan)
+        guard let op = controls.begin(intent, context) else { return }
+        activeControl = op
+        controlOutcome = nil
+        let outcome = await controls.dispatch(op,
+            live: { [weak self] op in self?.isLiveControl(op) ?? false },
+            rpc: { [weak self] line in
+                guard let api = self?.api else {
+                    throw HarnessError(message: "The connection dropped before the control switch was confirmed.")
+                }
+                return try await api.rpc("commands/execute",
+                                         args: commandExecuteArguments(agentId: op.context.sessionID, line: line, submittedAttachments: []))
+            })
+        // The post-response effects are owned by the operation that still
+        // holds the seat: a late answer of a dropped action writes no
+        // outcome and no error over the session that replaced it.
+        guard activeControl === op else { return }
+        switch outcome {
+        case .stale:
+            // The identity moved: the answer is discarded, and neither the
+            // outcome nor the error is written over the session that
+            // replaced it.
+            break
+        case .failed(let message):
+            // The failure is the lineage's visible error, owned by the
+            // operation that wrote it: a later settled control clears
+            // exactly this message, and the switch / disconnect hooks retire
+            // it with the lineage.
+            controlOutcome = outcome
+            error = message
+            controlError = (operation: op, message: message)
+        default:
+            // A settled non-failure outlives a failure the lineage wrote: it
+            // clears the control-owned error if, and only if, the store still
+            // shows exactly that message - never an error another subsystem
+            // published over it.
+            if let owned = controlError, error == owned.message {
+                error = nil
+                controlError = nil
+            }
+            controlOutcome = outcome
+        }
+        if activeControl === op { activeControl = nil }
+    }
+
+    /// C1: whether a pending control action is still on the live session and
+    /// connection it was frozen from: the session, endpoint, connection
+    /// generation and selection epoch all match, the carrier still accepts
+    /// the attempt it rode on, and the capability facts it read - the command
+    /// catalog generation and the preset roster generation - are still the
+    /// live ones. A rotated generation or a re-pulled roster stales the
+    /// action instead of landing its answer on the new identity. The frozen
+    /// projection must still be live too, in the exact shape the click was
+    /// decided against: a projection that moved away from the click's own
+    /// re-emit - or lost the capability - no longer owns the answer.
+    private func isLiveControl(_ op: SessionControlOperation) -> Bool {
+        guard connected, api != nil else { return false }
+        guard op.context.sessionID == selectedID
+            && op.context.endpoint == endpoint
+            && op.context.generation == generation
+            && op.context.epoch == selectionEpoch
+            && carrier.accepts(op.context.attempt)
+            && commandDirectory.catalogGeneration == op.context.catalogGeneration
+            && presetRosterPull == op.context.presetGeneration else { return false }
+        // The frozen projection is part of the freeze. The one move that
+        // keeps the action live is the click's own success: the server
+        // applies the switch and republishes the projection before the ack,
+        // so the live value equals the value the click asked for - the
+        // normal projection-before-RPC ordering, not a move under the click.
+        guard let live = projectionStores[op.context.sessionID] else { return false }
+        switch op.intent {
+        case .permission(let value):
+            guard let frozen = op.context.permissions, let current = live.permissions
+            else { return false }
+            guard current.options == frozen.options else { return false }
+            return current.currentValue == frozen.currentValue || current.currentValue == value
+        case .plan:
+            guard let frozen = op.context.plan, let current = live.plan else { return false }
+            // Unchanged, the click's own transition in flight, or the target
+            // already reached: anything else moved the mode without this
+            // click. The frozen pending is false - a pending projection never
+            // dispatches a line.
+            return (current.active, current.pending) == (frozen.active, false)
+                || (current.active, current.pending) == (frozen.active, true)
+                || (current.active, current.pending) == (!frozen.active, false)
+        }
     }
     /// The store's live session and connection as one value: what a pending
     /// action is checked against when its question is answered.

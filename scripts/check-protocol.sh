@@ -51,6 +51,13 @@ xcrun swiftc -target "${CATALYST_TARGET}" -Fsystem "${IOSUPPORT}/System/Library/
 # the Create ownership rules are exercised on the production objects.
 xcrun swiftc -target "${CATALYST_TARGET}" -Fsystem "${IOSUPPORT}/System/Library/Frameworks" -parse-as-library -I .build/checks -L .build/checks -lSwiftTerm -Xlinker -rpath -Xlinker @loader_path $(ls PocketDSH/*.swift | grep -v "PocketDSHApp.swift") .build/checks/PocketDSHApp.nomain.swift Shared/NativeWire.swift Tests/PresetSelectionChecks.swift -o .build/checks/preset-selection-checks
 .build/checks/preset-selection-checks
+# The session-control check (PARITY-2C C1) drives the production PocketStore
+# the same way: its selectPermission, togglePlan, select and disconnect paths
+# run unchanged on the parked transport, so the freeze, the decision order,
+# the wire shape and the ownership rules are exercised on the production
+# objects.
+xcrun swiftc -target "${CATALYST_TARGET}" -Fsystem "${IOSUPPORT}/System/Library/Frameworks" -parse-as-library -I .build/checks -L .build/checks -lSwiftTerm -Xlinker -rpath -Xlinker @loader_path $(ls PocketDSH/*.swift | grep -v "PocketDSHApp.swift") .build/checks/PocketDSHApp.nomain.swift Shared/NativeWire.swift Tests/SessionControlChecks.swift -o .build/checks/session-control-checks
+.build/checks/session-control-checks
 # The build-mac.sh signature validators, tested headless on controlled
 # fixtures: the signed-mode validator must accept a development-signed bundle
 # and reject an ad-hoc one - no Xcode login or provisioning profile needed,
