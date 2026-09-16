@@ -38,7 +38,9 @@ final class PocketStore: ObservableObject {
         persistPane()
     } }
     @Published var composerFocusRequest: UUID?
-    private var newlyCreatedSession: String?
+    /// Readable (not private) so the offline checks can verify the focus a
+    /// create captured for its own session.
+    private(set) var newlyCreatedSession: String?
     func focusNewSessionComposer() {
         guard let id = newlyCreatedSession else { return }
         newlyCreatedSession = nil
@@ -89,7 +91,52 @@ final class PocketStore: ObservableObject {
     /// Internal (not private) so the offline checks can drive the production
     /// selection path through a delayed fake transport.
     var api: HarnessAPI?
-    private var native: NativeChatConnection?
+    /// Internal (not private) so the offline checks can drive the production
+    /// create branch through the same path the native sheet uses.
+    var native: NativeChatConnection?
+    /// Bounded seam for the native create's open frame: nil in production,
+    /// where the open goes through the live connection. The offline checks
+    /// park or fail it to test the open's real outcome.
+    var nativeOpenSeam: ((NativeCommand) async throws -> Void)?
+    /// The host replies that reached the store while a create's open was
+    /// still in flight - between the open frame going out and the create's
+    /// commit, when the admission gate still names the prior selection and
+    /// would drop them. Owned by that open: parked here, replayed by its
+    /// commit, dropped by its failure or a lost seat. Bounded; frames past
+    /// the limit are the newest, and the prefix is the admission-critical
+    /// one (opened, synced, the first history).
+    /// The frames parked for a create's open. The decision frames - the
+    /// host's opened answer, a session-scoped rejection and the terminal
+    /// synced - live in their own slots: a history overflow can never drop
+    /// them. The history between them is a bounded window; an overflow drops
+    /// the oldest frame and marks the buffer truncated, which the commit
+    /// surfaces as a gap on the replayed opened frame - the host's own
+    /// truncation semantics - instead of a silently complete transcript.
+    private struct PendingNativeOpen {
+        let sessionID: String
+        let operation: CreateOperation
+        var opened: NativeEvent?
+        var history: [NativeEvent]
+        var historyDropped = false
+        var terminalSynced: NativeEvent?
+        var rejection: NativeEvent?
+    }
+    private var pendingNativeOpen: PendingNativeOpen?
+    /// The bounded history window of the parked buffer. The decision frames
+    /// live outside it and are never dropped.
+    private static let pendingNativeOpenLimit = 256
+    /// The host's decision on a parked open: opened, rejected, or lost to a
+    /// seat the create no longer holds. The create suspends on it - no sleep,
+    /// no timeout: a host that answers neither opened nor error leaves the
+    /// create suspended until the seat is lost, and every seat loss resolves
+    /// the wait, so it can hang on no host.
+    private var pendingOpenDecision: CheckedContinuation<PendingOpenResult, Never>?
+    private enum PendingOpenResult { case opened, rejected, lost }
+    private func resumePendingOpenDecision(_ result: PendingOpenResult) {
+        guard let continuation = pendingOpenDecision else { return }
+        pendingOpenDecision = nil
+        continuation.resume(returning: result)
+    }
     @Published var nativeShell: NativeClient?
     @Published private var shellContextDrafts: [String: [ShellContextAttachment]] = [:]
     @Published private var shellDiffDrafts: [String: [ShellDiffAttachment]] = [:]
@@ -142,6 +189,11 @@ final class PocketStore: ObservableObject {
         return true
     }
     private var nativeTranscript = NativeTranscript()
+    /// Read-only observation of the native transcript fold for the
+    /// parked-open checks: a value copy of the private state, nothing else
+    /// - the checks compare full presentation snapshots before and after a
+    /// create, and the fold's rows are part of the presentation.
+    var nativeTranscriptObservation: NativeTranscript { nativeTranscript }
     var nativeReady = false
     private var nativeSubmission: (id: String, text: String, session: String, draft: String, attachmentIDs: [String], diffAttachmentIDs: [String])?
     private var queueTextHandlers: [String: (String?) -> Void] = [:]
@@ -177,6 +229,18 @@ final class PocketStore: ObservableObject {
     /// The async model-selection path with operation ownership: who owns the
     /// busy flag, and which deferred response may still land.
     let selection = ModelSelectionGate()
+    /// The production owner of the in-flight session Create: the seat a
+    /// create takes before its first await and the outcome it settles into.
+    /// A session switch or a disconnect drops the seat, so a late answer can
+    /// apply nothing.
+    let createSeat = CreateSheetOwnership()
+    /// The newest agentPresets/list pull this store has issued. A pull that
+    /// answers after a newer pull on the same connection belongs to no one:
+    /// the picker keeps the roster the latest request fetched.
+    private var presetRosterPull = 0
+    /// The preset roster as agentPresets/list served it on the live
+    /// connection. The picker re-pulls it on open, so it is never a cache.
+    @Published private(set) var presetRoster: AgentPresetRosterState = .missing
     private var clientID = ""
     /// The composer's draft lines and their versions (`ComposerDrafts`). The
     /// version is what tells a pending send whether the line it carried is
@@ -304,6 +368,9 @@ final class PocketStore: ObservableObject {
             sessions = result["items"].array.map { HarnessSession(raw: $0) }
             catalog = loadedCatalog
             startCarrier()
+            // The roster belongs to the connection: pull it now so the
+            // picker already holds the advertised presets when it opens.
+            Task { await refreshPresetRoster() }
         } catch { if attempt == generation { self.error = error.localizedDescription; connecting = false; connectionDiagnostic("connect-failed", error: error) } }
     }
     func disconnect() {
@@ -313,6 +380,13 @@ final class PocketStore: ObservableObject {
         // its ownership and busy state immediately, so the UI never waits for
         // a dead request's response to re-enable the controls.
         selection.invalidateCurrent(); activeSelection = nil
+        // The in-flight create rode this connection too: drop its seat so a
+        // late answer applies nothing, and retire the roster it was served on.
+        createSeat.invalidate()
+        // A create suspended on its open's decision rode this connection: the
+        // dead connection decides it.
+        resumePendingOpenDecision(.lost)
+        presetRoster = .missing
         // The carrier's streams, its ping and its scheduled refreshes die with
         // the connection: after this no late frame, ping or list may report.
         carrier.stop()
@@ -577,21 +651,24 @@ final class PocketStore: ObservableObject {
     /// live at this moment. `selection`, when given, is the model selection
     /// that asked for the list: its result - success or failure - then applies
     /// only while that selection still owns the seat, so a list that lands
-    /// after a newer selection started belongs to no one. Either way a result
-    /// - success or failure - is applied only while the connection identity
-    /// still holds, so a list that arrives after a reconnect belongs to the
-    /// connection that asked for it.
-    func refresh(token: RemoteStreamConnection.RefreshToken? = nil, selection: ModelSelectionGate.Operation? = nil) async {
+    /// after a newer selection started belongs to no one. `create`, when
+    /// given, is the create operation that asked for the list: its result then
+    /// applies only while that create still holds the sheet's seat, so a list
+    /// parked across a sheet close or a supersede belongs to no one. Either
+    /// way a result - success or failure - is applied only while the
+    /// connection identity still holds, so a list that arrives after a
+    /// reconnect belongs to the connection that asked for it.
+    func refresh(token: RemoteStreamConnection.RefreshToken? = nil, selection: ModelSelectionGate.Operation? = nil, create: CreateOperation? = nil) async {
         if let native { do { try await native.send(NativeCommand(op: "list")) } catch { self.error = error.localizedDescription }; return }
         guard let api else { return }
         let connection = generation
         let refresh = token ?? carrier.currentRefreshToken()
         do {
             let result = try await api.rpc("session/list", args: ["_request": .object([:])])
-            guard generation == connection, carrier.accepts(refresh), selectionOwnershipHolds(selection) else { return }
+            guard generation == connection, carrier.accepts(refresh), selectionOwnershipHolds(selection), createOwnershipHolds(create) else { return }
             sessions = result["items"].array.map { HarnessSession(raw: $0) }
         } catch {
-            guard generation == connection, carrier.accepts(refresh), selectionOwnershipHolds(selection) else { return }
+            guard generation == connection, carrier.accepts(refresh), selectionOwnershipHolds(selection), createOwnershipHolds(create) else { return }
             self.error = error.localizedDescription
         }
     }
@@ -602,16 +679,71 @@ final class PocketStore: ObservableObject {
         guard let selection else { return true }
         return activeSelection === selection && isLiveModelSelection(selection)
     }
-    func select(_ id: String?) async {
+    /// Whether the create that asked for a refresh still holds the sheet's
+    /// seat. A refresh parked across a sheet close or a supersede writes no
+    /// list and no error for a create that no longer owns the sheet.
+    private func createOwnershipHolds(_ create: CreateOperation?) -> Bool {
+        guard let create else { return true }
+        return createSeat.stillOwns(create)
+    }
+    @discardableResult
+    func select(_ id: String?, createSelfSelect: CreateOperation? = nil) async -> NativeOpenOutcome {
         #if DEBUG
-        if let replay = ProcessInfo.processInfo.environment["DSH_NATIVE_REPLAY"] { loadNativeReplay(replay); return }
-        if ProcessInfo.processInfo.environment["DSH_DEMO"] == "1" { loadDemo(); selectedID = id; return }
+        if let replay = ProcessInfo.processInfo.environment["DSH_NATIVE_REPLAY"] { loadNativeReplay(replay); return .none }
+        if ProcessInfo.processInfo.environment["DSH_DEMO"] == "1" { loadDemo(); selectedID = id; return .none }
         #endif
+        applySelection(id, createSelfSelect)
+        guard connected else { return .none }
+        if let native {
+            resetNativePresentation(id)
+            guard let id else { return .none }
+            // The open's confirmation is the create's success: a rejected
+            // open publishes the error and reports .failed, a confirmed one
+            // reports .opened. The seam is nil in production.
+            let open = NativeCommand(op: "open", session: id)
+            do {
+                if let nativeOpenSeam { try await nativeOpenSeam(open) }
+                else { try await native.send(open) }
+                return .opened
+            }
+            catch {
+                // A create's self-select publishes the error only while its
+                // operation still owns the seat: a closed or superseded
+                // create must not write a global error over the newer
+                // sheet. An ordinary select always publishes it.
+                if let op = createSelfSelect, !createSeat.stillOwns(op) {} else {
+                    self.error = error.localizedDescription
+                }
+                loadingHistory = false
+                return .failed
+            }
+        }
+        do { try await followSelected() } catch { self.error = error.localizedDescription; loadingHistory = false }
+        return .none
+    }
+    /// The selection transition: what adopting a session publishes - the
+    /// epoch rotation, the composer and roster reset, the model and the
+    /// command catalog. An ordinary select applies it before its open,
+    /// exactly as before this split; the create-owned native open applies it
+    /// only as its commit, after the open confirmed and the seat still
+    /// holds.
+    private func applySelection(_ id: String?, _ createSelfSelect: CreateOperation?) {
         // Rotate the epoch only on a real session switch: reselecting the
         // current session keeps its in-flight selection live, while A -> B -> A
         // still invalidates the original request - its epoch is gone even
-        // though the session id matches again.
-        if selectedID != id { selectionEpoch = UUID(); selection.invalidateCurrent(); activeSelection = nil }
+        // though the session id matches again. A switch by someone else also
+        // drops the in-flight create's seat: its answer must not steal the
+        // selection. The create's own self-select keeps the seat, though: its
+        // follow is exactly where a sheet close or a user switch can still
+        // retire it, and the settled outcome is judged against that seat.
+        if selectedID != id {
+            selectionEpoch = UUID(); selection.invalidateCurrent(); activeSelection = nil
+            if createSelfSelect == nil || createSeat.active?.id != createSelfSelect?.id {
+                createSeat.invalidate()
+                // The create's answer must not wait on a seat it no longer holds.
+                resumePendingOpenDecision(.lost)
+            }
+        }
         if let old = selectedID { drafts[old] = draft }
         drafts = UserDefaults.standard.dictionary(forKey: "harness.drafts." + endpoint) as? [String: String] ?? drafts
         if let data = try? Data(contentsOf: imageDraftFile), let saved = try? PropertyListDecoder().decode([String: [OutgoingImage]].self, from: data) { imageDrafts = saved }
@@ -625,29 +757,140 @@ final class PocketStore: ObservableObject {
         // leave the previous session's rows in the palette.
         if !usesNativeHarness, connected, let id { commandDirectory.warm(id) }
         syncCommandCatalog()
-        guard connected else { return }
-        if let native {
-            nativeReady = false; nativeTranscript = NativeTranscript(); nativeRequests = []; nativeProtocolNotices = []; nativeCompaction = nil; nativeSupportsCompaction = false; nativeCompactionPending = false; nativeQueue = []; nativeQueueOmitted = 0; nativeSupportsQueue = false; nativeDiff = nil; nativeSupportsDiff = false; nativeDiffLoading = false; nativeDiffTimeout?.cancel(); nativeDiffTimeout = nil; interactions = []
-            guard let id else { native.selectedID = nil; return }
-            loadingHistory = true; native.selectedID = id
-            do { try await native.send(NativeCommand(op: "open", session: id)) }
-            catch { self.error = error.localizedDescription; loadingHistory = false }
-            return
+    }
+    /// The native presentation a selection applies: a fresh transcript and
+    /// requests, an emptied queue, diff and interactions, the terminal's
+    /// readiness dropped until the host re-advertises it - and the
+    /// connection pointed at the session, its history load started.
+    private func resetNativePresentation(_ id: String?) {
+        guard let native else { return }
+        nativeReady = false; nativeTranscript = NativeTranscript(); nativeRequests = []; nativeProtocolNotices = []; nativeCompaction = nil; nativeSupportsCompaction = false; nativeCompactionPending = false; nativeQueue = []; nativeQueueOmitted = 0; nativeSupportsQueue = false; nativeDiff = nil; nativeSupportsDiff = false; nativeDiffLoading = false; nativeDiffTimeout?.cancel(); nativeDiffTimeout = nil; interactions = []
+        native.selectedID = id
+        if id != nil { loadingHistory = true }
+    }
+    /// The create-owned native open, transactional in three steps:
+    /// prepare - nothing user-visible is published; the open frame for the
+    /// generated ID is all that gets built;
+    /// decide - exactly one frame goes out, through the seam in the checks
+    /// and the live connection in production; the send confirmation covers
+    /// only the local socket write, so the create then suspends on the
+    /// host's decision - its opened frame, a session-scoped rejection, or
+    /// the seat going out from under it; no sleep, no timeout: a host that
+    /// answers neither leaves the create suspended until the seat is lost,
+    /// and every seat loss (sheet close, disconnect, session switch, newer
+    /// create) resolves the wait, so it can hang on no host;
+    /// commit - only after the host's opened AND the same operation still
+    /// owns the seat, the full selection transition applies, locally,
+    /// without a second open. A lost seat returns .none - the open was
+    /// abandoned, and the create's own seat guard settles .stale; a
+    /// rejected open publishes its error while the seat still holds and
+    /// returns .failed. In both cases nothing was adopted, so there is
+    /// nothing to restore.
+    /// The decision frames park in the open's buffer from before the frame
+    /// goes out: the connection's independent reader task can decode the
+    /// host's answer - opened, synced, the history replay - while the open
+    /// await is still suspended, when the selection still names the prior
+    /// session and the admission gate would drop every one of those frames,
+    /// leaving the new session shell-less with its history load stuck. The
+    /// opened answer, the rejection and the terminal synced live in their
+    /// own slots, so a history overflow can never drop them; the history
+    /// between them is a bounded window, and an overflow drops the oldest
+    /// frame and marks the buffer truncated, which the commit surfaces as a
+    /// gap on the replayed opened frame - the host's own truncation
+    /// semantics. A lost seat or a rejection drops the buffer with the
+    /// open: nothing was adopted, and the abandoned session's events admit
+    /// against the old selection as before.
+    private func createNativeOpen(_ id: String, createSelfSelect op: CreateOperation) async -> NativeOpenOutcome {
+        let open = NativeCommand(op: "open", session: id)
+        pendingNativeOpen = PendingNativeOpen(sessionID: id, operation: op, opened: nil, history: [],
+                                              historyDropped: false, terminalSynced: nil, rejection: nil)
+        do {
+            if let nativeOpenSeam { try await nativeOpenSeam(open) }
+            else { try await native!.send(open) }
         }
-        do { try await followSelected() } catch { self.error = error.localizedDescription; loadingHistory = false }
+        catch {
+            settlePendingNativeOpen(op, sessionID: id)
+            // A rejected open publishes the error only while the create
+            // still owns the sheet: a closed or superseded create writes no
+            // error over the newer sheet.
+            if createSeat.stillOwns(op) { self.error = error.localizedDescription }
+            return .failed
+        }
+        // The send confirmed the socket write, not the open. Wait for the
+        // host's decision on it: its opened frame, a session-scoped
+        // rejection, or the seat going out from under the create.
+        let decision = await withCheckedContinuation { continuation in
+            pendingOpenDecision = continuation
+            if let pending = pendingNativeOpen, pending.sessionID == id, pending.operation.id == op.id {
+                if pending.opened != nil { resumePendingOpenDecision(.opened) }
+                else if pending.rejection != nil { resumePendingOpenDecision(.rejected) }
+            }
+            // The seat may have gone out between the send returning and the
+            // wait parking: a lost seat decides the open without waiting.
+            if pendingOpenDecision != nil, !createSeat.stillOwns(op) { resumePendingOpenDecision(.lost) }
+        }
+        switch decision {
+        case .opened:
+            guard createSeat.stillOwns(op) else { settlePendingNativeOpen(op, sessionID: id); return .none }
+            return commitPendingNativeOpen(id, createSelfSelect: op)
+        case .rejected:
+            settlePendingNativeOpen(op, sessionID: id)
+            guard createSeat.stillOwns(op) else { return .none }
+            return .failed
+        case .lost:
+            settlePendingNativeOpen(op, sessionID: id)
+            guard createSeat.stillOwns(op) else { return .none }
+            return .failed
+        }
+    }
+    /// The open's commit, await-free: the full selection transition, then
+    /// the parked host reply replays through the production admission path,
+    /// which now sees the new selection, in the host's own order - the
+    /// opened frame, the retained history, the terminal synced, and the
+    /// rejection if the host still rejects.
+    private func commitPendingNativeOpen(_ id: String, createSelfSelect op: CreateOperation) -> NativeOpenOutcome {
+        applySelection(id, op)
+        resetNativePresentation(id)
+        if let pending = pendingNativeOpen, pending.sessionID == id, pending.operation.id == op.id {
+            pendingNativeOpen = nil
+            var opened = pending.opened
+            // A history frame the bounded window could not keep is surfaced
+            // the way the host surfaces its own truncation: as a gap on the
+            // opened frame, so the transcript and the shell both say "only
+            // the retained part".
+            if opened != nil, pending.historyDropped { opened?.gap = true }
+            if let opened { receiveNative(opened) }
+            for event in pending.history { receiveNative(event) }
+            if let synced = pending.terminalSynced { receiveNative(synced) }
+            if let rejection = pending.rejection { receiveNative(rejection) }
+        }
+        return .opened
+    }
+    /// Only the open that still owns the seat may clear the buffer it owns -
+    /// a newer create's open overwrites the slot, and an older open resuming
+    /// late must not clear the buffer the younger one is still filling.
+    private func settlePendingNativeOpen(_ op: CreateOperation, sessionID: String) {
+        if let pending = pendingNativeOpen, pending.sessionID == sessionID, pending.operation.id == op.id {
+            pendingNativeOpen = nil
+        }
     }
     /// Observation seam for the conversation follow decision: nil retires the
     /// stream, an id points it at that session. Production leaves it nil; the
     /// parked-transport checks count calls to prove which selection's
     /// continuation actually moved the live conversation.
     var conversationFollowObservation: (@MainActor (String?) -> Void)?
+    /// The stream transport the conversation follow drives. Production is the
+    /// live socket; the offline checks substitute a parked one, so a follow
+    /// can be held open across a session switch or a reconnect - exactly what
+    /// a slow socket would hold it across.
+    var followTransport: RemoteStreamTransport?
     /// Point the conversation stream at the selected session. The previous ID
     /// is retired before the first suspension, so frames of the session the
     /// user just left - its snapshot, its events, its errors - are discarded
     /// from the moment the switch is decided. A deselect retires the stream
     /// without opening another one.
     private func followSelected() async throws {
-        guard let socket else {
+        guard let transport = followTransport ?? socket else {
             // No socket to tell: the ID is still retired, so nothing can
             // arrive for it later.
             conversationFollowObservation?(nil)
@@ -657,12 +900,12 @@ final class PocketStore: ObservableObject {
         guard let id = selectedID else {
             loadingHistory = false
             conversationFollowObservation?(nil)
-            try await carrier.cancel(.conversation, on: socket)
+            try await carrier.cancel(.conversation, on: transport)
             return
         }
         loadingHistory = true
         conversationFollowObservation?(id)
-        try await carrier.subscribe(.conversation, endpoint: "session/follow", args: ["request": .object(["address": .object(["kind": .string("session"), "sessionId": .string(id)]), "maxMessages": .number(50), "assistantStream": .bool(true)])], on: socket)
+        try await carrier.subscribe(.conversation, endpoint: "session/follow", args: ["request": .object(["address": .object(["kind": .string("session"), "sessionId": .string(id)]), "maxMessages": .number(50), "assistantStream": .bool(true)])], on: transport)
     }
     func loadOlder() async {
         guard let api, let id = selectedID, let beforeSeq = transcript.firstSeq, !loadingHistory else { return }
@@ -905,23 +1148,211 @@ final class PocketStore: ObservableObject {
     }
     func createDefaultTask() async {
         // Omitting workspaceId uses the Harness server's working directory.
-        await create(workspaceID: nil)
+        _ = await create(workspaceID: nil)
         focusNewSessionComposer()
     }
-    func create(workspaceID: String?) async {
+    /// The store's live connection as seen by a Create operation: the
+    /// endpoint, generation and selection epoch captured when the operation
+    /// was issued must still be the live ones, and the carrier must still
+    /// accept the attempt it captured.
+    private func isLiveCreate(_ op: CreateOperation) -> Bool {
+        guard connected, api != nil else { return false }
+        return op.endpoint == endpoint
+            && op.generation == generation
+            && op.epoch == selectionEpoch
+            && carrier.accepts(op.attempt)
+    }
+    /// Whether the create's own select can still settle. The self-select kept
+    /// the sheet's seat, so the seat judges the outcome: the connection
+    /// identity the operation captured must still stand, the create must still
+    /// hold the seat - a sheet close or a user switch during the follow
+    /// retires it - and the selection it asked for must still be the selected
+    /// session. A close, a switch or a reconnect stales the create; a
+    /// legitimate select still settles it.
+    private func isSettledCreateSelection(_ op: CreateOperation, sessionID: String) -> Bool {
+        guard connected, api != nil else { return false }
+        guard op.endpoint == endpoint, op.generation == generation, carrier.accepts(op.attempt) else { return false }
+        guard createSeat.stillOwns(op) else { return false }
+        return selectedID == sessionID
+    }
+    /// Create one session and return the outcome of THIS create, owned by the
+    /// operation it was issued under. Everything the outcome depends on - the
+    /// requested identity, the workspace and preset the caller chose, the
+    /// connection generation, the selection epoch and the carrier attempt -
+    /// is captured before the first await, and the ownership is re-checked
+    /// after every await below: a superseded create, a session switch, an
+    /// endpoint change or a reconnect can land nothing - no selection, no
+    /// list refresh, no error, no composer focus - and the caller's sheet
+    /// stays open.
+    func create(workspaceID: String? = nil, presetID: String? = nil) async -> CreateResult {
+        let op = CreateOperation(id: UUID(), requestedSessionID: "session-" + UUID().uuidString.lowercased(),
+                                 workspaceID: workspaceID, agentPreset: presetID,
+                                 endpoint: endpoint, generation: generation,
+                                 epoch: selectionEpoch, attempt: carrier.currentRefreshToken())
         if native != nil, connected {
+            // The native path is local: no session/create on the wire, no
+            // refresh, no focus until the native open lands.
+            createSeat.begin(op)
+            // A newer create supersedes any parked open's wait on its decision.
+            resumePendingOpenDecision(.lost)
             let id = UUID().uuidString
-            await select(id); newlyCreatedSession = id
-            return
+            // The create's open is transactional: nothing is published or
+            // adopted until the open confirmed and the same operation still
+            // owns the seat - the native equivalent of the DSH path only
+            // selecting after its answer. A sheet close or a user switch
+            // during the open retires the create, and the outcome is judged
+            // against that seat after the open lands.
+            let opened = await createNativeOpen(id, createSelfSelect: op)
+            // The seat judges the outcome, exactly like the DSH path: a
+            // sheet close or a user switch during the open stales the
+            // create. The open may have created the remote session before
+            // that local cancellation: nothing here retries it, and nothing
+            // is adopted.
+            guard createSeat.stillOwns(op) else {
+                let result = CreateResult(operation: op, outcome: .stale)
+                createSeat.settle(op, .stale)
+                return result
+            }
+            // The seat holds: the open's confirmation is the create's
+            // success. A rejected open is a visible failure - the open
+            // published the error while it still owned the seat - and the
+            // sheet stays open. Nothing was adopted on the way there, so
+            // nothing is restored, and no open frame goes to the prior
+            // session: the native protocol asks for none on a create
+            // failure, so the prior session is not re-opened as a retry and
+            // its transcript is not re-fetched here.
+            guard opened == .opened else {
+                let message = error ?? "The native session could not be opened."
+                let result = CreateResult(operation: op, outcome: .failed(message))
+                createSeat.settle(op, .failed(message))
+                return result
+            }
+            // Only a confirmed open of this create focuses the composer.
+            if selectedID == id { newlyCreatedSession = id }
+            let result = CreateResult(operation: op, outcome: .created(sessionID: id, agentPreset: nil))
+            createSeat.settle(op, result.outcome)
+            return result
         }
-        guard let api, connected else { return }
+        guard let api, connected else {
+            return CreateResult(operation: op, outcome: .failed("Connect to DSH and create the task again."))
+        }
+        createSeat.begin(op)
+        // A newer create supersedes any parked open's wait on its decision.
+        resumePendingOpenDecision(.lost)
         do {
-            var request: [String: JSON] = ["sessionId": .string("session-" + UUID().uuidString.lowercased())]
-            if let workspaceID { request["workspaceId"] = .string(workspaceID) }
-            let value = try await api.rpc("session/create", args: ["request": .object(request)])
-            await refresh(); await select(value["sessionId"].string)
-            newlyCreatedSession = selectedID
-        } catch { self.error = error.localizedDescription }
+            let value = try await api.rpc("session/create", args: ["request": .object(
+                PresetSelection.createRequest(sessionID: op.requestedSessionID, workspaceID: workspaceID, agentPreset: presetID))])
+            // The answer is this create's only while the operation still
+            // holds the seat and its captured context is still live.
+            guard isLiveCreate(op), createSeat.stillOwns(op) else {
+                let result = CreateResult(operation: op, outcome: .stale)
+                createSeat.settle(op, .stale)
+                return result
+            }
+            let sessionID = value["sessionId"].string
+            guard !sessionID.isEmpty else {
+                let message = "DSH: the create answer named no session."
+                self.error = message
+                let result = CreateResult(operation: op, outcome: .failed(message))
+                createSeat.settle(op, .failed(message))
+                return result
+            }
+            await refresh(create: op)
+            // The switch can land between the answer and the select: only
+            // the operation that still owns the seat may move the selection.
+            guard isLiveCreate(op), createSeat.stillOwns(op) else {
+                let result = CreateResult(operation: op, outcome: .stale)
+                createSeat.settle(op, .stale)
+                return result
+            }
+            await select(sessionID, createSelfSelect: op)
+            // The self-select kept the sheet's seat, so the seat judges the
+            // outcome: a sheet close or a user switch during the follow
+            // stales the create, a legitimate select still settles it.
+            guard isSettledCreateSelection(op, sessionID: sessionID) else {
+                let result = CreateResult(operation: op, outcome: .stale)
+                createSeat.settle(op, .stale)
+                return result
+            }
+            newlyCreatedSession = sessionID
+            let preset = value["agentPreset"].string
+            let result = CreateResult(operation: op, outcome: .created(sessionID: sessionID, agentPreset: preset.isEmpty ? nil : preset))
+            createSeat.settle(op, result.outcome)
+            return result
+        } catch {
+            // The answer of a create the user moved on from writes nothing.
+            guard isLiveCreate(op), createSeat.stillOwns(op) else {
+                let result = CreateResult(operation: op, outcome: .stale)
+                createSeat.settle(op, .stale)
+                return result
+            }
+            if let error = error as? HarnessError, error.code == "session/workspace-attach-failed" {
+                // The Host created the session, but it could not attach to
+                // the requested workspace: refresh the list on this same
+                // live connection so the new session is visible. It is not
+                // a success, nothing is selected, and the caller does not
+                // retry automatically.
+                let sessionID = error.details["sessionId"].string
+                let workspace = error.details["workspaceId"].string
+                await refresh(create: op)
+                // The refresh can park across a sheet close or a session
+                // switch: only a create that still owns the seat may publish
+                // the error and settle attach-failed.
+                guard isLiveCreate(op), createSeat.stillOwns(op) else {
+                    let result = CreateResult(operation: op, outcome: .stale)
+                    createSeat.settle(op, .stale)
+                    return result
+                }
+                let message = error.localizedDescription
+                self.error = message
+                let result = CreateResult(operation: op, outcome: .attachFailed(sessionID: sessionID.isEmpty ? op.requestedSessionID : sessionID, workspaceID: workspace))
+                createSeat.settle(op, result.outcome)
+                return result
+            }
+            let message = error.localizedDescription
+            self.error = message
+            let result = CreateResult(operation: op, outcome: .failed(message))
+            createSeat.settle(op, .failed(message))
+            return result
+        }
+    }
+    /// The sheet's close - Cancel or a swipe: the in-flight create, if any,
+    /// loses the sheet's seat. That covers both of its waits: an answer
+    /// parked before the select, and the create's own follow parked after its
+    /// self-select, which kept the seat. Either way the late result settles
+    /// stale and can apply no list, no error, no focus and no .created. A
+    /// success dismiss is a no-op: the create already settled its seat.
+    func retireCreate() {
+        createSeat.invalidate()
+        // A create suspended on its host's decision must not outlive the
+        // sheet: the lost seat decides it.
+        resumePendingOpenDecision(.lost)
+    }
+    /// Load the preset roster from the live connection. The Host re-reads the
+    /// roster on every list, so the app keeps no cache of its own: the
+    /// picker pulls it on open, and a new connection pulls it again. A fetch
+    /// that no longer belongs to the live connection writes nothing, and a
+    /// pull superseded by a newer pull on the same connection - the connect
+    /// pull answering after the picker's, in either answer order - writes
+    /// nothing either, so the picker always shows the roster the latest
+    /// request fetched.
+    func refreshPresetRoster() async {
+        guard let api else { presetRoster = .missing; return }
+        let connection = generation
+        let attempt = carrier.currentRefreshToken()
+        let pull = presetRosterPull + 1
+        presetRosterPull = pull
+        presetRoster = .loading
+        do {
+            let value = try await api.rpc("agentPresets/list", args: [:])
+            guard generation == connection, carrier.accepts(attempt), pull == presetRosterPull else { return }
+            guard value["presets"] != .null else { presetRoster = .missing; return }
+            let rows = value["presets"].array.compactMap { AgentPresetRow($0) }
+            presetRoster = .loaded(rows: rows, authorable: value["authorable"].bool)
+        } catch {
+            guard generation == connection, carrier.accepts(attempt), pull == presetRosterPull else { return }
+            presetRoster = .failed(error.localizedDescription)
+        }
     }
     /// Send one message. `snapshot` is the composer state a send action froze
     /// before its first suspension; a caller that does not freeze one (the steer
@@ -1289,27 +1720,82 @@ extension PocketStore {
             UserDefaults.standard.set(endpoint, forKey: "harness.endpoint")
             let connection = NativeChatConnection(); native = connection
             connection.onEvent = { [weak self] event in self?.receiveNative(event) }
-            connection.onFailure = { [weak self] message in
-                self?.connected = false; self?.connecting = false; self?.loadingHistory = false
-                self?.nativeReady = false; self?.nativeSubmission = nil; self?.interactions = []; self?.error = message
-                guard let self, !self.workspaceDetached else { return }
-                self.nativeRetry = min(4, self.nativeRetry + 1)
-                let delay = min(10, 1 << (self.nativeRetry - 1))
-                self.nativeReconnect = Task { [weak self] in
-                    do { try await Task.sleep(for: .seconds(delay)) } catch { return }
-                    guard let self, !Task.isCancelled else { return }
-                    await self.connect()
-                }
-            }
+            connection.onFailure = { [weak self] message in self?.nativeConnectionFailed(message) }
             connection.connect(url: url, token: token)
         } catch { connecting = false; self.error = error.localizedDescription }
+    }
+    /// The production path for a live connection failure: the visible state
+    /// is cleared, and - before the reconnect decision - the in-flight
+    /// create loses its seat, so a create suspended on the host's open
+    /// decision is decided by the failure itself. That matters because the
+    /// reconnect is not guaranteed to run: a detached workspace returns
+    /// early, and a cancelled reconnect task never reaches the store's
+    /// disconnect that would otherwise resolve the wait. A reconnect that
+    /// does run re-enters through connectNative's disconnect, where the
+    /// seat is already lost and the wait already decided - exactly once.
+    func nativeConnectionFailed(_ message: String) {
+        connected = false; connecting = false; loadingHistory = false
+        nativeReady = false; nativeSubmission = nil; interactions = []
+        createSeat.invalidate()
+        resumePendingOpenDecision(.lost)
+        error = message
+        guard !workspaceDetached else { return }
+        nativeRetry = min(4, nativeRetry + 1)
+        let delay = min(10, 1 << (nativeRetry - 1))
+        nativeReconnect = Task { [weak self] in
+            do { try await Task.sleep(for: .seconds(delay)) } catch { return }
+            guard let self, !Task.isCancelled else { return }
+            await self.connect()
+        }
     }
     private func nativeSession(_ info: NativeSessionInfo) -> HarnessSession {
         HarnessSession(raw: .object(["sessionId": .string(info.id), "cwd": .string(info.workspace),
             "running": .bool(info.running), "updatedAt": .number(info.updatedAt * 1000),
             "projections": .object(["values": .object(["title": .string(info.title)])])]))
     }
-    private func receiveNative(_ event: NativeEvent) {
+    /// The production entry point for every host event: the connection's
+    /// callback and the checks drive the store through this same path.
+    func receiveNative(_ event: NativeEvent) {
+        // A create's open may still be awaiting the host's decision: the
+        // host's answer to that open - opened, the rejection, synced, the
+        // history replay - can land before the send confirmation returns,
+        // while the selection still names the prior session. Park the
+        // decision frames in their own slots and the history in a bounded
+        // window; a lost seat lets the frame fall through to the gate.
+        if var pending = pendingNativeOpen, event.session == pending.sessionID,
+           createSeat.stillOwns(pending.operation) {
+            switch event.op {
+            case "opened":
+                if pending.opened == nil { pending.opened = event }
+                pendingNativeOpen = pending
+                resumePendingOpenDecision(.opened)
+            case "error":
+                // A session-scoped error is the host's decision on this
+                // open: park it and publish it while the seat still holds.
+                pending.rejection = event
+                if let text = event.text { self.error = text }
+                pendingNativeOpen = pending
+                if pending.opened == nil { resumePendingOpenDecision(.rejected) }
+            case "synced":
+                // The terminal synced is a decision frame: the load can
+                // finish only when it is parked, whatever overflow hit the
+                // history before it.
+                pending.terminalSynced = event
+                pendingNativeOpen = pending
+            default:
+                // History: a bounded window; an overflow drops the oldest
+                // frame and marks the truncation the commit must surface.
+                if pending.history.count < Self.pendingNativeOpenLimit {
+                    pending.history.append(event)
+                } else {
+                    pending.history.removeFirst()
+                    pending.history.append(event)
+                    pending.historyDropped = true
+                }
+                pendingNativeOpen = pending
+            }
+            return
+        }
         if event.op == "sessions" {
             let wasConnecting = connecting
             sessions = (event.sessions ?? []).map(nativeSession)

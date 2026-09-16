@@ -45,6 +45,12 @@ xcrun swiftc -target "${CATALYST_TARGET}" -Fsystem "${IOSUPPORT}/System/Library/
 sed '/^@main$/d' PocketDSH/PocketDSHApp.swift > .build/checks/PocketDSHApp.nomain.swift
 xcrun swiftc -target "${CATALYST_TARGET}" -Fsystem "${IOSUPPORT}/System/Library/Frameworks" -parse-as-library -I .build/checks -L .build/checks -lSwiftTerm -Xlinker -rpath -Xlinker @loader_path $(ls PocketDSH/*.swift | grep -v "PocketDSHApp.swift") .build/checks/PocketDSHApp.nomain.swift Shared/NativeWire.swift Tests/ModelSelectionChecks.swift -o .build/checks/model-selection-checks
 .build/checks/model-selection-checks
+# The preset-selection check drives the production PocketStore the same way:
+# its create, refresh, select, disconnect and refreshPresetRoster paths run
+# unchanged on the parked transport, so the roster, the request builder and
+# the Create ownership rules are exercised on the production objects.
+xcrun swiftc -target "${CATALYST_TARGET}" -Fsystem "${IOSUPPORT}/System/Library/Frameworks" -parse-as-library -I .build/checks -L .build/checks -lSwiftTerm -Xlinker -rpath -Xlinker @loader_path $(ls PocketDSH/*.swift | grep -v "PocketDSHApp.swift") .build/checks/PocketDSHApp.nomain.swift Shared/NativeWire.swift Tests/PresetSelectionChecks.swift -o .build/checks/preset-selection-checks
+.build/checks/preset-selection-checks
 # The build-mac.sh signature validators, tested headless on controlled
 # fixtures: the signed-mode validator must accept a development-signed bundle
 # and reject an ad-hoc one - no Xcode login or provisioning profile needed,

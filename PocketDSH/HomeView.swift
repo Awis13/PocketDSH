@@ -96,7 +96,7 @@ struct HomeView: View {
                 .navigationDestination(isPresented: Binding(get: { store.selectedID != nil }, set: { if !$0 { Task { await store.select(nil) } } })) { HarnessView() }
                 .sheet(isPresented: $appearance) { AppearanceView() }
                 .sheet(isPresented: $connection) { ConnectionView() }
-                .sheet(isPresented: $newTask, onDismiss: { store.focusNewSessionComposer() }) { NewTaskView() }
+                .sheet(isPresented: $newTask, onDismiss: { store.retireCreate(); store.focusNewSessionComposer() }) { NewTaskView() }
         }.tint(theme.accent).foregroundStyle(theme.ink)
     }
     private func chip(_ title: String, selected: Bool, action: @escaping () -> Void) -> some View {
@@ -137,7 +137,13 @@ struct NewTaskView: View {
     @EnvironmentObject var store: PocketStore
     @Environment(\.dismiss) var dismiss
     @State private var workspace: String?
+    @State private var preset: String?
     @State private var creating = false
+    /// The picker's options: the host default, then the roster the live
+    /// connection advertised; a staged id the loaded roster no longer
+    /// advertises stays shown verbatim, with its removal reason,
+    /// unselectable.
+    var presetOptions: [PresetPickerOption] { PresetSelection.pickerOptions(roster: store.presetRoster, staged: preset) }
     var body: some View {
         NavigationStack {
             List {
@@ -145,18 +151,42 @@ struct NewTaskView: View {
                     choice(store.usesNativeHarness ? "Native host working directory" : "DSH working directory", id: nil)
                     ForEach(store.workspaces) { w in choice(w.title, id: w.id) }
                 }
+                Section("Preset") {
+                    ForEach(presetOptions) { option in presetChoice(option) }
+                }
                 Section { Text(store.usesNativeHarness ? "Files and execution stay on the Native Harness host." : "Files and execution stay on your Mac. The task will also be available in your browser.").font(.footnote).foregroundStyle(.secondary) }
             }.scrollContentBackground(.hidden).background { ThemeBackdrop() }.navigationTitle("New task").navigationBarTitleDisplayMode(.inline)
+                // The roster is pulled when the picker opens; the connection
+                // pulls it again on its own when a new connection lands.
+                .task { await store.refreshPresetRoster() }
                 .toolbar {
-                    ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+                    ToolbarItem(placement: .cancellationAction) { Button("Cancel") { store.retireCreate(); dismiss() } }
                     ToolbarItem(placement: .confirmationAction) {
-                        Button(creating ? "Creating…" : "Create") { creating = true; Task { await store.create(workspaceID: workspace); creating = false; if store.selectedID != nil { dismiss() } } }.disabled(creating || !store.connected)
+                        // The sheet owns the Create operation it issues: it
+                        // dismisses only on the confirmed success of that
+                        // operation. A failed create, an attach-failed and a
+                        // stale answer all leave the sheet open - and a late
+                        // answer cannot close a newer sheet, because only this
+                        // instance reads this operation's result.
+                        Button(creating ? "Creating…" : "Create") { creating = true; Task { let result = await store.create(workspaceID: workspace, presetID: preset); creating = false; if result.dismissesSheet { dismiss() } } }.disabled(creating || !store.connected)
                     }
                 }
         }
     }
     func choice(_ title: String, id: String?) -> some View {
         Button { workspace = id } label: { HStack { Label(title, systemImage: "folder"); Spacer(); if workspace == id { Image(systemName: "checkmark") } } }.foregroundStyle(.primary)
+    }
+    func presetChoice(_ option: PresetPickerOption) -> some View {
+        Button { preset = option.presetID } label: {
+            VStack(alignment: .leading, spacing: 2) {
+                HStack {
+                    Label(option.title + (option.isDefault && option.presetID != nil ? " · default" : ""), systemImage: "slider.horizontal.3")
+                    Spacer()
+                    if preset == option.presetID { Image(systemName: "checkmark") }
+                }
+                if let reason = option.reason { Text(reason).font(.caption).foregroundStyle(.secondary) }
+            }
+        }.disabled(!option.selectable).foregroundStyle(.primary)
     }
 }
 
@@ -233,7 +263,7 @@ struct DesktopPaneView: View {
         }
             .sheet(isPresented: $connection) { ConnectionView() }
             .sheet(isPresented: $appearance) { AppearanceView() }
-            .sheet(isPresented: $newTask, onDismiss: { store.focusNewSessionComposer() }) { NewTaskView() }
+            .sheet(isPresented: $newTask, onDismiss: { store.retireCreate(); store.focusNewSessionComposer() }) { NewTaskView() }
             .task(id: store.connected) {
                 guard store.connected, store.openDefaultTaskWhenConnected else { return }
                 store.openDefaultTaskWhenConnected = false

@@ -81,7 +81,7 @@ final class NativeSink: @unchecked Sendable {
             let events = try history().filter { $0.op != "workspaceAction" && $0.op != "approval" }
             compaction = events.last(where: { $0.op == "compaction" })?.compaction
             peer.replay((opened.map { [$0] } ?? []) + events + [NativeEvent(op: "synced", session: metadata.id, sequence: sequence)])
-        } catch { peer.send(NativeEvent(op: "error", text: "Cannot restore session: \(error)")) }
+        } catch { peer.send(NativeEvent(op: "error", session: metadata.id, text: "Cannot restore session: \(error)")) }
     }
     @discardableResult func send(_ event: NativeEvent) -> Bool {
         lock.lock(); defer { lock.unlock() }
@@ -563,10 +563,26 @@ actor NativeHost {
         peer.connection.receiveMessage { data, _, _, error in
             Task {
                 if error != nil || data == nil { await self.remove(peer); return }
-                do {
-                    let command = try JSONDecoder().decode(NativeCommand.self, from: data!)
-                    try await self.handle(command, peer: peer)
-                } catch { peer.send(NativeEvent(op: "error", text: String(describing: error))) }
+                let command: NativeCommand
+                do { command = try JSONDecoder().decode(NativeCommand.self, from: data!) }
+                catch {
+                    // An undecodable frame names no session: a host-wide error.
+                    peer.send(NativeEvent(op: "error", text: String(describing: error)))
+                    await self.receiveIfPresent(peer)
+                    return
+                }
+                do { try await self.handle(command, peer: peer) }
+                catch {
+                    // A rejected open is the host's decision on the session it
+                    // tried to open: scope the error to that session, so the
+                    // client correlates it to the create that issued the open.
+                    // Every other failure stays host-wide.
+                    if command.op == "open", let session = command.session {
+                        peer.send(NativeEvent(op: "error", session: session, text: String(describing: error)))
+                    } else {
+                        peer.send(NativeEvent(op: "error", text: String(describing: error)))
+                    }
+                }
                 await self.receiveIfPresent(peer)
             }
         }
