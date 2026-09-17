@@ -17,3 +17,7 @@ xcrun swiftc -parse-as-library PocketDSH/HarnessProtocol.swift PocketDSH/Harness
 .build/checks/native-context-checks
 xcrun swiftc -parse-as-library Shared/NativeWire.swift Tests/NativeQueueChecks.swift -o .build/checks/native-queue-checks
 .build/checks/native-queue-checks
+# Compile the opt-in isolated host/restart receipt driver and run both the CLI
+# and the real host/WebSocket phases against the freshly built debug harness.
+xcrun swiftc -parse-as-library Shared/NativeWire.swift Tests/NativeQueueReceiptChecks.swift -o .build/checks/native-queue-receipt
+python3 scripts/probe-native-queue.py --binary NativeHarness/.build/debug/harness --client .build/checks/native-queue-receipt
