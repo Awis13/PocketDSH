@@ -2,7 +2,7 @@ import Foundation
 
 /// One session transport shared by chat and terminal presentations.
 @MainActor
-final class NativeChatConnection {
+class NativeChatConnection {
     var onEvent: ((NativeEvent) -> Void)?
     var onFailure: ((String) -> Void)?
     private var socket: URLSessionWebSocketTask?

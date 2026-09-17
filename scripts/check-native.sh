@@ -3,6 +3,10 @@ set -eu
 cd "$(dirname "$0")/.."
 mkdir -p .build/checks
 swift test --package-path NativeHarness --jobs 4
+# swift test does not link the executable product; build it explicitly so the
+# signal probe always runs against a fresh NativeHarness/.build/debug/harness.
+swift build --package-path NativeHarness --product harness --jobs 2
+python3 scripts/probe-native-host-signals.py --binary NativeHarness/.build/debug/harness
 xcrun swiftc -parse-as-library Shared/NativeWire.swift PocketDSH/HarnessProtocol.swift PocketDSH/ShellBlockInteraction.swift Tests/ShellBlockChecks.swift -o .build/checks/shell-block-checks
 .build/checks/shell-block-checks
 xcrun swiftc -parse-as-library PocketDSH/HarnessProtocol.swift PocketDSH/HarnessAPI.swift Shared/NativeWire.swift PocketDSH/ShellBlockInteraction.swift PocketDSH/NativeChatConnection.swift PocketDSH/TerminalPresentation.swift PocketDSH/PaneFocusNavigator.swift Tests/NativeChatChecks.swift -o .build/checks/native-chat-checks
@@ -13,3 +17,7 @@ xcrun swiftc -parse-as-library PocketDSH/HarnessProtocol.swift PocketDSH/Harness
 .build/checks/native-context-checks
 xcrun swiftc -parse-as-library Shared/NativeWire.swift Tests/NativeQueueChecks.swift -o .build/checks/native-queue-checks
 .build/checks/native-queue-checks
+# Compile the opt-in isolated host/restart receipt driver and run both the CLI
+# and the real host/WebSocket phases against the freshly built debug harness.
+xcrun swiftc -parse-as-library Shared/NativeWire.swift Tests/NativeQueueReceiptChecks.swift -o .build/checks/native-queue-receipt
+python3 scripts/probe-native-queue.py --binary NativeHarness/.build/debug/harness --client .build/checks/native-queue-receipt

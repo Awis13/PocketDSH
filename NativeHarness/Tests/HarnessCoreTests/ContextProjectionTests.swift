@@ -65,8 +65,42 @@ import CSQLite
             do { try await store.bindWorkspace("/different", session: "s"); XCTFail("Migration must preserve workspace binding") }
             catch HarnessError.invalid { }
         }
-        XCTAssertEqual(try sql(path, "PRAGMA user_version"), [["2"]])
+        XCTAssertEqual(try sql(path, "PRAGMA user_version"), [["3"]])
+        XCTAssertEqual(try sql(path, "SELECT name FROM sqlite_master WHERE type='table' AND name='queue_operations'").count, 1)
         XCTAssertEqual(try sql(path, "SELECT seq,session,body FROM events ORDER BY seq"), before)
+    }
+
+    func testVersionTwoMigrationAddsQueueReceiptsAndPreservesInstalledRows() async throws {
+        let path = try path()
+        // Build a faithful v2 store by hand: the pre-v3 schema stamped at 2.
+        try sql(path, "CREATE TABLE events(seq INTEGER PRIMARY KEY AUTOINCREMENT, session TEXT NOT NULL, body TEXT NOT NULL)")
+        try sql(path, "CREATE TABLE sessions(id TEXT PRIMARY KEY, workspace TEXT NOT NULL)")
+        try sql(path, "CREATE TABLE commands(seq INTEGER PRIMARY KEY AUTOINCREMENT, session TEXT NOT NULL, id TEXT NOT NULL, prompt TEXT NOT NULL, mode TEXT NOT NULL, state TEXT NOT NULL, UNIQUE(session,id))")
+        try sql(path, "CREATE TABLE context_state(session TEXT PRIMARY KEY, version INTEGER NOT NULL CHECK(version >= 0), projection TEXT)")
+        try sql(path, "CREATE TABLE context_operations(session TEXT NOT NULL, id TEXT NOT NULL, receipt TEXT NOT NULL, fingerprint TEXT NOT NULL, PRIMARY KEY(session,id))")
+        try sql(path, "INSERT INTO commands(session,id,prompt,mode,state) VALUES ('s','legacy','keep pending','queue','pending')")
+        try sql(path, "INSERT INTO context_operations(session,id,receipt,fingerprint) VALUES ('s','op','{\"operationID\":\"op\",\"state\":\"completed\",\"summaryRequests\":0}','fp')")
+        try sql(path, "INSERT INTO events(session,body) VALUES ('s','{\"kind\":\"message\",\"message\":{\"role\":\"user\",\"content\":\"hello\",\"calls\":[]}}')")
+        try sql(path, "PRAGMA user_version=2")
+        let store = try EventStore(path: path)
+        XCTAssertEqual(try sql(path, "PRAGMA user_version"), [["3"]])
+        XCTAssertEqual(try sql(path, "SELECT name FROM sqlite_master WHERE type='table' AND name='queue_operations'").count, 1)
+        let pending = try await store.pending(session: "s")
+        let receiptState = try await store.compactionReceipt(session: "s", operationID: "op")?.state
+        let contents = try await store.load(session: "s").compactMap(\.message).map(\.content)
+        XCTAssertEqual(pending.map(\.id), ["legacy"])
+        XCTAssertEqual(receiptState, .completed)
+        XCTAssertEqual(contents, ["hello"])
+    }
+
+    func testFutureVersionFourIsRefusedWithoutChangingIt() throws {
+        let path = try path()
+        try sql(path, "PRAGMA user_version=4")
+        XCTAssertThrowsError(try EventStore(path: path)) { error in
+            XCTAssertTrue(String(describing: error).contains("schema version: 4"))
+        }
+        XCTAssertEqual(try sql(path, "PRAGMA user_version"), [["4"]])
+        XCTAssertEqual(try sql(path, "SELECT name FROM sqlite_master WHERE type='table'"), [])
     }
 
     func testFutureDatabaseSchemaRefusesWithoutChangingIt() throws {

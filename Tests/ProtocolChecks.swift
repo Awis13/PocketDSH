@@ -134,6 +134,167 @@ import ImageIO
         for invalid in ["http://example.com", "https://u:p@mac.ts.net", "file:///tmp", "https://mac.ts.net/path"] {
             do { _ = try HarnessAPI.parse(invalid); fatalError("Accepted invalid endpoint") } catch {}
         }
+
+        // ------------------------------------------------------------------
+        // DSH RPC error contract (PARITY-2B B1).
+        // server-response.result.error carries a ConnectionRpcFailure
+        // {code, message, details}. The production rpc() must preserve all
+        // three on the thrown LocalizedError while the display stays the
+        // plain message. The scenarios drive the real rpc() against a canned
+        // local HTTP server keyed by request path, so the wire envelope,
+        // status handling and decodeWire run unchanged.
+        // ------------------------------------------------------------------
+        struct CannedWire { let status: Int; let contentType: String; let body: Data }
+        final class CannedHTTP: @unchecked Sendable {
+            let port: Int
+            private let listenFD: Int32
+            private let queue = DispatchQueue(label: "pocket.checks.canned-http")
+            private let canned: [String: CannedWire]
+            init(_ canned: [String: CannedWire]) throws {
+                self.canned = canned
+                let fd = socket(AF_INET, SOCK_STREAM, 0)
+                guard fd >= 0 else { throw HarnessError(message: "canned HTTP: socket() failed") }
+                var reuse: Int32 = 1
+                _ = setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &reuse, socklen_t(MemoryLayout<Int32>.size))
+                var addr = sockaddr_in()
+                addr.sin_family = sa_family_t(AF_INET)
+                addr.sin_port = 0
+                addr.sin_addr = in_addr(s_addr: inet_addr("127.0.0.1"))
+                let bound = withUnsafePointer(to: &addr) {
+                    $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) }
+                }
+                guard bound == 0 else { throw HarnessError(message: "canned HTTP: bind() failed") }
+                var actual = sockaddr_in()
+                var len = socklen_t(MemoryLayout<sockaddr_in>.size)
+                let named = withUnsafeMutablePointer(to: &actual) {
+                    $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { getsockname(fd, $0, &len) }
+                }
+                guard named == 0 else { throw HarnessError(message: "canned HTTP: getsockname() failed") }
+                port = Int(UInt16(bigEndian: actual.sin_port))
+                guard listen(fd, 8) == 0 else { throw HarnessError(message: "canned HTTP: listen() failed") }
+                listenFD = fd
+                queue.async { self.acceptLoop() }
+            }
+            private func acceptLoop() {
+                while true {
+                    let client = accept(listenFD, nil, nil)
+                    guard client >= 0 else { break }
+                    serve(client)
+                }
+            }
+            private func serve(_ client: Int32) {
+                defer { close(client) }
+                var buf = Data()
+                var chunk = [UInt8](repeating: 0, count: 8192)
+                var headerEnd: Int?
+                var bodyLength = 0
+                while true {
+                    let n = recv(client, &chunk, chunk.count, 0)
+                    guard n > 0 else { return }
+                    buf.append(contentsOf: chunk[0..<Int(n)])
+                    if headerEnd == nil, let r = buf.range(of: Data("\r\n\r\n".utf8)) {
+                        headerEnd = r.upperBound
+                        bodyLength = String(decoding: buf[0..<r.upperBound], as: UTF8.self)
+                            .components(separatedBy: "\r\n")
+                            .compactMap { line -> Int? in
+                                let parts = line.components(separatedBy: ":")
+                                guard parts.count >= 2, parts[0].trimmingCharacters(in: .whitespaces).lowercased() == "content-length" else { return nil }
+                                return Int(parts.dropFirst().joined(separator: ":").trimmingCharacters(in: .whitespaces))
+                            }.first ?? 0
+                    }
+                    if let end = headerEnd, buf.count >= end + bodyLength { break }
+                }
+                let head = String(decoding: buf[0..<(headerEnd ?? 0)], as: UTF8.self)
+                let path = head.split(separator: "\n").first.flatMap {
+                    $0.trimmingCharacters(in: .whitespacesAndNewlines).split(separator: " ").dropFirst().first
+                }.map(String.init) ?? ""
+                let wire = canned[path] ?? CannedWire(status: 500, contentType: "application/json", body: Data("{}".utf8))
+                let reason: String
+                switch wire.status { case 200: reason = "OK"; case 401: reason = "Unauthorized"; default: reason = "Internal Server Error" }
+                var out = Data()
+                out += Data("HTTP/1.1 \(wire.status) \(reason)\r\n".utf8)
+                out += Data("Content-Type: \(wire.contentType)\r\n".utf8)
+                out += Data("Content-Length: \(wire.body.count)\r\n".utf8)
+                out += Data("Connection: close\r\n\r\n".utf8)
+                out += wire.body
+                out.withUnsafeBytes { _ = send(client, $0.baseAddress, $0.count, 0) }
+            }
+        }
+        struct ScenarioFailure: Error { let step: String }
+        func expectRPCFailure(_ error: HarnessError, scenario: String, code: String?, message: String, details: JSON) throws {
+            guard error.code == code else { throw ScenarioFailure(step: "\(scenario): code is \(String(describing: error.code)), want \(String(describing: code))") }
+            guard error.message == message else { throw ScenarioFailure(step: "\(scenario): message is \(error.message.debugDescription)") }
+            guard error.details == details else { throw ScenarioFailure(step: "\(scenario): details are \(error.details.pretty)") }
+            // Existing presentation: the UI sees exactly the plain server
+            // message, or the previous empty text when the server sends none.
+            guard error.errorDescription == message, error.localizedDescription == message else { throw ScenarioFailure(step: "\(scenario): display drifted from the plain message") }
+        }
+        let server = try CannedHTTP([
+            "/api/session/create": CannedWire(status: 200, contentType: "application/json", body: Data(#"{"type":"server-response","rpcId":"r1","result":{"ok":true,"value":{"sessionId":"s-1"}}}"#.utf8)),
+            "/api/agentPresets/select": CannedWire(status: 200, contentType: "application/json", body: Data(#"{"type":"server-response","rpcId":"r2","result":{"ok":false,"error":{"code":"agent-preset/locked","message":"The agent preset cannot be switched after the first turn.","details":{"sessionId":"s-1","agentPreset":"ptc"}}}}"#.utf8)),
+            "/api/agentPresets/list": CannedWire(status: 200, contentType: "application/json", body: Data(#"{"type":"server-response","rpcId":"r3","result":{"ok":false,"error":{"code":"parity/tests/unknown-code","message":"Unexpected server shape.","details":{"depth":2}}}}"#.utf8)),
+            "/api/agentPresets/refresh": CannedWire(status: 200, contentType: "application/json", body: Data(#"{"type":"server-response","rpcId":"r4","result":{"ok":false,"error":{"code":"agent-preset/not-found","details":{"agentPreset":"ptc","available":["default"]}}}}"#.utf8)),
+            "/api/agentPresets/validate": CannedWire(status: 200, contentType: "application/json", body: Data(#"{"type":"server-response","rpcId":"r5","result":{"ok":false,"error":{"code":"agent-preset/invalid","message":"The agent preset is not a string."}}}"#.utf8)),
+            "/api/agentPresets/expired": CannedWire(status: 401, contentType: "application/json", body: Data(#"{"result":{"ok":false}}"#.utf8)),
+            "/api/agentPresets/down": CannedWire(status: 500, contentType: "text/html", body: Data("<html>boom</html>".utf8)),
+            "/api/agentPresets/malformed": CannedWire(status: 200, contentType: "text/plain", body: Data("not json".utf8)),
+        ])
+        let wireAPI = HarnessAPI(base: URL(string: "http://127.0.0.1:\(server.port)")!)
+        // 1 · success: result.value passes through unchanged.
+        let created = try await wireAPI.rpc("session/create")
+        assert(created["sessionId"].string == "s-1", "success must return result.value")
+        // 2 · known code: code, message and the raw JSON details survive.
+        do { _ = try await wireAPI.rpc("agentPresets/select"); fatalError("locked error must throw") }
+        catch let e as HarnessError {
+            try expectRPCFailure(e, scenario: "known code", code: "agent-preset/locked",
+                                 message: "The agent preset cannot be switched after the first turn.",
+                                 details: json(#"{"sessionId":"s-1","agentPreset":"ptc"}"#))
+        }
+        // 3 · unknown code: preserved verbatim; the client keeps no registry.
+        do { _ = try await wireAPI.rpc("agentPresets/list"); fatalError("unknown-code error must throw") }
+        catch let e as HarnessError {
+            try expectRPCFailure(e, scenario: "unknown code", code: "parity/tests/unknown-code",
+                                 message: "Unexpected server shape.",
+                                 details: json(#"{"depth":2}"#))
+        }
+        // 4 · missing message: the existing display stays the previous empty text.
+        do { _ = try await wireAPI.rpc("agentPresets/refresh"); fatalError("missing-message error must throw") }
+        catch let e as HarnessError {
+            try expectRPCFailure(e, scenario: "missing message", code: "agent-preset/not-found",
+                                 message: "",
+                                 details: json(#"{"agentPreset":"ptc","available":["default"]}"#))
+        }
+        // 5 · missing details: raw JSON .null, message display unchanged.
+        do { _ = try await wireAPI.rpc("agentPresets/validate"); fatalError("missing-details error must throw") }
+        catch let e as HarnessError {
+            try expectRPCFailure(e, scenario: "missing details", code: "agent-preset/invalid",
+                                 message: "The agent preset is not a string.",
+                                 details: .null)
+        }
+        // 6 · 401: the existing auth text is unchanged.
+        do { _ = try await wireAPI.rpc("agentPresets/expired"); fatalError("401 must throw") }
+        catch let e as HarnessError { assert(e.message == "Sign in again with a fresh DSH launch URL in Connection settings.", "401 text drifted") }
+        // 7 · non-200: the existing generic HTTP text is unchanged and untyped.
+        do { _ = try await wireAPI.rpc("agentPresets/down"); fatalError("500 must throw") }
+        catch let e as HarnessError { assert(e.message == "DSH: HTTP 500" && e.code == nil && e.details == .null, "500 text or shape drifted") }
+        // 8 · malformed body: the existing invalid-response text is unchanged.
+        do { _ = try await wireAPI.rpc("agentPresets/malformed"); fatalError("malformed body must throw") }
+        catch let e as HarnessError { assert(e.message == "Invalid DSH response for agentPresets/malformed: text/plain, 8 bytes (HTTP 200).", "malformed text drifted") }
+        // 9 · broken variant: the pre-B1 decoder kept only the message (the
+        // old rpc() line). It compiles and the same battery must reject it,
+        // so the scenarios above fail on the regression instead of passing.
+        let oldEnvelope = json(#"{"type":"server-response","rpcId":"r2","result":{"ok":false,"error":{"code":"agent-preset/locked","message":"The agent preset cannot be switched after the first turn.","details":{"sessionId":"s-1","agentPreset":"ptc"}}}}"#)
+        let broken = HarnessError(message: oldEnvelope["result"]["error"]["message"].string)
+        do {
+            try expectRPCFailure(broken, scenario: "pre-fix decoder", code: "agent-preset/locked",
+                                 message: "The agent preset cannot be switched after the first turn.",
+                                 details: json(#"{"sessionId":"s-1","agentPreset":"ptc"}"#))
+            fatalError("the pre-fix decoder passed the preserved-field battery")
+        } catch is ScenarioFailure {
+            // expected: the battery discriminates the old decoder
+        }
+        print("PASS: DSH RPC error contract - success value, known/unknown code, missing message/details, plain-message display, transport text, pre-fix decoder sensitivity")
+
         print("PASS: packed chunks, final settlement, duplicate suppression, sequence gap, human-source filtering, extensible JSON, login parsing and endpoint constraints")
     }
 }
