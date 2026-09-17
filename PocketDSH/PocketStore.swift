@@ -269,8 +269,11 @@ final class PocketStore: ObservableObject {
     private var controlError: (operation: SessionControlOperation, message: String)?
     /// The newest agentPresets/list pull this store has issued. A pull that
     /// answers after a newer pull on the same connection belongs to no one:
-    /// the picker keeps the roster the latest request fetched.
-    private var presetRosterPull = 0
+    /// the picker keeps the roster the latest request fetched. A control
+    /// question frozen on an older pull is stale the moment a newer one
+    /// starts: the capability facts it read no longer name the live roster,
+    /// so the question is retired with the seat it held.
+    private var presetRosterPull = 0 { didSet { retireStaleControlQuestion() } }
     /// The preset roster as agentPresets/list served it on the live
     /// connection. The picker re-pulls it on open, so it is never a cache.
     @Published private(set) var presetRoster: AgentPresetRosterState = .missing
@@ -546,7 +549,7 @@ final class PocketStore: ObservableObject {
                 // question is dropped on a carrier failure as well as on a teardown
                 // - a reopened socket must not resurrect an action the user has not
                 // answered.
-                self.confirmationLifecycle.carrierFailed(); self.accessConfirmation = nil
+                self.confirmationLifecycle.carrierFailed(); self.clearAccessConfirmation()
                 self.error = "Connection interrupted. " + error.localizedDescription
                 self.connectionDiagnostic("websocket-failed", error: error, details: ["closeCode": closeCode, "attempt": attempt.index])
             } onFinish: { [weak self] in
@@ -618,7 +621,7 @@ final class PocketStore: ObservableObject {
                 // client id: an escalation question asked on the previous one is
                 // no longer answerable, so it is dropped before anything can be
                 // dispatched against the new stream.
-                confirmationLifecycle.attemptReady(); accessConfirmation = nil
+                confirmationLifecycle.attemptReady(); clearAccessConfirmation()
                 // The reference client synthesizes `connection/reset` locally when the
                 // transport (re)connects (dsh-api-gateway client.js:1433), so every
                 // cached catalog is suspect; the directory drops and prewarms them.
@@ -691,8 +694,11 @@ final class PocketStore: ObservableObject {
     }
     /// Fold a baseline block into this session's store. A control baseline
     /// replaces the process state the Host lost, so rows beyond its cursor drop
-    /// before the new values land; a history snapshot is a plain seed.
-    private func applyProjection(_ sid: String, p: JSON, replacement: Bool = false) {
+    /// before the new values land; a history snapshot is a plain seed. The fold
+    /// is the production seam a baseline removal takes, so it retires a
+    /// control question whose capability the new values dropped. Internal,
+    /// not private, so the offline checks fold through this exact path.
+    func applyProjection(_ sid: String, p: JSON, replacement: Bool = false) {
         let baseline = ProjectionBaseline(p)
         var store = projectionStores[sid] ?? SessionProjectionStore()
         let previous = store.rows
@@ -701,6 +707,7 @@ final class PocketStore: ObservableObject {
         projectionStores[sid] = store
         for (key, row) in store.rows where previous[key] != row { patchProjection(sid, key: key, value: row.value) }
         for key in previous.keys where store.rows[key] == nil { dropProjection(sid, key: key) }
+        retireStaleControlQuestion()
     }
     /// Fold one finished projection frame. The store decides staleness: an
     /// equal or lower watermark changes nothing, and the raw container only
@@ -1879,6 +1886,23 @@ final class PocketStore: ObservableObject {
         // outcome and no error over the session that replaced it.
         guard activeControl === op else { return }
         switch outcome {
+        case .routedToFullAccess:
+            // C2: the escalation is a question, not a line. The dispatch
+            // settled the decision without a wire and released the controls
+            // seat; the chip keeps the store seat while the shared question
+            // is open - the confirmation, not the dispatch, is the action's
+            // continuation.
+            guard requestFullAccess(.control(op)) else {
+                // The gate already shows another question: this click is
+                // refused with the routing outcome it published, and the seat
+                // it took is freed - never held for a question that will not
+                // open.
+                controlOutcome = outcome
+                if activeControl === op { activeControl = nil }
+                return
+            }
+            controlOutcome = outcome
+            return
         case .stale:
             // The identity moved: the answer is discarded, and neither the
             // outcome nor the error is written over the session that
@@ -1957,16 +1981,25 @@ final class PocketStore: ObservableObject {
     /// Ask the user to confirm one access escalation. The pending question is
     /// bound to the action's own snapshot, so the composer can keep being edited
     /// while it is on screen, and a second request while one is unanswered is
-    /// refused instead of replacing it.
-    func requestFullAccess(_ target: FullAccessGate.Target) {
-        guard let pending = fullAccessGate.request(target) else { return }
+    /// refused instead of replacing it. The refusal is reported to the caller:
+    /// a control chip that is refused must free the seat it took.
+    @discardableResult
+    func requestFullAccess(_ target: FullAccessGate.Target) -> Bool {
+        guard let pending = fullAccessGate.request(target) else { return false }
         accessConfirmation = pending
+        return true
     }
 
     /// The user declined the pending escalation: nothing is sent, and the
     /// composer keeps exactly the draft and attachments it held.
     func cancelFullAccess(_ id: UUID) {
         guard accessConfirmation?.id == id, fullAccessGate.cancel(id: id) else { return }
+        // The control question's action seat dies with its question: the next
+        // chip click takes a fresh freeze, never a chair already occupied.
+        if case .control(let op)? = accessConfirmation?.target, activeControl === op {
+            activeControl = nil
+            controlOutcome = nil
+        }
         accessConfirmation = nil
     }
 
@@ -1978,6 +2011,10 @@ final class PocketStore: ObservableObject {
         // answer arriving for a replaced or withdrawn confirmation must not
         // consume it on the user's behalf.
         guard accessConfirmation?.id == id else { return }
+        // The target is read before the question is withdrawn: a rejected
+        // answer still owes its control action the seat and the outcome it
+        // held.
+        let target = accessConfirmation!.target
         accessConfirmation = nil
         let live = connected ? liveConnectionIdentity : nil
         let outcome = await fullAccessGate.confirm(id: id, live: live, busy: submitting, command: { [weak self] snapshot, descriptor in
@@ -1990,19 +2027,107 @@ final class PocketStore: ObservableObject {
             self.fullAccessExecuting = true
             defer { self.fullAccessExecuting = false }
             if await self.enableFullAccess(for: item) { await self.answer(item, value: .string("allowed-once")) }
+        }, control: { [weak self] op in
+            guard let self else { return }
+            await self.confirmControlEscalation(op)
         })
         // The answer found no action to run - the session or the connection moved
         // under the question, or another send owns the store - so nothing was
         // enabled or sent. Saying so beats a dialog that closes as if it had
         // worked.
-        if outcome == .rejected { error = "Full access was not enabled: the session or the connection changed. Send it again." }
+        if outcome == .rejected {
+            // A refused control answer still owes its action the seat and the
+            // routing outcome it published when the question opened.
+            if case .control(let op) = target, activeControl === op {
+                activeControl = nil
+                controlOutcome = nil
+            }
+            error = "Full access was not enabled: the session or the connection changed. Send it again."
+        }
+    }
+
+    /// The frozen `/permission` leg behind a confirmed control question. It
+    /// re-checks the full freeze before the wire - the same liveness the line
+    /// dispatch re-checks at its answer boundary - and sends exactly the line
+    /// the click froze: the session it named, and no draft, no images, no
+    /// cleanup. The composer keeps everything it was editing while the
+    /// question was on screen.
+    private func confirmControlEscalation(_ op: SessionControlOperation) async {
+        guard isLiveControl(op), !submitting, connected, let api = self.api else {
+            if activeControl === op { activeControl = nil; controlOutcome = nil }
+            return
+        }
+        submitting = true
+        defer { submitting = false }
+        do {
+            let value = try await api.rpc("commands/execute",
+                                          args: commandExecuteArguments(agentId: op.context.sessionID,
+                                                                       line: FullAccessPolicy.commandLine,
+                                                                       submittedAttachments: []))
+            // The answer boundary of the frozen action: a seat a newer action
+            // took is not this action's to settle, and an identity that moved
+            // under the wire discards the answer instead of landing it.
+            guard activeControl === op else { return }
+            guard isLiveControl(op) else {
+                activeControl = nil
+                controlOutcome = nil
+                return
+            }
+            let execution = CommandExecution(value)
+            if execution.result.isSuccess {
+                if let owned = controlError, error == owned.message {
+                    error = nil
+                    controlError = nil
+                }
+                controlOutcome = .sent(line: FullAccessPolicy.commandLine)
+            } else {
+                let message = value == .null
+                    ? SessionControls.unknownCommandMessage(line: FullAccessPolicy.commandLine)
+                    : execution.result.isError
+                        ? execution.result.text ?? SessionControls.commandFailedMessage(line: FullAccessPolicy.commandLine)
+                        : SessionControls.malformedResultMessage(line: FullAccessPolicy.commandLine)
+                controlOutcome = .failed(message)
+                error = message
+                controlError = (operation: op, message: message)
+            }
+        } catch {
+            guard activeControl === op else { return }
+            let message = error.localizedDescription
+            controlOutcome = .failed(message)
+            self.error = message
+            controlError = (operation: op, message: message)
+        }
+        if activeControl === op { activeControl = nil }
+    }
+
+    /// A control question is stale when the capability facts it was frozen
+    /// from move: a newer agentPresets/list pull (the create sheet re-asked
+    /// the roster), or a baseline fold that dropped the `permissions`
+    /// projection the click read. The question is retired with the seat it
+    /// held - nothing else of the store is touched, and a late confirm of the
+    /// retired id finds no question to answer.
+    private func retireStaleControlQuestion() {
+        guard case .control(let op)? = accessConfirmation?.target else { return }
+        let rosterMoved = presetRosterPull != op.context.presetGeneration
+        let capabilityGone = projectionStores[op.context.sessionID]?.permissions == nil
+        guard rosterMoved || capabilityGone else { return }
+        confirmationLifecycle.reset()
+        accessConfirmation = nil
+        if activeControl === op { activeControl = nil }
+        controlOutcome = nil
     }
 
     /// Drop an unanswered escalation question without a decision. Its action
     /// names one session and one connection generation, and neither survives the
     /// question: after a switch, a reconnect or a teardown there is nothing left
-    /// for the user to be answering.
+    /// for the user to be answering. A control question carries its action's
+    /// seat with it: the drop releases the seat and the routing outcome the
+    /// question published.
     private func clearAccessConfirmation() {
+        if case .control(let op)? = accessConfirmation?.target {
+            if activeControl === op { activeControl = nil }
+            controlOutcome = nil
+        }
         confirmationLifecycle.reset()
         accessConfirmation = nil
     }

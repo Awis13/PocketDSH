@@ -61,13 +61,16 @@ final class RecordingTransport {
         Interaction(raw: json(#"{"event":"approval/request","eventId":"\#(id)","agentId":"\#(session)","request":{"toolName":"bash"}}"#), clientID: "c1")
     }
     /// Answer one question the way the store answers it: the composer leg is the
-    /// controlled transport, the approval leg is counted.
+    /// controlled transport, the approval leg is counted, and the control leg
+    /// receives the frozen operation it was confirmed with.
     @MainActor
     static func answer(_ gate: FullAccessGate, _ id: UUID, live: LiveConnectionIdentity?, busy: Bool = false,
-                       sent: RecordingTransport, approvals: @escaping () -> Void = {}) async -> FullAccessGate.Outcome {
+                       sent: RecordingTransport, approvals: @escaping () -> Void = {},
+                       control: @MainActor @escaping (SessionControlOperation) async -> Void = { _ in }) async -> FullAccessGate.Outcome {
         await gate.confirm(id: id, live: live, busy: busy,
                            command: { snapshot, descriptor in await sent.execute(snapshot, descriptor) },
-                           approval: { _ in approvals() })
+                           approval: { _ in approvals() },
+                           control: control)
     }
 
     @MainActor
@@ -245,11 +248,13 @@ final class RecordingTransport {
         var approvalRuns = 0
         var composerRuns = 0
         let cancelledCard = await gateH.confirm(id: rowH.id, live: live(), busy: false,
-                                                command: { _, _ in composerRuns += 1 }, approval: { _ in approvalRuns += 1 })
+                                                command: { _, _ in composerRuns += 1 }, approval: { _ in approvalRuns += 1 },
+                                                control: { _ in })
         assert(cancelledCard == .rejected && approvalRuns == 0 && composerRuns == 0, "a cancelled card question runs nothing")
         guard let rowI = gateH.request(.approval(approval("e2"))) else { return assert(false, "the approval request opens the question") }
         let cardOutcome = await gateH.confirm(id: rowI.id, live: live(), busy: true,
-                                              command: { _, _ in composerRuns += 1 }, approval: { _ in approvalRuns += 1 })
+                                              command: { _, _ in composerRuns += 1 }, approval: { _ in approvalRuns += 1 },
+                                              control: { _ in })
         assert(cardOutcome == .dispatched && approvalRuns == 1 && composerRuns == 0,
                "the card's confirmation is not the composer's send and runs exactly the card's leg")
         print("PASS: the approval card asks the same question and runs only its own leg")
@@ -283,5 +288,47 @@ final class RecordingTransport {
                == ComposerDrafts.SendOutcome(liveDraft: "", forgotSavedLine: true))
         assert(untouched.lines["s1"] == "", "the sent line is still cleared when the user did not write again")
         print("PASS: a host fault dispatches once and a new draft survives")
+
+        // 11. The control route shares the single question: one seat for
+        // every route, the frozen operation is the leg's argument, a doubled
+        // confirm runs nothing the second time, and the seat frees for the
+        // next question.
+        let permission = PermissionSelect(json(#"{"options":[{"value":"read-only","name":"Read-only"},{"value":"danger-full-access","name":"Full access"}],"currentValue":"read-only"}"#))
+        let context = SessionControlContext(sessionID: "s1", endpoint: host, generation: UUID(), epoch: UUID(),
+                                            attempt: nil, catalogGeneration: 1, presetGeneration: 0,
+                                            catalog: [permissionRow], permissions: permission, plan: nil)
+        let controlOp = SessionControlOperation(intent: .permission(value: FullAccessPolicy.presetName), context: context)
+        let gateK = FullAccessGate()
+        guard let rowK = gateK.request(.control(controlOp)) else { return assert(false, "the control request opens the question") }
+        assert(rowK.enableLabel == FullAccessPolicy.controlEnableLabel, "the chip's label is its own constant")
+        assert(rowK.enableLabel == FullAccessPolicy.commandEnableLabel, "the chip asks the same question as the composer")
+        assert(rowK.enableLabel != FullAccessPolicy.approvalEnableLabel, "and not the card's wording")
+        assert(gateK.request(.command(composer(draft: "/permission danger-full-access"), permissionRow)) == nil, "the chip's question holds the seat")
+        assert(gateK.request(.approval(approval())) == nil, "and the card's")
+        var controlRuns: [SessionControlOperation] = []
+        let controlOutcome = await answer(gateK, rowK.id, live: live(), sent: RecordingTransport(),
+                                         control: { controlRuns.append($0) })
+        assert(controlOutcome == .dispatched && controlRuns.count == 1 && controlRuns[0] === controlOp,
+               "the control leg runs exactly once with the frozen operation")
+        let doubledControl = await answer(gateK, rowK.id, live: live(), sent: RecordingTransport())
+        assert(doubledControl == .rejected && controlRuns.count == 1, "a doubled confirm runs nothing")
+        guard let rowL = gateK.request(.approval(approval("e3"))) else { return assert(false, "the seat frees after the answer") }
+        assert(gateK.cancel(id: rowL.id))
+        guard gateK.request(.control(controlOp)) != nil else { return assert(false, "a cancelled question frees the seat again") }
+        print("PASS: the control chip shares the gate's single question and its own leg")
+
+        // 12. A busy store refuses the control answer without running its leg,
+        // and the refusal frees the seat like the other routes'.
+        let gateM = FullAccessGate()
+        guard let rowM = gateM.request(.control(controlOp)) else { return assert(false, "the control request opens the question") }
+        let refused = await answer(gateM, rowM.id, live: live(), busy: true, sent: RecordingTransport(),
+                                   control: { controlRuns.append($0) })
+        assert(refused == .rejected && controlRuns.count == 1, "a busy store runs no control leg")
+        guard let rowN = gateM.request(.control(controlOp)) else { return assert(false, "the refused answer frees the seat") }
+        let settled = await answer(gateM, rowN.id, live: live(), sent: RecordingTransport(),
+                                   control: { controlRuns.append($0) })
+        assert(settled == .dispatched && controlRuns.count == 2 && controlRuns[1] === controlOp,
+               "the seat reopens and the leg runs its own frozen operation")
+        print("PASS: a busy store refuses the control answer and frees its seat")
     }
 }

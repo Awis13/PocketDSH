@@ -6,19 +6,35 @@ xcrun swiftc -parse-as-library PocketDSH/HarnessProtocol.swift PocketDSH/Harness
 .build/checks/protocol-checks
 xcrun swiftc -parse-as-library PocketDSH/SavedConnections.swift Tests/SavedConnectionChecks.swift -o .build/checks/connection-checks
 .build/checks/connection-checks
-xcrun swiftc -parse-as-library PocketDSH/HarnessProtocol.swift PocketDSH/HarnessAPI.swift PocketDSH/ImageAttachments.swift PocketDSH/CommandCatalog.swift PocketDSH/ComposerSubmission.swift PocketDSH/FullAccessConfirmation.swift Tests/ComposerSubmissionChecks.swift -o .build/checks/composer-submission-checks
+# The shared confirmation gate now names the control types it carries, so
+# every closure that compiles it compiles the control seam too. The
+# SwiftTerm module and the @main-stripped app entry the closures build are
+# produced here, once, before the first check that needs them.
+ARCH=$(uname -m)
+CATALYST_TARGET="${ARCH}-apple-ios17.0-macabi"
+IOSUPPORT="$(xcrun --sdk macosx --show-sdk-path)/System/iOSSupport"
+xcrun swiftc -target "${CATALYST_TARGET}" -Fsystem "${IOSUPPORT}/System/Library/Frameworks" -module-name SwiftTerm -emit-module -emit-module-path .build/checks/SwiftTerm.swiftmodule -emit-library -o .build/checks/libSwiftTerm.dylib $(find Vendor/SwiftTerm/Sources/SwiftTerm -name "*.swift")
+sed '/^@main$/d' PocketDSH/PocketDSHApp.swift > .build/checks/PocketDSHApp.nomain.swift
+xcrun swiftc -parse-as-library PocketDSH/HarnessProtocol.swift PocketDSH/HarnessAPI.swift PocketDSH/ImageAttachments.swift PocketDSH/CommandCatalog.swift PocketDSH/ComposerSubmission.swift PocketDSH/FullAccessConfirmation.swift PocketDSH/SessionProjection.swift PocketDSH/RemoteStreamConnection.swift PocketDSH/SessionControls.swift Tests/ComposerSubmissionChecks.swift -o .build/checks/composer-submission-checks
 .build/checks/composer-submission-checks
 xcrun swiftc -parse-as-library PocketDSH/HarnessProtocol.swift PocketDSH/SessionProjection.swift Tests/SessionProjectionChecks.swift -o .build/checks/session-projection-checks
 .build/checks/session-projection-checks
 xcrun swiftc -parse-as-library PocketDSH/HarnessProtocol.swift PocketDSH/CommandCatalog.swift Tests/CommandCatalogChecks.swift -o .build/checks/command-catalog-checks
 .build/checks/command-catalog-checks
-xcrun swiftc -parse-as-library PocketDSH/HarnessProtocol.swift PocketDSH/HarnessAPI.swift PocketDSH/ImageAttachments.swift PocketDSH/CommandCatalog.swift PocketDSH/ComposerSubmission.swift PocketDSH/FullAccessConfirmation.swift Tests/FullAccessConfirmationChecks.swift -o .build/checks/full-access-checks
+xcrun swiftc -parse-as-library PocketDSH/HarnessProtocol.swift PocketDSH/HarnessAPI.swift PocketDSH/ImageAttachments.swift PocketDSH/CommandCatalog.swift PocketDSH/ComposerSubmission.swift PocketDSH/FullAccessConfirmation.swift PocketDSH/SessionProjection.swift PocketDSH/RemoteStreamConnection.swift PocketDSH/SessionControls.swift Tests/FullAccessConfirmationChecks.swift -o .build/checks/full-access-checks
+.build/checks/full-access-checks
+# The full-access check drives the production PocketStore the same way:
+# its selectPermission, requestFullAccess, confirmFullAccess and
+# cancelFullAccess paths run unchanged on the parked transport, so the
+# shared gate, the seat ownership and every invalidation edge are
+# exercised on the production objects.
+xcrun swiftc -target "${CATALYST_TARGET}" -Fsystem "${IOSUPPORT}/System/Library/Frameworks" -parse-as-library -I .build/checks -L .build/checks -lSwiftTerm -Xlinker -rpath -Xlinker @loader_path $(ls PocketDSH/*.swift | grep -v "PocketDSHApp.swift") .build/checks/PocketDSHApp.nomain.swift Shared/NativeWire.swift Tests/FullAccessConfirmationChecks.swift -o .build/checks/full-access-checks
 .build/checks/full-access-checks
 # The carrier-lifecycle check compiles the real carrier loop and the production
 # confirmation seam together: a pending full-access confirmation is dropped by the
 # carrier's failure and ready edges, so the combined carrier -> confirmation path
 # is exercised, not the two isolated halves.
-xcrun swiftc -parse-as-library PocketDSH/HarnessProtocol.swift PocketDSH/HarnessAPI.swift PocketDSH/ImageAttachments.swift PocketDSH/CommandCatalog.swift PocketDSH/ComposerSubmission.swift PocketDSH/FullAccessConfirmation.swift PocketDSH/RemoteStreamConnection.swift Tests/FullAccessCarrierLifecycleChecks.swift -o .build/checks/full-access-carrier-checks
+xcrun swiftc -target "${CATALYST_TARGET}" -Fsystem "${IOSUPPORT}/System/Library/Frameworks" -parse-as-library -I .build/checks -L .build/checks -lSwiftTerm -Xlinker -rpath -Xlinker @loader_path $(ls PocketDSH/*.swift | grep -v "PocketDSHApp.swift") .build/checks/PocketDSHApp.nomain.swift Shared/NativeWire.swift Tests/FullAccessCarrierLifecycleChecks.swift -o .build/checks/full-access-carrier-checks
 .build/checks/full-access-carrier-checks
 # The routing check compiles no native wire: the raw-input ownership it used to
 # restate is NativeCompactionInfo's, checked by Tests/NativeContextChecks.swift.
@@ -38,11 +54,6 @@ xcrun swiftc -parse-as-library PocketDSH/HarnessProtocol.swift PocketDSH/Harness
 # compiles the closure for Mac Catalyst, where UIKit is available. The @main
 # attribute is stripped from a throwaway copy of the app entry, keeping the
 # check file the single entry point.
-ARCH=$(uname -m)
-CATALYST_TARGET="${ARCH}-apple-ios17.0-macabi"
-IOSUPPORT="$(xcrun --sdk macosx --show-sdk-path)/System/iOSSupport"
-xcrun swiftc -target "${CATALYST_TARGET}" -Fsystem "${IOSUPPORT}/System/Library/Frameworks" -module-name SwiftTerm -emit-module -emit-module-path .build/checks/SwiftTerm.swiftmodule -emit-library -o .build/checks/libSwiftTerm.dylib $(find Vendor/SwiftTerm/Sources/SwiftTerm -name "*.swift")
-sed '/^@main$/d' PocketDSH/PocketDSHApp.swift > .build/checks/PocketDSHApp.nomain.swift
 xcrun swiftc -target "${CATALYST_TARGET}" -Fsystem "${IOSUPPORT}/System/Library/Frameworks" -parse-as-library -I .build/checks -L .build/checks -lSwiftTerm -Xlinker -rpath -Xlinker @loader_path $(ls PocketDSH/*.swift | grep -v "PocketDSHApp.swift") .build/checks/PocketDSHApp.nomain.swift Shared/NativeWire.swift Tests/ModelSelectionChecks.swift -o .build/checks/model-selection-checks
 .build/checks/model-selection-checks
 # The preset-selection check drives the production PocketStore the same way:

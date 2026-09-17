@@ -42,6 +42,10 @@ enum FullAccessPolicy {
     static let commandEnableLabel = "Enable full access"
     /// The approval card's confirmation also decides the request it sits on.
     static let approvalEnableLabel = "Enable and allow this request"
+    /// The control chip's confirmation applies the permission and answers no
+    /// card, so it keeps the command's plain wording: the same question, its
+    /// own button.
+    static let controlEnableLabel = "Enable full access"
 
     /// Whether one composer line asks the Host to raise this session to full
     /// access.
@@ -83,6 +87,10 @@ final class FullAccessGate {
         /// An approval card: the escalation, and then the decision its button was
         /// going to give.
         case approval(Interaction)
+        /// A session control chip that resolved to the escalation: the frozen
+        /// permission switch, applied as the session's own `/permission` line -
+        /// no draft, no attachments, no approval answer.
+        case control(SessionControlOperation)
     }
 
     /// One unanswered confirmation.
@@ -140,9 +148,12 @@ final class FullAccessGate {
     ///     `commands/execute` leg.
     ///   - approval: the approval action's transport - the store's escalation
     ///     and answer legs.
+    ///   - control: the control action's transport - the store's frozen
+    ///     `/permission` leg; its liveness is the store's own re-check.
     func confirm(id: UUID, live: LiveConnectionIdentity?, busy: Bool,
                  command: @MainActor (ComposerSubmission, CommandDescriptor) async -> Void,
-                 approval: @MainActor (Interaction) async -> Void) async -> Outcome {
+                 approval: @MainActor (Interaction) async -> Void,
+                 control: @MainActor (SessionControlOperation) async -> Void) async -> Outcome {
         guard let row = pending, row.id == id else { return .rejected }
         pending = nil
         switch row.target {
@@ -151,6 +162,9 @@ final class FullAccessGate {
             await command(snapshot, descriptor)
         case .approval(let item):
             await approval(item)
+        case .control(let op):
+            guard !busy else { return .rejected }
+            await control(op)
         }
         return .dispatched
     }
@@ -159,6 +173,7 @@ final class FullAccessGate {
         switch target {
         case .command: return FullAccessPolicy.commandEnableLabel
         case .approval: return FullAccessPolicy.approvalEnableLabel
+        case .control: return FullAccessPolicy.controlEnableLabel
         }
     }
 }
