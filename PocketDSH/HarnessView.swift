@@ -407,6 +407,11 @@ struct HarnessView: View {
                     }.disabled(!store.connected || store.switchingPreset || store.selectingModel)
                     .accessibilityLabel(Text("Preset: " + store.presetSwitcherLabel))
                 }
+                // C3: the session's server-owned controls, side by side with
+                // the preset switch: DSH-only, always available while a
+                // session is selected, and the projection's own state - the
+                // menu is its options, the label its current value.
+                SessionControlChips(store: store)
                 Spacer(minLength: 0)
                 Button {
                     terminalInput.toggle()

@@ -69,6 +69,12 @@ xcrun swiftc -target "${CATALYST_TARGET}" -Fsystem "${IOSUPPORT}/System/Library/
 # objects.
 xcrun swiftc -target "${CATALYST_TARGET}" -Fsystem "${IOSUPPORT}/System/Library/Frameworks" -parse-as-library -I .build/checks -L .build/checks -lSwiftTerm -Xlinker -rpath -Xlinker @loader_path $(ls PocketDSH/*.swift | grep -v "PocketDSHApp.swift") .build/checks/PocketDSHApp.nomain.swift Shared/NativeWire.swift Tests/SessionControlChecks.swift -o .build/checks/session-control-checks
 .build/checks/session-control-checks
+# The session-control-surface check (PARITY-2C C3) drives the production
+# store state the composer's chips derive from: the same fold, gate and seat
+# the dispatch freezes, with the production selectPermission, togglePlan,
+# submit, answer and full-access paths on the parked transport behind it.
+xcrun swiftc -target "${CATALYST_TARGET}" -Fsystem "${IOSUPPORT}/System/Library/Frameworks" -parse-as-library -I .build/checks -L .build/checks -lSwiftTerm -Xlinker -rpath -Xlinker @loader_path $(ls PocketDSH/*.swift | grep -v "PocketDSHApp.swift") .build/checks/PocketDSHApp.nomain.swift Shared/NativeWire.swift Tests/SessionControlSurfaceChecks.swift -o .build/checks/session-control-surface-checks
+.build/checks/session-control-surface-checks
 # The build-mac.sh signature validators, tested headless on controlled
 # fixtures: the signed-mode validator must accept a development-signed bundle
 # and reject an ad-hoc one - no Xcode login or provisioning profile needed,
