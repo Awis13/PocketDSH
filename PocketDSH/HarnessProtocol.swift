@@ -1,5 +1,46 @@
 import Foundation
 
+/// The live Remote stream IDs of one carrier, one per logical stream.
+///
+/// A cancelled stream ID is not reusable on the same socket: the gateway
+/// aborts the pump and drops the ID only when that asynchronous pump finishes,
+/// and an `open` for an ID the mux still holds throws, which closes the whole
+/// socket with code 1008 (dsh-api-gateway/lib/index.js:305-320). Every
+/// replacement therefore mints a fresh ID, and a retired ID can never be
+/// matched again - that is what makes a late frame of the replaced stream
+/// harmless instead of a second source of truth for the same UI.
+struct HarnessStreamSet {
+    enum Kind: String, CaseIterable { case events, workspaces, control, conversation }
+
+    private var ids: [Kind: String] = [:]
+
+    subscript(_ kind: Kind) -> String { ids[kind] ?? "" }
+
+    /// The stream one admitted ID names: nil for a retired, unknown or empty
+    /// ID. A literal like `$events` is not an ID this set ever issued.
+    func kind(for id: String) -> Kind? {
+        guard !id.isEmpty else { return nil }
+        return Kind.allCases.first { ids[$0] == id }
+    }
+
+    /// Retire one kind's ID and mint its replacement. Synchronous by contract:
+    /// the caller retires before its first suspension, so a frame that arrives
+    /// while the cancel is still on the wire is already stale.
+    mutating func replace(_ kind: Kind) -> (previous: String?, id: String) {
+        let previous = ids[kind], id = UUID().uuidString
+        ids[kind] = id
+        return (previous, id)
+    }
+
+    /// Retire one kind without a replacement (a deselect or a teardown); nil
+    /// when the kind had no live ID.
+    @discardableResult
+    mutating func retire(_ kind: Kind) -> String? { ids.removeValue(forKey: kind) }
+
+    /// Drop every ID: each socket attempt owns a fresh set.
+    mutating func reset() { ids.removeAll() }
+}
+
 // The rc.1 Remote wire contract is extensible; retain unknown JSON in tool details.
 indirect enum JSON: Codable, Equatable {
     case object([String: JSON]), array([JSON]), string(String), number(Double), bool(Bool), null

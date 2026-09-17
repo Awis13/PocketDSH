@@ -14,36 +14,21 @@ struct HarnessView: View {
     @State private var commandIndex = 0
     @State private var commandsDismissed = false
     @State private var creatingTask = false
-    /// One composer-palette row. A local entry carries no catalog descriptor;
-    /// a row the session's catalog serves carries it, so the run path can tell
-    /// a command that claims an argument from a bare one.
-    private struct CommandSuggestion {
-        var name: String
-        var detail: String
-        var descriptor: CommandDescriptor?
-    }
-    private let localCommands = [("/view", "Switch chat / terminal"), ("/model", "Search models"), ("/new", "New task in default workspace"), ("/compact", "Compact model context")]
+    /// The backend the routing table is asked about. The decision itself lives
+    /// in ComposerCommandRouting and is passed in as this value, so the checks
+    /// can drive both backends without a store or a transport.
+    private var composerBackend: ComposerBackend { store.usesNativeHarness ? .nativeHarness : .dsh }
     private var commandPaletteVisible: Bool {
         !commandsDismissed && store.draft.hasPrefix("/") && !store.draft.contains(where: { $0.isWhitespace })
     }
-    /// The palette rows: the local entries first, then the session's catalog
-    /// snapshot, deduped by name with the local entry winning - /compact is a
-    /// native editor action as well as a host command, and it stays ours.
-    private var commandMatches: [CommandSuggestion] {
+    /// The palette rows for the live draft, straight from the routing table:
+    /// the backend's local entries first, then the session's catalog snapshot,
+    /// deduped by name with the local entry winning. On the DSH backend
+    /// /compact is not a local entry, so the host command's own catalog row is
+    /// what the palette offers - and a cold or failed catalog offers none.
+    private var commandMatches: [ComposerPaletteRow] {
         guard commandPaletteVisible else { return [] }
-        let query = store.draft.lowercased()
-        var rows = localCommands.map { CommandSuggestion(name: $0.0, detail: $0.1, descriptor: nil) }
-        let localNames = Set(rows.map(\.name))
-        for descriptor in store.commandCatalog.sorted(by: { $0.name < $1.name }) {
-            let name = "/" + descriptor.name
-            guard !localNames.contains(name) else { continue }
-            // The reference shows the input hint when the command declares one
-            // (dsh-client-ui-commands client.js:643); the description is the
-            // fallback for a command with no input line.
-            let hint = descriptor.input?.hint ?? ""
-            rows.append(CommandSuggestion(name: name, detail: hint.isEmpty ? descriptor.description : hint, descriptor: descriptor))
-        }
-        return rows.filter { $0.name.hasPrefix(query) }
+        return ComposerCommandRouting.paletteRows(backend: composerBackend, catalog: store.commandCatalog, query: store.draft)
     }
     /// A cold or warming catalog has no rows to render yet; it says so instead
     /// of leaving the palette empty (the native harness has no host catalog).
@@ -55,20 +40,56 @@ struct HarnessView: View {
         case .ready: return nil
         }
     }
-    private func runCommand(_ suggestion: CommandSuggestion) {
+    private func runCommand(_ suggestion: ComposerPaletteRow) {
         guard !creatingTask else { return }
-        switch suggestion.name {
-        case "/compact": Task { await store.compactContext(fromEditor: true) }
-        case "/view": store.draft = ""; terminalInput.toggle(); store.composerFocusRequest = UUID()
-        case "/model":
-            store.draft = ""
-            if store.usesNativeHarness { store.error = "Native Harness uses the model configured on its host: " + store.modelLabel }
-            else { modelPalette = true }
-        case "/new":
-            guard store.connected else { return }
-            store.draft = ""; creatingTask = true
-            Task { await store.createDefaultTask(); creatingTask = false }
-        default:
+        // B3: the pending preset switch owns the composer's command window.
+        // While it is in flight every command action fails closed here -
+        // the local /new, /view and /model and the bare server dispatch
+        // alike, from the palette and the typed line - and the boundary
+        // opens again the moment the switch settles. The typed server line
+        // refuses one hop deeper, on the store's own executeCommand guard,
+        // which reads the same flag.
+        guard store.canDispatchCommands else { return }
+        // One route per line, from the same table the palette was built from:
+        // a local name runs the editor action, and everything else on the DSH
+        // backend is the host's own command path. /compact is local on the
+        // native backend only - on DSH it is the server's command (its catalog
+        // row reaches here with a bare descriptor), so no local branch may
+        // intercept it.
+        switch ComposerCommandRouting.route(line: suggestion.name, backend: composerBackend) {
+        case .local(let local):
+            switch local.name {
+            case "/view": store.draft = ""; terminalInput.toggle(); store.composerFocusRequest = UUID()
+            case "/model":
+                store.draft = ""
+                if store.usesNativeHarness { store.error = "Native Harness uses the model configured on its host: " + store.modelLabel }
+                else { modelPalette = true }
+            case "/new":
+                guard store.connected else { return }
+                store.draft = ""; creatingTask = true
+                Task { await store.createDefaultTask(); creatingTask = false }
+            case "/compact":
+                // The local editor compaction, named explicitly: a future row
+                // added to the table below must not inherit this action by
+                // falling into a default. The route reaches it on the backend
+                // whose table carries the row only, so a DSH /compact line
+                // never arrives here; a host that does not advertise the
+                // capability still refuses in the store.
+                Task { await store.compactContext(fromEditor: true) }
+            default:
+                // Unreachable: every name in the table is cased above and the
+                // route returns rows from that table only, so a new local
+                // command fails closed here instead of running another one's
+                // action.
+                break
+            }
+        case .server:
+            // The store strong-waits the session's catalog before deciding, so
+            // this branch normally arrives with the resolved descriptor. A nil
+            // descriptor is unreachable in practice: the host validates every
+            // catalog name against /^[a-z][a-z0-9_-]*$/u (dsh-commands
+            // lib/index.js:71,143), so a catalog row parses back to itself and
+            // resolves. The guard stays as a fail-closed belt.
             guard let descriptor = suggestion.descriptor else { return }
             // A command that declares an input line claims the composer with
             // its leading token; a bare command runs at once (reference
@@ -79,8 +100,10 @@ struct HarnessView: View {
                 store.composerFocusRequest = UUID()
             } else {
                 store.draft = suggestion.name
-                Task { await store.executeCommand(suggestion.name) }
+                if let submission = store.composerSubmission() { Task { await store.executeCommand(submission) } }
             }
+        case .none:
+            return
         }
     }
     private func moveCommand(_ delta: Int) {
@@ -121,15 +144,19 @@ struct HarnessView: View {
         #endif
     }
     private var canSend: Bool {
-        (!store.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !store.images.isEmpty) && !store.submitting && !store.preparingImages && !store.selectingModel && store.connected && store.selectedID != nil
+        (!store.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !store.images.isEmpty) && !store.submitting && !store.preparingImages && !store.selectingModel && !store.switchingPreset && store.connected && store.selectedID != nil
     }
     private func sendPrompt() {
         if !commandMatches.isEmpty {
             runCommand(commandMatches[min(commandIndex, commandMatches.count - 1)]); return
         }
         let command = store.draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        if let local = localCommands.first(where: { $0.0 == command }) {
-            runCommand(CommandSuggestion(name: local.0, detail: local.1, descriptor: nil)); return
+        // A typed line runs through the same resolver the palette row does, so
+        // the backend decision cannot diverge between the two entry points. A
+        // local row runs as the editor action it is; there is no
+        // backend-independent /compact branch here any more.
+        if case .local(let local) = ComposerCommandRouting.route(line: command, backend: composerBackend) {
+            runCommand(ComposerPaletteRow(name: local.name, detail: local.detail, descriptor: nil)); return
         }
         // A slash line that parses as a command always takes the command path:
         // the store strong-waits the session's catalog - repulling it when the
@@ -137,7 +164,11 @@ struct HarnessView: View {
         // never be silently downgraded into a model message (dsh-client-ui-commands
         // matchEnter and its "a warmup failure rejects" rule, client.js:699-711).
         if store.isCommandLine(command) {
-            Task { await store.executeCommand(command) }
+            // Freeze the composer in this action's own turn, before the store's
+            // send suspends on the catalog: the command path must send this line
+            // and these attachments, whatever the editor holds when the catalog
+            // answers.
+            if let submission = store.composerSubmission() { Task { await store.executeCommand(submission) } }
             return
         }
         guard canSend else { return }
@@ -145,7 +176,8 @@ struct HarnessView: View {
         composerFocused = false
         #endif
         stickToBottom = true; scrollRequest += 1
-        Task { await store.submit() }
+        let submission = store.composerSubmission()
+        Task { await store.submit(snapshot: submission) }
     }
     private func resumeFollowing() {
         stickToBottom = true
@@ -249,6 +281,7 @@ struct HarnessView: View {
             .onChange(of: store.draft) { _, text in
                 commandIndex = 0; commandsDismissed = false
             }
+            .fullAccessConfirmation(store)
     }
     private var bottomPanel: some View {
         VStack(spacing: 0) {
@@ -320,10 +353,26 @@ struct HarnessView: View {
                     ForEach(store.catalog["groups"].array, id: \.pretty) { group in
                         Section(group["name"].string) {
                             ForEach(group["models"].array, id: \.pretty) { model in
-                                Button { Task { await store.selectModel(provider: group["id"].string, model: model["id"].string) } } label: {
-                                    if store.model["provider"].string == group["id"].string && store.model["model"].string == model["id"].string {
-                                        Label(model["name"].string, systemImage: "checkmark")
-                                    } else { Text(model["name"].string) }
+                                let modelID = model["id"].string
+                                let selectedModel = store.model["provider"].string == group["id"].string && store.model["model"].string == modelID
+                                let currentEffort = effectiveEffortID(selection: store.model, model: model)
+                                if reasoning(for: model) != nil {
+                                    Menu {
+                                        Button { Task { await store.selectModel(provider: group["id"].string, model: modelID, effort: selectedModel ? currentEffort : reasoning(for: model)?.defaultEffort) } } label: {
+                                            if selectedModel { Label(model["name"].string, systemImage: "checkmark") } else { Text(model["name"].string) }
+                                        }
+                                        ForEach(effortChoices(for: model), id: \.id) { choice in
+                                            Button { Task { await store.selectModel(provider: group["id"].string, model: modelID, effort: choice.effortID) } } label: {
+                                                if selectedModel && choice.effortID == currentEffort { Label(choice.label, systemImage: "checkmark") } else { Text(choice.label) }
+                                            }
+                                        }
+                                    } label: {
+                                        if selectedModel { Label(model["name"].string, systemImage: "checkmark") } else { Text(model["name"].string) }
+                                    }
+                                } else {
+                                    Button { Task { await store.selectModel(provider: group["id"].string, model: modelID, effort: nil) } } label: {
+                                        if selectedModel { Label(model["name"].string, systemImage: "checkmark") } else { Text(model["name"].string) }
+                                    }
                                 }
                             }
                         }
@@ -332,6 +381,37 @@ struct HarnessView: View {
                     HStack(spacing: 5) { Image(systemName: "cpu"); Text(store.modelLabel).lineLimit(1); Image(systemName: "chevron.down").font(.system(size: 8, weight: .bold)) }.font(.caption).foregroundStyle(.secondary)
                 }.disabled(!store.connected || store.selectingModel || store.usesNativeHarness)
                 if store.selectingModel { ProgressView().controlSize(.small) }
+                // B3: the blank-session preset switch. It is visible only
+                // while the Host says the selected session is still blank -
+                // sessionListMetadata.blank, never !running, never an empty
+                // transcript - and its label is the preset the Host accepted,
+                // not the picker's staged choice: a tap is a request, the
+                // projection is the fact.
+                if store.presetSwitcherVisible {
+                    Menu {
+                        ForEach(store.presetSwitcherOptions) { option in
+                            if let presetID = option.presetID {
+                                Button { Task { await store.selectPreset(presetID) } } label: {
+                                    if presetID == store.acceptedAgentPreset { Label(option.title, systemImage: "checkmark") } else { Text(option.title) }
+                                }.disabled(!option.selectable || store.switchingPreset || store.selectingModel)
+                            } else {
+                                Label(option.title, systemImage: "checkmark")
+                            }
+                        }
+                    } label: {
+                        HStack(spacing: 5) {
+                            if store.switchingPreset { ProgressView().controlSize(.small) } else { Image(systemName: "square.stack.3d.up") }
+                            Text(store.presetSwitcherLabel).lineLimit(1)
+                            Image(systemName: "chevron.down").font(.system(size: 8, weight: .bold))
+                        }.font(.caption).foregroundStyle(.secondary)
+                    }.disabled(!store.connected || store.switchingPreset || store.selectingModel)
+                    .accessibilityLabel(Text("Preset: " + store.presetSwitcherLabel))
+                }
+                // C3: the session's server-owned controls, side by side with
+                // the preset switch: DSH-only, always available while a
+                // session is selected, and the projection's own state - the
+                // menu is its options, the label its current value.
+                SessionControlChips(store: store)
                 Spacer(minLength: 0)
                 Button {
                     terminalInput.toggle()
@@ -462,7 +542,6 @@ struct InteractionView: View {
     @Environment(\.harnessTheme) private var theme
     @EnvironmentObject var store: PocketStore
     @Environment(\.agentPaneIsActive) private var activePane
-    @State private var confirmFullAccess = false
     let item: Interaction
     var decisionHandler: ((JSON) -> Void)? = nil
     @State private var answers: [String: String] = [:]
@@ -495,7 +574,7 @@ struct InteractionView: View {
                     VStack(alignment: .leading, spacing: 8) {
                         Button("Allow once") { answer(.string("allowed-once")) }.buttonStyle(.borderedProminent)
                         Button("Reject") { answer(.string("rejected")) }.buttonStyle(.bordered)
-                        Button("Full access…") { confirmFullAccess = true }.disabled(!store.supportsFullAccess)
+                        Button("Full access…") { store.requestFullAccess(.approval(item)) }.disabled(!store.supportsFullAccess)
                     }
                 }
                 if activePane { Text(store.supportsFullAccess ? "⌘↵ Allow once · ⌘⌫ Reject · ⌘⇧A Full access" : "⌘↵ Allow once · ⌘⌫ Reject").font(.caption2).foregroundStyle(.secondary) }
@@ -523,32 +602,20 @@ struct InteractionView: View {
                     answer(.object(["answers": .array(data)]))
                 }.buttonStyle(.borderedProminent).tint(theme.accent).disabled(!ready)
             }
-        }.padding(12).frame(maxWidth: .infinity, alignment: .leading).background(theme.accent.opacity(0.08), in: RoundedRectangle(cornerRadius: 18)).disabled(busy || !store.connected)
+        }.padding(12).frame(maxWidth: .infinity, alignment: .leading).background(theme.accent.opacity(0.08), in: RoundedRectangle(cornerRadius: 18)).disabled(busy || !store.connected || store.fullAccessExecuting)
         .background {
             if activePane && item.isApproval {
                 Button("") { answer(.string("allowed-once")) }.keyboardShortcut(.return, modifiers: .command).hidden().disabled(busy || !store.connected)
                 Button("") { answer(.string("rejected")) }.keyboardShortcut(.delete, modifiers: .command).hidden().disabled(busy || !store.connected)
-                Button("") { confirmFullAccess = true }.keyboardShortcut("a", modifiers: [.command, .shift]).hidden().disabled(busy || !store.connected || !store.supportsFullAccess)
+                Button("") { store.requestFullAccess(.approval(item)) }.keyboardShortcut("a", modifiers: [.command, .shift]).hidden().disabled(busy || !store.connected || !store.supportsFullAccess)
             }
-        }
-        .alert("Enable full access for this session?", isPresented: $confirmFullAccess) {
-            Button("Cancel", role: .cancel) {}
-            Button("Enable and allow this request", role: .destructive) {
-                busy = true
-                Task {
-                    if await store.enableFullAccess(for: item) { await store.answer(item, value: .string("allowed-once")) }
-                    busy = false
-                }
-            }
-        } message: {
-            Text("The agent may change files and run external commands without further permission prompts in this session. Other sessions are unchanged.")
         }
     }
     private var approvalButtons: some View {
         HStack(spacing: 10) {
             Button("Allow once") { answer(.string("allowed-once")) }.buttonStyle(.borderedProminent).tint(theme.accent)
             Button("Reject") { answer(.string("rejected")) }.buttonStyle(.bordered)
-            Button("Full access…") { confirmFullAccess = true }.disabled(!store.supportsFullAccess).buttonStyle(.borderless)
+            Button("Full access…") { store.requestFullAccess(.approval(item)) }.disabled(!store.supportsFullAccess).buttonStyle(.borderless)
         }
     }
     private func answer(_ value: JSON) { guard !busy, store.connected else { return }; if let decisionHandler { decisionHandler(value); return }; busy = true; Task { await store.answer(item, value: value); busy = false } }
@@ -944,8 +1011,15 @@ private struct ModelPaletteView: View {
     private func choose(_ option: Option) {
         guard store.connected, !store.selectingModel else { return }
         failure = nil
+        let modelRow = catalogModel(provider: option.provider, model: option.model, catalog: store.catalog)
+        let isSame = store.model["provider"].string == option.provider && store.model["model"].string == option.model
+        // Same model keeps its current effort; switching to a new model uses that
+        // model's advertised default (nil = provider default, the field omitted).
+        let effort: String? = isSame
+            ? modelRow.flatMap { effectiveEffortID(selection: store.model, model: $0) }
+            : modelRow.flatMap { reasoning(for: $0)?.defaultEffort }
         Task {
-            await store.selectModel(provider: option.provider, model: option.model)
+            await store.selectModel(provider: option.provider, model: option.model, effort: effort)
             if store.model["provider"].string == option.provider && store.model["model"].string == option.model && store.error == nil {
                 dismiss()
             } else { failure = store.error ?? "Model selection was not confirmed. Try again." }
@@ -1059,6 +1133,40 @@ private final class PaletteTextField: UITextField {
     @objc private func closePalette() { cancel?() }
 }
 
+/// The escalation question of one store, rendered wherever that store's UI is.
+///
+/// The question belongs to a store and not to the app: a desktop workspace
+/// renders one `PocketStore` per pane (`WorkspaceModel.render`), so a question
+/// asked in a split pane would never be seen if only the app's own store could
+/// present it - and the approval card's button used to own a local alert that
+/// worked in any pane. Both routes publish the same pending confirmation into
+/// their own store, and `FullAccessPolicy` supplies the strings, so every pane
+/// asks the same question exactly once.
+///
+/// Presentation only: the pending value is the store's, each button ends it
+/// through the store, and a dismissal that carries no decision (a session
+/// switch, a reconnect, a teardown) ends it there - a closed alert never leaves
+/// an action armed.
+struct FullAccessConfirmationAlert: ViewModifier {
+    @ObservedObject var store: PocketStore
+    func body(content: Content) -> some View {
+        content.alert(FullAccessPolicy.title, isPresented: Binding(get: { store.accessConfirmation != nil }, set: { _ in }),
+                      presenting: store.accessConfirmation) { pending in
+            Button(FullAccessPolicy.cancelLabel, role: .cancel) { store.cancelFullAccess(pending.id) }
+            Button(pending.enableLabel, role: .destructive) { Task { await store.confirmFullAccess(pending.id) } }
+        } message: { _ in
+            Text(FullAccessPolicy.message)
+        }
+    }
+}
+
+extension View {
+    /// Present one store's pending escalation question on that store's surface.
+    func fullAccessConfirmation(_ store: PocketStore) -> some View {
+        modifier(FullAccessConfirmationAlert(store: store))
+    }
+}
+
 #if DEBUG
 struct ApprovalKeyboardPreview: View {
     @StateObject private var store = PocketStore()
@@ -1073,6 +1181,7 @@ struct ApprovalKeyboardPreview: View {
                 .environmentObject(store).frame(maxWidth: 560)
             Text(decision).accessibilityIdentifier("previewDecision")
         }.padding(30).task { store.connected = true; store.interactions = [item, item, item] }
+            .fullAccessConfirmation(store)
     }
 }
 #endif
