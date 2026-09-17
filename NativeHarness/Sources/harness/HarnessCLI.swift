@@ -21,7 +21,10 @@ import Darwin
                 signal(SIGINT, SIG_IGN); signal(SIGTERM, SIG_IGN)
                 let signals = [SIGINT, SIGTERM].map { number in
                     let source = DispatchSource.makeSignalSource(signal: number, queue: .global())
-                    source.setEventHandler { Task { await host.stop(); exit(0) } }; source.resume(); return source
+                    // Like the CLI interruption handler below, this runs off
+                    // MainActor on a global queue; without @Sendable Swift can
+                    // inherit main() isolation and trap in the handler.
+                    source.setEventHandler(handler: { @Sendable in Task { await host.stop(); exit(0) } }); source.resume(); return source
                 }
                 while true {
                     try await Task.sleep(for: .seconds(3600))
