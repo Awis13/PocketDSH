@@ -274,7 +274,7 @@ struct NativeShellPane: View {
                         if client.shellRunning {
                             Button("Focus terminal") { closeFind(); focus = nil; client.terminal.requestInputFocus() }
                             Button("Interrupt · Ctrl+C") { client.interruptCommand() }.accessibilityIdentifier("interruptShell")
-                            Button("Watch with agent") { ask("Inspect the running command using terminal_inspect, terminal_read and terminal_wait. Follow its progress and report the result without running additional commands.") }
+                            Button("Watch with agent") { askAgent("Inspect the running command using terminal_inspect, terminal_read and terminal_wait. Follow its progress and report the result without running additional commands.") }
                         }
                     }.font(.caption).foregroundStyle(.secondary)
                     HStack(alignment: .top) {
@@ -284,7 +284,7 @@ struct NativeShellPane: View {
                             suggestionsVisible: !completions.isEmpty,
                             moveSuggestion: moveCompletion, completeSuggestion: acceptCompletion, dismissSuggestions: dismissCompletion,
                             accessibilityName: "Shell command or agent question", accessibilityID: "shellComposer",
-                            sendToAgent: store.currentInteractions.isEmpty ? { ask(store.draft) } : nil,
+                            sendToAgent: store.currentInteractions.isEmpty ? { askAgent(store.draft) } : nil,
                             interruptCommand: client.shellRunning ? { client.interruptCommand() } : nil,
                             yieldFocusOnSend: !NativeCompactionInfo.isEditorCommand(store.draft, terminalRunning: client.shellRunning), allowsRequestedFocus: !findVisible && (!client.shellRunning || !store.shellAttachments.isEmpty),
                             shellCompletion: client.shellRunning ? nil : requestCompletion,
@@ -300,9 +300,9 @@ struct NativeShellPane: View {
                             } : nil, send: run)
                     }.disabled(!client.connected)
                     HStack {
-                        Text(client.shellExited ? "Shell exited · agent is available" : client.shellRunning ? "Enter sends input · ⌘Enter asks agent" : "Enter runs · Shift+Enter newline · ⌘Enter asks agent")
+                        Text(client.shellExited ? "Shell exited · agent is available" : client.shellRunning ? "Enter sends input · ⌘Enter asks agent" : "Enter runs · ⌘Enter asks agent")
                         Spacer()
-                        Button("Ask agent") { ask(store.draft) }.disabled(store.draft.isEmpty && store.shellAttachments.isEmpty)
+                        Button("Ask agent") { askAgent(store.draft) }.disabled(store.draft.isEmpty && store.shellAttachments.isEmpty)
                         Button(client.shellRunning ? "Send input" : "Run") { run() }.disabled(store.draft.isEmpty || client.shellExited)
                     }.font(.caption).foregroundStyle(.secondary)
                 }.padding(20)
@@ -443,6 +443,25 @@ struct NativeShellPane: View {
         if client.shellRunning { client.input(Data((text + "\r").utf8)); store.draft = "" }
         else { client.prepareForCommand(width: viewportWidth - 48, height: inlineTerminalHeight); client.shellDraft = text; client.runShell(); if client.shellDraft.isEmpty { store.draft = "" } }
         resumeFollowing()
+    }
+    /// Command-Enter and the Ask-agent button. On the native leg this is the
+    /// store's shell-ask path, unchanged. On the DSH leg that path needs the
+    /// store's native connection, which only the native leg has, so the line
+    /// takes the chat composer's own typed-line resolution: a command line to
+    /// the Host's command registry, every other line the ordinary message path
+    /// - frozen in a snapshot like every other send.
+    private func askAgent(_ text: String) {
+        guard !store.usesNativeHarness else { ask(text); return }
+        dismissCompletion(); history.reset()
+        let line = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !line.isEmpty else { return }
+        if store.isCommandLine(line) {
+            if let submission = store.composerSubmission() { Task { await store.executeCommand(submission) } }
+            return
+        }
+        guard store.connected, store.selectedID != nil, !store.submitting else { return }
+        if let submission = store.composerSubmission() { Task { await store.submit(snapshot: submission) } }
+        resumeFollowing(); focus = UUID()
     }
     private func ask(_ text: String) {
         if NativeCompactionInfo.isEditorCommand(text, terminalRunning: client.shellRunning) {

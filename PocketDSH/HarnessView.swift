@@ -146,6 +146,26 @@ struct HarnessView: View {
     private var canSend: Bool {
         (!store.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !store.images.isEmpty) && !store.submitting && !store.preparingImages && !store.selectingModel && !store.switchingPreset && store.connected && store.selectedID != nil
     }
+    /// Where this composer's plain Return goes, from the shared table: the
+    /// shell only while a terminal is reachable and its input mode is active,
+    /// the agent in every state the table leaves unchanged. Command-Return
+    /// keeps the agent closure it always had.
+    private var plainReturnTarget: ComposerReturnTarget {
+        ComposerKeyRouting.plainReturn(backend: composerBackend, terminalAvailable: store.supportsShell, terminalInput: terminalInput)
+    }
+    /// The plain-Return shell target: the typed line goes to the backend's
+    /// shell the way the shell pane runs it - raw input while a command holds
+    /// the terminal, a fresh shell run otherwise.
+    private func sendToShell() {
+        let shell = store.nativeShell
+        guard let shell, !shell.shellExited else { return }
+        let text = store.draft
+        if shell.shellRunning {
+            shell.input(Data((text + "\r").utf8)); store.draft = ""
+        } else {
+            shell.shellDraft = text; shell.runShell(); if shell.shellDraft.isEmpty { store.draft = "" }
+        }
+    }
     private func sendPrompt() {
         if !commandMatches.isEmpty {
             runCommand(commandMatches[min(commandIndex, commandMatches.count - 1)]); return
@@ -442,7 +462,7 @@ struct HarnessView: View {
             HStack(alignment: .top, spacing: 8) {
             if terminalInput { Text("❯").font(.system(size: 16, weight: .semibold, design: .monospaced)).foregroundStyle(theme.accent).padding(.top, desktopComposer ? 8 : 0).accessibilityHidden(true) }
             if desktopComposer {
-            DesktopPromptEditor(text: $store.draft, focusRequest: $store.composerFocusRequest, collapsed: store.readingMode, ink: theme.ink, monospaced: terminalInput, textSize: theme.messageSize, textShadow: theme.glassSettings.shadow, suggestionsVisible: !commandMatches.isEmpty, moveSuggestion: moveCommand, completeSuggestion: completeCommand, dismissSuggestions: { commandsDismissed = true }, sendToAgent: store.currentInteractions.isEmpty ? sendPrompt : nil, send: sendPrompt)
+            DesktopPromptEditor(text: $store.draft, focusRequest: $store.composerFocusRequest, collapsed: store.readingMode, ink: theme.ink, monospaced: terminalInput, textSize: theme.messageSize, textShadow: theme.glassSettings.shadow, suggestionsVisible: !commandMatches.isEmpty, moveSuggestion: moveCommand, completeSuggestion: completeCommand, dismissSuggestions: { commandsDismissed = true }, sendToAgent: store.currentInteractions.isEmpty ? sendPrompt : nil, send: plainReturnTarget == .shell ? sendToShell : sendPrompt)
                 .fixedSize(horizontal: false, vertical: true)
             } else {
             TextField(terminalInput ? "Message agent… /model · /view" : "Give your agent a task…", text: $store.draft, axis: .vertical)

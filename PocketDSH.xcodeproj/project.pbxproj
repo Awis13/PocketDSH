@@ -14,6 +14,7 @@
 		13443C8B349B1CD6D521EA13 /* ModelSelection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 819FDF045F1400915EF4839D /* ModelSelection.swift */; };
 		17DB52B0576409D2EA9E2C0C /* SymbolsNerdFontMono-Regular.ttf in Resources */ = {isa = PBXBuildFile; fileRef = 0C0F59F2281C005DD28D2339 /* SymbolsNerdFontMono-Regular.ttf */; };
 		2BE9481F5EB86B12C151E7FD /* ImageAttachments.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8742D0DC00E6185285EF6EC5 /* ImageAttachments.swift */; };
+		30156B2E7F5DF4543C4F1908 /* ComposerKeyRouting.swift in Sources */ = {isa = PBXBuildFile; fileRef = 666C8D6B2DDBE0039CECE986 /* ComposerKeyRouting.swift */; };
 		345F4C2A79471DA5B8166E63 /* NativeWire.swift in Sources */ = {isa = PBXBuildFile; fileRef = D076E5E178FC4C8000A2C6BC /* NativeWire.swift */; };
 		391D0771BA57659D7EADCA65 /* NativeTerminalView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2E6534119C5B17C6485507CB /* NativeTerminalView.swift */; };
 		40BBF01895004C9E8FAC5FE0 /* HarnessAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = 213F6D56A815333905F5F393 /* HarnessAPI.swift */; };
@@ -96,6 +97,7 @@
 		56106B6E42C165653F7CEDA4 /* QueueDockView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QueueDockView.swift; sourceTree = "<group>"; };
 		593C682889E4875C24A776FF /* RemoteStreamConnection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteStreamConnection.swift; sourceTree = "<group>"; };
 		5BA7754331250B9CF01F8A4F /* TurnNotificationState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TurnNotificationState.swift; sourceTree = "<group>"; };
+		666C8D6B2DDBE0039CECE986 /* ComposerKeyRouting.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerKeyRouting.swift; sourceTree = "<group>"; };
 		69A98018D6A145FAF016AB93 /* TerminalPresentation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalPresentation.swift; sourceTree = "<group>"; };
 		6DA2E6D500176C6992989EE1 /* HomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeView.swift; sourceTree = "<group>"; };
 		819FDF045F1400915EF4839D /* ModelSelection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelSelection.swift; sourceTree = "<group>"; };
@@ -176,6 +178,7 @@
 				486CDE1EAA2F792AC9153AB0 /* AssistantMarkdown.swift */,
 				1257454757A244737686E29E /* CommandCatalog.swift */,
 				45CB0496F0D0E83DA4BC8F39 /* ComposerCommandRouting.swift */,
+				666C8D6B2DDBE0039CECE986 /* ComposerKeyRouting.swift */,
 				E44B318D23987DA240BA7317 /* ComposerSubmission.swift */,
 				F88F3CD3883D2F6BFE7D5AE7 /* ConnectionView.swift */,
 				4536C46B3F5C4076165E8409 /* ContextStatusView.swift */,
@@ -372,6 +375,7 @@
 				FE7F024F37CCF50D8A612C40 /* AssistantMarkdown.swift in Sources */,
 				73D3D093291C0C1068444FCD /* CommandCatalog.swift in Sources */,
 				4DC609D7909E1E9BC2D8AC74 /* ComposerCommandRouting.swift in Sources */,
+				30156B2E7F5DF4543C4F1908 /* ComposerKeyRouting.swift in Sources */,
 				5F0BE3F9C6B8F326C84C8411 /* ComposerSubmission.swift in Sources */,
 				C103524CD83608A91CE30F86 /* ConnectionView.swift in Sources */,
 				B3E5A6229657B8C03CA87DEB /* ContextStatusView.swift in Sources */,

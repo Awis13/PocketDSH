@@ -40,6 +40,11 @@ xcrun swiftc -target "${CATALYST_TARGET}" -Fsystem "${IOSUPPORT}/System/Library/
 # restate is NativeCompactionInfo's, checked by Tests/NativeContextChecks.swift.
 xcrun swiftc -parse-as-library PocketDSH/HarnessProtocol.swift PocketDSH/CommandCatalog.swift PocketDSH/ComposerCommandRouting.swift Tests/ComposerCommandRoutingChecks.swift -o .build/checks/composer-command-routing-checks
 .build/checks/composer-command-routing-checks
+# The key-routing check compiles the production Return-key table with the
+# production backend enum, so the composer's plain-Enter and Command-Enter
+# decisions (DSH-TERMINAL C4) are checked, not restated.
+xcrun swiftc -parse-as-library PocketDSH/HarnessProtocol.swift PocketDSH/CommandCatalog.swift PocketDSH/ComposerCommandRouting.swift PocketDSH/ComposerKeyRouting.swift Tests/ComposerKeyRoutingChecks.swift -o .build/checks/composer-key-routing-checks
+.build/checks/composer-key-routing-checks
 # The Remote stream coordinator is the production code PocketStore drives; the
 # check compiles and exercises it, not a copy of its identity rules. Its live
 # probe stays opt-in through DSH_STREAM_CHECK_COOKIE / DSH_LIVE_LOG.
