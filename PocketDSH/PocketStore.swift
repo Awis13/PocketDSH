@@ -143,6 +143,16 @@ final class PocketStore: ObservableObject {
         continuation.resume(returning: result)
     }
     @Published var nativeShell: NativeClient?
+    /// DSH-leg Pocket Terminal carrier: mints the per-session attach ticket,
+    /// maps the attach frames onto the shell, and carries the shell’s input /
+    /// resize / interrupt back through the plugin’s unary Remote methods.
+    private var terminalCarrier: PocketTerminalCarrier?
+    /// True once the Pocket Terminal plugin minted a ticket for the session.
+    /// Together with the native leg this forms the shell capability (supportsShell).
+    @Published var dshTerminalAvailable = false
+    /// A shell is reachable on this backend: the native leg always, or the DSH
+    /// leg when the Pocket Terminal plugin is loaded.
+    var supportsShell: Bool { usesNativeHarness || dshTerminalAvailable }
     @Published private var shellContextDrafts: [String: [ShellContextAttachment]] = [:]
     @Published private var shellDiffDrafts: [String: [ShellDiffAttachment]] = [:]
     @Published private var shellBlockSelections: [String: String] = [:]
@@ -690,6 +700,10 @@ final class PocketStore: ObservableObject {
                 guard transcript.append(value["event"]) else { try await followSelected(); return }
             }
             rows = assistantLive.merged(with: transcript.rows); reconcilePending()
+        } else if delivery.kind == .terminal {
+            // The attach stream's frames (open/data/block/exit) are the shell
+            // wire: the carrier maps them onto the native client the pane renders.
+            terminalCarrier?.receive(value)
         }
     }
     /// Fold a baseline block into this session's store. A control baseline
@@ -1007,7 +1021,52 @@ final class PocketStore: ObservableObject {
         loadingHistory = true
         conversationFollowObservation?(id)
         try await carrier.subscribe(.conversation, endpoint: "session/follow", args: ["request": .object(["address": .object(["kind": .string("session"), "sessionId": .string(id)]), "maxMessages": .number(50), "assistantStream": .bool(true)])], on: transport)
+        // The Pocket Terminal rides this same follow: on the DSH leg, mint a
+        // per-session ticket and, when the plugin is loaded, attach its stream
+        // and expose the shell. A session switch re-fires this with a fresh ID.
+        await attachTerminalIfNeeded(id: id, on: transport)
     }
+
+    /// DSH leg only: mint the per-session attach ticket (the capability probe)
+    /// and, when the plugin is present, subscribe the terminal stream and
+    /// create the shell. The ticket is scoped to the session (the plugin's
+    /// TicketStore), so every follow re-mints it; the replay cursor resumes for
+    /// the same session and resets for a new one (the carrier handles both).
+    private func attachTerminalIfNeeded(id: String, on transport: RemoteStreamTransport) async {
+        guard !usesNativeHarness, let api else { dshTerminalAvailable = false; return }
+        let tc = terminalCarrier ?? PocketTerminalCarrier(api: api)
+        terminalCarrier = tc
+        do {
+            guard let ticket = await tc.probe(session: id) else {
+                dshTerminalAvailable = false
+                return
+            }
+            try await carrier.subscribe(.terminal, endpoint: "pocketTerminal/attach",
+                args: ["sessionId": .string(id), "ticket": .string(ticket),
+                       "since": .number(Double(tc.since)), "cols": .number(80), "rows": .number(24)],
+                on: transport)
+            dshTerminalAvailable = true
+            ensureNativeShell(id, ticket: ticket)
+        } catch {
+            dshTerminalAvailable = false
+        }
+    }
+
+    /// Create the shell client for the DSH leg (mirroring the native leg's
+    /// creation on op=="opened") and route its outbound commands through the
+    /// terminal carrier instead of the native socket.
+    private func ensureNativeShell(_ id: String, ticket: String) {
+        if nativeShell?.id != id {
+            let shell = NativeClient(id: id, endpoint: endpoint, token: "")
+            shell.externalSend = { [weak self] command in
+                guard let self, self.selectedID == command.session else { return }
+                Task { await self.terminalCarrier?.send(command) }
+            }
+            nativeShell = shell
+        }
+        terminalCarrier?.shell = nativeShell
+    }
+
     func loadOlder() async {
         guard let api, let id = selectedID, let beforeSeq = transcript.firstSeq, !loadingHistory else { return }
         // The history page belongs to the conversation stream it was started

@@ -10,7 +10,7 @@ import Foundation
 /// matched again - that is what makes a late frame of the replaced stream
 /// harmless instead of a second source of truth for the same UI.
 struct HarnessStreamSet {
-    enum Kind: String, CaseIterable { case events, workspaces, control, conversation }
+    enum Kind: String, CaseIterable { case events, workspaces, control, conversation, terminal }
 
     private var ids: [Kind: String] = [:]
 

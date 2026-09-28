@@ -40,12 +40,24 @@ xcrun swiftc -target "${CATALYST_TARGET}" -Fsystem "${IOSUPPORT}/System/Library/
 # restate is NativeCompactionInfo's, checked by Tests/NativeContextChecks.swift.
 xcrun swiftc -parse-as-library PocketDSH/HarnessProtocol.swift PocketDSH/CommandCatalog.swift PocketDSH/ComposerCommandRouting.swift Tests/ComposerCommandRoutingChecks.swift -o .build/checks/composer-command-routing-checks
 .build/checks/composer-command-routing-checks
+# The key-routing check compiles the production Return-key table with the
+# production backend enum, so the composer's plain-Enter and Command-Enter
+# decisions (DSH-TERMINAL C4) are checked, not restated.
+xcrun swiftc -parse-as-library PocketDSH/HarnessProtocol.swift PocketDSH/CommandCatalog.swift PocketDSH/ComposerCommandRouting.swift PocketDSH/ComposerKeyRouting.swift Tests/ComposerKeyRoutingChecks.swift -o .build/checks/composer-key-routing-checks
+.build/checks/composer-key-routing-checks
 # The Remote stream coordinator is the production code PocketStore drives; the
 # check compiles and exercises it, not a copy of its identity rules. Its live
 # probe stays opt-in through DSH_STREAM_CHECK_COOKIE / DSH_LIVE_LOG.
 rm -f .build/checks/stream-checks
 xcrun swiftc -parse-as-library PocketDSH/HarnessProtocol.swift PocketDSH/HarnessAPI.swift PocketDSH/RemoteStreamConnection.swift Tests/HarnessStreamChecks.swift -o .build/checks/stream-checks
 .build/checks/stream-checks
+# The Pocket Terminal carrier drives the production types: the C2 attach frame
+# -> NativeEvent map and the NativeCommand -> plugin-method map are exercised
+# through the real carrier and a parked HarnessAPI. The carrier references
+# NativeClient, so it builds for Mac Catalyst like the production-store checks.
+rm -f .build/checks/pocket-terminal-checks
+xcrun swiftc -target "${CATALYST_TARGET}" -Fsystem "${IOSUPPORT}/System/Library/Frameworks" -parse-as-library -I .build/checks -L .build/checks -lSwiftTerm -Xlinker -rpath -Xlinker @loader_path $(ls PocketDSH/*.swift | grep -v "PocketDSHApp.swift") .build/checks/PocketDSHApp.nomain.swift Shared/NativeWire.swift Tests/PocketTerminalChecks.swift -o .build/checks/pocket-terminal-checks
+.build/checks/pocket-terminal-checks
 # The model-selection check drives the production PocketStore: its selectModel,
 # refresh, select and disconnect paths run unchanged on a parked transport, so
 # the ownership, liveness and accepted-response rules are exercised on the
