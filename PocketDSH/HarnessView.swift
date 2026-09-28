@@ -121,9 +121,9 @@ struct HarnessView: View {
     }
     @AppStorage("harness.terminalInput") private var savedTerminalInput = false
     private var terminalInput: Bool {
-        get { store.usesNativeHarness ? false : savedTerminalInput }
+        get { store.supportsShell ? false : savedTerminalInput }
         nonmutating set {
-            if store.usesNativeHarness { nativePanelTerminal?.wrappedValue = newValue }
+            if store.supportsShell { nativePanelTerminal?.wrappedValue = newValue }
             else { savedTerminalInput = newValue }
         }
     }

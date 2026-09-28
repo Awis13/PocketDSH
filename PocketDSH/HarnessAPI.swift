@@ -119,6 +119,27 @@ class HarnessAPI {
         guard !text.isEmpty else { throw HarnessError(message: "No speech detected. Try recording again.") }
         return text
     }
+    /// Mint the Pocket Terminal attach ticket for a session (the capability
+    /// probe). A 404 means the plugin is not loaded on this host; any other
+    /// failure keeps the plain message. Returns the ticket string.
+    func authTicket(session: String) async throws -> String {
+        var r = request("pocket-terminal/auth")
+        r.httpMethod = "POST"
+        r.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        r.httpBody = try JSONEncoder().encode(JSON.object(["sessionId": .string(session)]))
+        let (data, response) = try await self.session.data(for: r)
+        guard let response = response as? HTTPURLResponse else { throw HarnessError(message: "No response from DSH") }
+        if response.statusCode == 401 { throw HarnessError(message: "Sign in again with a fresh DSH launch URL in Connection settings.") }
+        let result = try JSON.decodeWire(data)
+        guard response.statusCode == 200 else {
+            if response.statusCode == 404 { throw HarnessError(message: "Enable the Pocket Terminal plugin on your DSH host.") }
+            let message = result["error"].string
+            throw HarnessError(message: message.isEmpty ? "Pocket terminal is unavailable on your DSH host." : message)
+        }
+        let ticket = result["ticket"].string
+        guard !ticket.isEmpty else { throw HarnessError(message: "Pocket terminal did not return a ticket.") }
+        return ticket
+    }
     func socket() -> URLSessionWebSocketTask {
         var r = request("api/remote.mux")
         var c = URLComponents(url: r.url!, resolvingAgainstBaseURL: false)!

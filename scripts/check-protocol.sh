@@ -46,6 +46,13 @@ xcrun swiftc -parse-as-library PocketDSH/HarnessProtocol.swift PocketDSH/Command
 rm -f .build/checks/stream-checks
 xcrun swiftc -parse-as-library PocketDSH/HarnessProtocol.swift PocketDSH/HarnessAPI.swift PocketDSH/RemoteStreamConnection.swift Tests/HarnessStreamChecks.swift -o .build/checks/stream-checks
 .build/checks/stream-checks
+# The Pocket Terminal carrier drives the production types: the C2 attach frame
+# -> NativeEvent map and the NativeCommand -> plugin-method map are exercised
+# through the real carrier and a parked HarnessAPI. The carrier references
+# NativeClient, so it builds for Mac Catalyst like the production-store checks.
+rm -f .build/checks/pocket-terminal-checks
+xcrun swiftc -target "${CATALYST_TARGET}" -Fsystem "${IOSUPPORT}/System/Library/Frameworks" -parse-as-library -I .build/checks -L .build/checks -lSwiftTerm -Xlinker -rpath -Xlinker @loader_path $(ls PocketDSH/*.swift | grep -v "PocketDSHApp.swift") .build/checks/PocketDSHApp.nomain.swift Shared/NativeWire.swift Tests/PocketTerminalChecks.swift -o .build/checks/pocket-terminal-checks
+.build/checks/pocket-terminal-checks
 # The model-selection check drives the production PocketStore: its selectModel,
 # refresh, select and disconnect paths run unchanged on a parked transport, so
 # the ownership, liveness and accepted-response rules are exercised on the

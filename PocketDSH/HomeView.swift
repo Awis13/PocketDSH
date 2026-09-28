@@ -342,7 +342,7 @@ struct DesktopPaneView: View {
                     }
                 }
                 Spacer(minLength: 12)
-                if store.usesNativeHarness, store.selectedID != nil {
+                if store.supportsShell, store.selectedID != nil {
                     Picker("Panel mode", selection: $store.nativeShellMode) {
                         Text("Chat").tag(false)
                         Text("Shell").tag(true)
